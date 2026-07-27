@@ -793,7 +793,7 @@ function Plugin:restore_original(path)
 end
 
 -- 重置本书:清该书所有同步缓存/想法/映射 + 还原原书(若有注入)。
--- 双重确认(破坏性)。回到"未同步+原版书"状态,绑定保留。重新同步即可恢复。
+-- 双重确认(破坏性)。回到"未同步+原版书"状态,保留绑定关系。重新同步即可恢复。
 local RESET_TARGETS = {"sync-cache", "thoughts", "thoughts.db", "thoughts.db-wal", "thoughts.db-shm"}
 
 function Plugin:reset_book_data(path)
@@ -806,9 +806,9 @@ function Plugin:reset_book_data(path)
     local book_dir = bound and self.store:book_dir(bound.book_id) or nil
     local lines = {}
     if book_dir then lines[#lines+1] = "• 清同步缓存/想法数据库/章节映射" end
-    if has_orig then lines[#lines+1] = "• 还原原书(移除划线注入)" end
+    if has_orig then lines[#lines+1] = "• 还原原书(移除书内划线)" end
     UIManager:show(ConfirmBox:new{
-        text = string.format("将重置《%s》:\n\n%s\n\n绑定保留,重新同步即可恢复。", title, table.concat(lines, "\n")),
+        text = string.format("将重置《%s》:\n\n%s\n\n保留绑定关系,重新同步即可恢复。", title, table.concat(lines, "\n")),
         ok_text = "继续",
         ok_callback = function()
             UIManager:show(ConfirmBox:new{
@@ -873,7 +873,7 @@ end
 -- 重置全部书籍:清所有 book_dir 数据 + 还原所有有备份的原书。
 function Plugin:clear_all_data()
     UIManager:show(ConfirmBox:new{
-        text = "将重置所有书:\n\n• 清全部书的同步缓存/想法/映射\n• 还原所有注入书为原版\n\n绑定保留,各书需重新同步。",
+        text = "将重置所有书:\n\n• 清全部书的同步缓存/想法/映射\n• 还原所有注入书为原版\n\n保留绑定关系,各书需重新同步。",
         ok_text = "继续",
         ok_callback = function()
             UIManager:show(ConfirmBox:new{
