@@ -118,7 +118,7 @@ function Plugin:reader_menu()
             items[#items+1]={text=string.format("继续拉取后续章节(还剩 %d 章)",state.pending),
                 callback=self:safe("continue_sync",function() self:sync_entry(doc_path,"sync") end)}
         end
-        items[#items+1]={text="重置撷思数据(清缓存/想法)",callback=self:safe("reset",function() self:reset_book_data(doc_path) end)}
+        items[#items+1]={text="清理本书数据",callback=self:safe("reset",function() self:reset_book_data(doc_path) end)}
     end
     if doc_path and self:_has_reinject_cache(doc_path) then
         items[#items+1]={text="重新注入(用上次数据,离线)",callback=self:safe("reinject",function() self:sync_entry(doc_path,"reinject") end)}
@@ -180,7 +180,7 @@ function Plugin:book_actions(path)
             rows[#rows+1]={{text=string.format("继续拉取后续章节(还剩 %d 章)",state.pending),
                 callback=act(function() self:sync_entry(path,"sync") end)}}
         end
-        rows[#rows+1]={{text="重置撷思数据(清缓存/想法)",callback=act(function() self:reset_book_data(path) end)}}
+        rows[#rows+1]={{text="清理本书数据",callback=act(function() self:reset_book_data(path) end)}}
     end
     if self:_has_reinject_cache(path) then
         rows[#rows+1]={{text="重新注入(用上次数据,离线)",callback=act(function() self:sync_entry(path,"reinject") end)}}
@@ -328,6 +328,7 @@ end
 function Plugin:update_about_menu()
     return {
         {text="检查更新",callback=self:safe("update",function() self:check_update() end)},
+        {text="清理全部书籍数据",callback=self:safe("clear_all",function() self:clear_all_data() end)},
         {text="当前版本 · "..tostring(self.version),enabled=false},
         {text="关于",callback=self:safe("about",function() self:show_about() end)},
     }
@@ -777,8 +778,10 @@ function Plugin:restore_original(path)
     })
 end
 
--- 重置撷思数据:清该书的所有同步缓存/想法/映射,回到"未同步"状态。
+-- 清理本书数据:清该书的所有同步缓存/想法/映射,回到"未同步"状态。
 -- 双重确认(破坏性)。绑定保留,书文件不动(要还原原书用「还原原书」)。
+local RESET_TARGETS = {"sync-cache", "thoughts", "thoughts.db", "thoughts.db-wal", "thoughts.db-shm"}
+
 function Plugin:reset_book_data(path)
     path = path or self:current_doc_path()
     if not path then self:info("请先选择一本书"); return end
@@ -787,12 +790,12 @@ function Plugin:reset_book_data(path)
     local book_dir = self.store:book_dir(bound.book_id)
     local title = self:doc_title_guess(path)
     UIManager:show(ConfirmBox:new{
-        text = "将清除《"..title.."》的全部撷思数据:\n\n• 同步断点缓存(sync-cache)\n• 想法数据库(thoughts.db)\n• 章节映射缓存\n\n绑定关系保留,书本文件不动。\n清理后需重新同步才能恢复想法。",
+        text = "将清理《"..title.."》的撷思数据:\n\n• 同步断点缓存(sync-cache)\n• 想法数据库(thoughts.db)\n• 章节映射缓存\n\n绑定关系保留,书文件不动。\n清理后需重新同步才能恢复。",
         ok_text = "继续",
         ok_callback = function()
             UIManager:show(ConfirmBox:new{
-                text = "再次确认:清除《"..title.."》的全部撷思数据?\n此操作不可撤销。",
-                ok_text = "确认清除",
+                text = "再次确认:清理《"..title.."》的全部数据?\n此操作不可撤销。",
+                ok_text = "确认清理",
                 ok_callback = function()
                     self:_do_reset_book_data(book_dir, title)
                 end,
@@ -803,14 +806,70 @@ function Plugin:reset_book_data(path)
     })
 end
 
+function Plugin:_dir_size(path)
+    local lfs = require("libs/libkoreader-lfs")
+    local total = 0
+    local function walk(p)
+        for name in lfs.dir(p) do
+            if name ~= "." and name ~= ".." then
+                local full = p .. "/" .. name
+                local attr = lfs.attributes(full)
+                if attr and attr.mode == "file" then total = total + (attr.size or 0)
+                elseif attr and attr.mode == "directory" then walk(full) end
+            end
+        end
+    end
+    pcall(walk, path)
+    return total
+end
+
 function Plugin:_do_reset_book_data(book_dir, title)
+    local size_bytes = self:_dir_size(book_dir)
     local cleared = 0
-    for _, name in ipairs({"sync-cache", "thoughts", "thoughts.db", "thoughts.db-wal", "thoughts.db-shm"}) do
+    for _, name in ipairs(RESET_TARGETS) do
         if U.remove_tree(book_dir .. "/" .. name) then cleared = cleared + 1 end
     end
     Thoughts.clear_memory_cache()
     self._sync_state_cache = nil
-    self:info(string.format("已清除《%s》的撷思数据\n\n清理 %d 项,重新同步即可恢复", title, cleared))
+    self:info(string.format("已清理《%s》\n\n%d 项,约 %.1f MB\n重新同步即可恢复", title, cleared, size_bytes/1048576))
+end
+
+-- 清理全部书籍数据:遍历所有 book_dir,清缓存/想法/映射。
+function Plugin:clear_all_data()
+    UIManager:show(ConfirmBox:new{
+        text = "将清理所有书的撷思数据:\n\n• 全部书的同步缓存/想法/映射\n\n绑定关系保留,书文件不动。\n各书需重新同步。",
+        ok_text = "继续",
+        ok_callback = function()
+            UIManager:show(ConfirmBox:new{
+                text = "再次确认:清理全部书籍数据?\n此操作不可撤销。",
+                ok_text = "确认清理",
+                ok_callback = function() self:_do_clear_all() end,
+                cancel_text = "取消",
+            })
+        end,
+        cancel_text = "取消",
+    })
+end
+
+function Plugin:_do_clear_all()
+    local lfs = require("libs/libkoreader-lfs")
+    local root = self.store.cache_books_dir
+    local total_size, book_count = 0, 0
+    if lfs.attributes(root, "mode") == "directory" then
+        for name in lfs.dir(root) do
+            if name ~= "." and name ~= ".." then
+                local bd = root .. "/" .. name
+                if lfs.attributes(bd, "mode") == "directory" then
+                    total_size = total_size + self:_dir_size(bd)
+                    for _, n in ipairs(RESET_TARGETS) do U.remove_tree(bd .. "/" .. n) end
+                    book_count = book_count + 1
+                end
+            end
+        end
+    end
+    Thoughts.clear_memory_cache()
+    self._sync_state_cache = nil
+    self:info(string.format("已清理全部书籍数据\n\n%d 本书,约 %.1f MB\n各书重新同步即可恢复", book_count, total_size/1048576))
 end
 
 -- ===== 想法弹窗体系（点击 EPUB 锚点 → 弹窗）=====
