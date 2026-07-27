@@ -332,22 +332,48 @@ function Plugin:update_about_menu()
 end
 
 function Plugin:check_update()
-    self:online("update",function()
+    if not self:is_online() then self:info(_("Network unavailable")); return end
+    local Trapper=require("ui/trapper")
+    Trapper:wrap(function()
+        if not Trapper:info("正在检查更新…") then return end
         local m,e=self.updater:check()
-        if not m then self:info("检查更新失败：\n"..tostring(e)); return end
+        Trapper:clear()
+        if not m then self:_update_fail("检查更新失败：\n"..tostring(e or "未知错误")); return end
         if m.current then self:info("当前已是最新版本\n\n当前版本："..tostring(self.version)); return end
         local text="发现新版本："..tostring(m.version)
         if m.name and tostring(m.name)~="" then text=text.."\n"..tostring(m.name) end
         if m.notes and tostring(m.notes)~="" then text=text.."\n\n更新说明：\n"..tostring(m.notes) end
         text=text.."\n\n是否下载并安装？"
-        UIManager:show(ConfirmBox:new{text=text,ok_text="下载并安装",ok_callback=function()
-            self:online("install",function()
-                local path=self.updater:download(m)
-                local ok,er=self.updater:install(path,m)
-                if ok then self:info("更新已安装\n\n请完全退出并重新启动 KOReader。") else self:info("更新失败：\n"..tostring(er)) end
-            end)
-        end})
+        -- 推迟到协程外弹 ConfirmBox:Trapper 退出 + 菜单关闭各排一次重绘,
+        -- 同步弹的窗口会被顶掉(和文管选书操作面板同一类时序 bug)。
+        UIManager:nextTick(function()
+            UIManager:show(ConfirmBox:new{text=text,ok_text="下载并安装",
+                ok_callback=function() self:_do_update(m) end})
+        end)
     end)
+end
+
+function Plugin:_do_update(m)
+    local Trapper=require("ui/trapper")
+    Trapper:wrap(function()
+        if not Trapper:info("正在下载更新…\n(可能需要一点时间)") then return end
+        local path
+        local ok_dl,err=pcall(function() path=self.updater:download(m) end)
+        if not ok_dl or not path then
+            Trapper:clear()
+            self:_update_fail("下载失败：\n"..tostring(err or "未知错误"))
+            return
+        end
+        if not Trapper:info("正在安装更新…") then return end
+        local ok_inst,er=self.updater:install(path,m)
+        Trapper:clear()
+        if ok_inst then self:info("更新已安装\n\n请完全退出并重新启动 KOReader。")
+        else self:_update_fail("安装失败：\n"..tostring(er)) end
+    end)
+end
+
+function Plugin:_update_fail(text)
+    UIManager:show(InfoMessage:new{text=tostring(text or ""),flush_events_on_show=true})
 end
 
 function Plugin:show_about()
