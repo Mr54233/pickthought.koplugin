@@ -118,13 +118,12 @@ function Plugin:reader_menu()
             items[#items+1]={text=string.format("继续拉取后续章节(还剩 %d 章)",state.pending),
                 callback=self:safe("continue_sync",function() self:sync_entry(doc_path,"sync") end)}
         end
-        items[#items+1]={text="清理本书数据",callback=self:safe("reset",function() self:reset_book_data(doc_path) end)}
     end
     if doc_path and self:_has_reinject_cache(doc_path) then
         items[#items+1]={text="重新注入(用上次数据,离线)",callback=self:safe("reinject",function() self:sync_entry(doc_path,"reinject") end)}
     end
-    if doc_path and U.file_exists(doc_path..".orig") then
-        items[#items+1]={text="还原原书(移除划线注入)",callback=self:safe("restore",function() self:restore_original() end)}
+    if doc_bound or (doc_path and U.file_exists(doc_path..".orig")) then
+        items[#items+1]={text="重置本书(清数据+还原原版)",callback=self:safe("reset",function() self:reset_book_data(doc_path) end)}
     end
     items[#items+1]={text="账户",sub_item_table_func=function() return self:account_menu() end}
     items[#items+1]={text="设置",sub_item_table_func=function() return self:settings_menu() end}
@@ -185,8 +184,8 @@ function Plugin:book_actions(path)
     if self:_has_reinject_cache(path) then
         rows[#rows+1]={{text="重新注入(用上次数据,离线)",callback=act(function() self:sync_entry(path,"reinject") end)}}
     end
-    if U.file_exists(path..".orig") then
-        rows[#rows+1]={{text="还原原书(移除划线注入)",callback=act(function() self:restore_original(path) end)}}
+    if bound or U.file_exists(path..".orig") then
+        rows[#rows+1]={{text="重置本书(清数据+还原原版)",callback=act(function() self:reset_book_data(path) end)}}
     end
     rows[#rows+1]={{text=bound and "重新绑定微信读书" or "绑定微信读书",
         callback=act(function() self:bind_book(path) end)}}
@@ -328,7 +327,7 @@ end
 function Plugin:update_about_menu()
     return {
         {text="检查更新",callback=self:safe("update",function() self:check_update() end)},
-        {text="清理全部书籍数据",callback=self:safe("clear_all",function() self:clear_all_data() end)},
+        {text="重置全部书籍",callback=self:safe("clear_all",function() self:clear_all_data() end)},
         {text="当前版本 · "..tostring(self.version),enabled=false},
         {text="关于",callback=self:safe("about",function() self:show_about() end)},
     }
@@ -778,26 +777,30 @@ function Plugin:restore_original(path)
     })
 end
 
--- 清理本书数据:清该书的所有同步缓存/想法/映射,回到"未同步"状态。
--- 双重确认(破坏性)。绑定保留,书文件不动(要还原原书用「还原原书」)。
+-- 重置本书:清该书所有同步缓存/想法/映射 + 还原原书(若有注入)。
+-- 双重确认(破坏性)。回到"未同步+原版书"状态,绑定保留。重新同步即可恢复。
 local RESET_TARGETS = {"sync-cache", "thoughts", "thoughts.db", "thoughts.db-wal", "thoughts.db-shm"}
 
 function Plugin:reset_book_data(path)
     path = path or self:current_doc_path()
     if not path then self:info("请先选择一本书"); return end
     local bound = Binding.get(self.store, path)
-    if not bound then self:info("这本书未绑定微信读书,无撷思数据"); return end
-    local book_dir = self.store:book_dir(bound.book_id)
+    local has_orig = U.file_exists(path..".orig")
+    if not bound and not has_orig then self:info("这本书无撷思数据,也无原书备份"); return end
     local title = self:doc_title_guess(path)
+    local book_dir = bound and self.store:book_dir(bound.book_id) or nil
+    local lines = {}
+    if book_dir then lines[#lines+1] = "• 清同步缓存/想法数据库/章节映射" end
+    if has_orig then lines[#lines+1] = "• 还原原书(移除划线注入)" end
     UIManager:show(ConfirmBox:new{
-        text = "将清理《"..title.."》的撷思数据:\n\n• 同步断点缓存(sync-cache)\n• 想法数据库(thoughts.db)\n• 章节映射缓存\n\n绑定关系保留,书文件不动。\n清理后需重新同步才能恢复。",
+        text = string.format("将重置《%s》:\n\n%s\n\n绑定保留,重新同步即可恢复。", title, table.concat(lines, "\n")),
         ok_text = "继续",
         ok_callback = function()
             UIManager:show(ConfirmBox:new{
-                text = "再次确认:清理《"..title.."》的全部数据?\n此操作不可撤销。",
-                ok_text = "确认清理",
+                text = "再次确认:重置《"..title.."》?\n此操作不可撤销。",
+                ok_text = "确认重置",
                 ok_callback = function()
-                    self:_do_reset_book_data(book_dir, title)
+                    self:_do_reset_book_data(book_dir, path, title)
                 end,
                 cancel_text = "取消",
             })
@@ -823,26 +826,44 @@ function Plugin:_dir_size(path)
     return total
 end
 
-function Plugin:_do_reset_book_data(book_dir, title)
-    local size_bytes = self:_dir_size(book_dir)
-    local cleared = 0
-    for _, name in ipairs(RESET_TARGETS) do
-        if U.remove_tree(book_dir .. "/" .. name) then cleared = cleared + 1 end
+-- 还原单本原书:删注入版,.orig 顶回。返回是否还原成功。
+function Plugin:_restore_original_file(path)
+    if not U.file_exists(path..".orig") then return false end
+    os.remove(path)
+    local ok = os.rename(path..".orig", path)
+    if ok and path == self:current_doc_path() and self.ui and self.ui.reloadDocument then
+        pcall(function() self.ui:reloadDocument(nil, true) end)
+    end
+    return ok == true
+end
+
+function Plugin:_do_reset_book_data(book_dir, path, title)
+    local cleared, size_bytes = 0, 0
+    if book_dir then
+        size_bytes = self:_dir_size(book_dir)
+        for _, name in ipairs(RESET_TARGETS) do
+            if U.remove_tree(book_dir .. "/" .. name) then cleared = cleared + 1 end
+        end
     end
     Thoughts.clear_memory_cache()
     self._sync_state_cache = nil
-    self:info(string.format("已清理《%s》\n\n%d 项,约 %.1f MB\n重新同步即可恢复", title, cleared, size_bytes/1048576))
+    local restored = self:_restore_original_file(path)
+    local msg = "已重置《"..title.."》\n\n"
+    if cleared > 0 then msg = msg .. string.format("清理 %d 项,约 %.1f MB\n", cleared, size_bytes/1048576) end
+    if restored then msg = msg .. "书已还原原版\n" end
+    msg = msg .. "重新同步即可恢复"
+    self:info(msg)
 end
 
--- 清理全部书籍数据:遍历所有 book_dir,清缓存/想法/映射。
+-- 重置全部书籍:清所有 book_dir 数据 + 还原所有有备份的原书。
 function Plugin:clear_all_data()
     UIManager:show(ConfirmBox:new{
-        text = "将清理所有书的撷思数据:\n\n• 全部书的同步缓存/想法/映射\n\n绑定关系保留,书文件不动。\n各书需重新同步。",
+        text = "将重置所有书:\n\n• 清全部书的同步缓存/想法/映射\n• 还原所有注入书为原版\n\n绑定保留,各书需重新同步。",
         ok_text = "继续",
         ok_callback = function()
             UIManager:show(ConfirmBox:new{
-                text = "再次确认:清理全部书籍数据?\n此操作不可撤销。",
-                ok_text = "确认清理",
+                text = "再次确认:重置全部书籍?\n此操作不可撤销。",
+                ok_text = "确认重置",
                 ok_callback = function() self:_do_clear_all() end,
                 cancel_text = "取消",
             })
@@ -854,7 +875,7 @@ end
 function Plugin:_do_clear_all()
     local lfs = require("libs/libkoreader-lfs")
     local root = self.store.cache_books_dir
-    local total_size, book_count = 0, 0
+    local total_size, book_count, restored_count = 0, 0, 0
     if lfs.attributes(root, "mode") == "directory" then
         for name in lfs.dir(root) do
             if name ~= "." and name ~= ".." then
@@ -867,9 +888,15 @@ function Plugin:_do_clear_all()
             end
         end
     end
+    -- 还原所有绑定书(有 .orig 的)
+    local bindings = self.store:get("bindings", {})
+    for doc_path in pairs(bindings) do
+        if self:_restore_original_file(doc_path) then restored_count = restored_count + 1 end
+    end
     Thoughts.clear_memory_cache()
     self._sync_state_cache = nil
-    self:info(string.format("已清理全部书籍数据\n\n%d 本书,约 %.1f MB\n各书重新同步即可恢复", book_count, total_size/1048576))
+    self:info(string.format("已重置全部书籍\n\n%d 本书,约 %.1f MB\n还原 %d 本原书\n各书重新同步即可恢复",
+        book_count, total_size/1048576, restored_count))
 end
 
 -- ===== 想法弹窗体系（点击 EPUB 锚点 → 弹窗）=====
