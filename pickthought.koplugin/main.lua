@@ -118,6 +118,7 @@ function Plugin:reader_menu()
             items[#items+1]={text=string.format("继续拉取后续章节(还剩 %d 章)",state.pending),
                 callback=self:safe("continue_sync",function() self:sync_entry(doc_path,"sync") end)}
         end
+        items[#items+1]={text="重置撷思数据(清缓存/想法)",callback=self:safe("reset",function() self:reset_book_data(doc_path) end)}
     end
     if doc_path and self:_has_reinject_cache(doc_path) then
         items[#items+1]={text="重新注入(用上次数据,离线)",callback=self:safe("reinject",function() self:sync_entry(doc_path,"reinject") end)}
@@ -179,6 +180,7 @@ function Plugin:book_actions(path)
             rows[#rows+1]={{text=string.format("继续拉取后续章节(还剩 %d 章)",state.pending),
                 callback=act(function() self:sync_entry(path,"sync") end)}}
         end
+        rows[#rows+1]={{text="重置撷思数据(清缓存/想法)",callback=act(function() self:reset_book_data(path) end)}}
     end
     if self:_has_reinject_cache(path) then
         rows[#rows+1]={{text="重新注入(用上次数据,离线)",callback=act(function() self:sync_entry(path,"reinject") end)}}
@@ -773,6 +775,42 @@ function Plugin:restore_original(path)
         end,
         cancel_text="取消",
     })
+end
+
+-- 重置撷思数据:清该书的所有同步缓存/想法/映射,回到"未同步"状态。
+-- 双重确认(破坏性)。绑定保留,书文件不动(要还原原书用「还原原书」)。
+function Plugin:reset_book_data(path)
+    path = path or self:current_doc_path()
+    if not path then self:info("请先选择一本书"); return end
+    local bound = Binding.get(self.store, path)
+    if not bound then self:info("这本书未绑定微信读书,无撷思数据"); return end
+    local book_dir = self.store:book_dir(bound.book_id)
+    local title = self:doc_title_guess(path)
+    UIManager:show(ConfirmBox:new{
+        text = "将清除《"..title.."》的全部撷思数据:\n\n• 同步断点缓存(sync-cache)\n• 想法数据库(thoughts.db)\n• 章节映射缓存\n\n绑定关系保留,书本文件不动。\n清理后需重新同步才能恢复想法。",
+        ok_text = "继续",
+        ok_callback = function()
+            UIManager:show(ConfirmBox:new{
+                text = "再次确认:清除《"..title.."》的全部撷思数据?\n此操作不可撤销。",
+                ok_text = "确认清除",
+                ok_callback = function()
+                    self:_do_reset_book_data(book_dir, title)
+                end,
+                cancel_text = "取消",
+            })
+        end,
+        cancel_text = "取消",
+    })
+end
+
+function Plugin:_do_reset_book_data(book_dir, title)
+    local cleared = 0
+    for _, name in ipairs({"sync-cache", "thoughts", "thoughts.db", "thoughts.db-wal", "thoughts.db-shm"}) do
+        if U.remove_tree(book_dir .. "/" .. name) then cleared = cleared + 1 end
+    end
+    Thoughts.clear_memory_cache()
+    self._sync_state_cache = nil
+    self:info(string.format("已清除《%s》的撷思数据\n\n清理 %d 项,重新同步即可恢复", title, cleared))
 end
 
 -- ===== 想法弹窗体系（点击 EPUB 锚点 → 弹窗）=====
