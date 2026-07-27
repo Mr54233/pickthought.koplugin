@@ -611,7 +611,22 @@ function Plugin:_finish_sync(runtime,result)
     end
     -- 子进程的错误消息不少已自带断点提示,别再拼一遍(真机截图出过双重提示)。
     local hint=err:find("断点",1,true) and "" or "\n\n已拉取章节保存在断点缓存,再次同步会继续。"
+    if Http.is_auth_error(err) then
+        self:_auth_fail(err)
+        return
+    end
     self:_sync_fail("同步未完成:\n"..U.first_line(err,220)..hint)
+end
+
+function Plugin:_auth_fail(err)
+    UIManager:show(ConfirmBox:new{
+        text = "登录已失效,请重新登录\n\n原因:"..U.first_line(err,140).."\n\n已拉取的数据保留,重新登录后再次同步即可续传。",
+        ok_text = "去登录",
+        ok_callback = function()
+            UIManager:nextTick(function() self.auth_flow:start() end)
+        end,
+        cancel_text = "稍后",
+    })
 end
 
 function Plugin:_recover_sync_state()
