@@ -89,3 +89,14 @@ T.case("绑定存取清", function()
     T.eq(Binding.get(store, "/books/a.epub"), nil, "清除生效")
     T.eq(Binding.get(store, "/books/b.epub").book_id, "b2", "不影响其他绑定")
 end)
+
+T.case("normalize_search 标注版本类型(format)", function()
+    local rows = Binding.normalize_search{books={
+        {bookInfo={bookId="b1", title="剑来", author="烽火", format="txt"}},
+        {bookInfo={bookId="b2", title="剑来精校", author="烽火", format="epub"}},
+        {bookInfo={bookId="b3", title="未知版", author="x"}},
+    }}
+    T.eq(rows[1].title, "剑来 [网络]", "txt 标网络")
+    T.eq(rows[2].title, "剑来精校 [出版]", "epub 标出版")
+    T.eq(rows[3].title, "未知版", "无 format 不标注")
+end)

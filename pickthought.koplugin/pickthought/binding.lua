@@ -21,6 +21,12 @@ end
 
 function Binding.normalize_search(data)
     local out = {}
+    local function format_tag(fmt)
+        fmt = tostring(fmt or "")
+        if fmt == "txt" then return " [网络]"
+        elseif fmt == "epub" then return " [出版]" end
+        return ""
+    end
     local function add_row(row)
         if type(row) ~= "table" then return end
         local info = type(row.bookInfo) == "table" and row.bookInfo or row
@@ -28,7 +34,7 @@ function Binding.normalize_search(data)
         if book_id ~= "" then
             out[#out + 1] = {
                 book_id = book_id,
-                title = scalar_str(info.title),
+                title = scalar_str(info.title) .. format_tag(info.format),
                 author = scalar_str(info.author),
             }
         end
