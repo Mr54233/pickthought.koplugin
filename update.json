@@ -1,0 +1,15 @@
+{
+  "version": "1.1.46",
+  "name": "觅阅 · 微信读书助手 1.1.46",
+  "package_type": "full",
+  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v1.1.46/miuread-v1.1.46-full.zip",
+  "package_urls": [
+    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v1.1.46/miuread-v1.1.46-full.zip",
+    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v1.1.46/miuread-v1.1.46-full.zip",
+    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v1.1.46/miuread-v1.1.46-full.zip",
+    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v1.1.46/miuread-v1.1.46-full.zip"
+  ],
+  "size": 193427,
+  "sha256": "8937a1949f907544e58da8036047332f1d94c9deeda2736f673b48391f357b1b",
+  "notes": "优化想法弹窗打开速度：取消评论区域的重复测量与二次渲染，当前章节想法建立内存索引，同一条想法的 HTML 可直接复用；正文字体仍保持一致，同时减少首次字体解析。未修改想法数据格式，不需要重新下载书籍。"
+}
