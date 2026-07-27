@@ -39,30 +39,39 @@ end
 function WebFetch.build_reviews(data)
     local map, order = {}, {}
     for _, row in ipairs(type(data) == "table" and data.reviews or {}) do
-        local r = type(row) == "table" and (type(row.review) == "table" and row.review or row) or nil
-        if r then
+        if type(row) == "table" then
+            local r = type(row.review) == "table" and row.review or row
             local range = scalar_str(r.range)
-            local content = scalar_str(r.content)
-            if range ~= "" and content ~= "" then
-                local author = type(r.author) == "table" and r.author or {}
-                if not map[range] then
-                    map[range] = {}
-                    order[#order + 1] = range
-                end
+            if range ~= "" then
+                -- gateway /book/readreviews 按 range 返回,想法嵌在 pageReviews(一 range 多条);
+                -- 旧 /web/review/list 扁平,每 row 一条。兼容两种结构。
+                local entries = type(row.pageReviews) == "table" and row.pageReviews or {row}
+                if not map[range] then map[range] = {}; order[#order + 1] = range end
                 local texts = map[range]
-                texts[#texts + 1] = {
-                    content = content,
-                    abstract = clean_quote(r.abstract or r.contextAbstract),
-                    author = scalar_str(author.name or author.nick),
-                    likes = tonumber(row.likesCount or r.likesCount or 0) or 0,
-                    created = tonumber(r.createTime or 0) or 0,
-                    review_id = scalar_str(r.reviewId or row.reviewId),
-                }
+                for _, pr in ipairs(entries) do
+                    local thought = (type(pr) == "table" and type(pr.review) == "table") and pr.review
+                        or (type(pr) == "table" and pr) or {}
+                    local content = scalar_str(thought.content)
+                    if content ~= "" then
+                        local author = type(thought.author) == "table" and thought.author or {}
+                        texts[#texts + 1] = {
+                            content = content,
+                            abstract = clean_quote(thought.abstract or thought.contextAbstract),
+                            author = scalar_str(author.name or author.nick),
+                            likes = tonumber(pr.likesCount or thought.likesCount or row.likesCount or 0) or 0,
+                            created = tonumber(thought.createTime or 0) or 0,
+                            review_id = scalar_str(thought.reviewId or pr.reviewId or row.reviewId),
+                        }
+                    end
+                end
             end
         end
     end
     local groups = {}
-    for _, range in ipairs(order) do groups[#groups + 1] = {range = range, texts = map[range]} end
+    for _, range in ipairs(order) do
+        -- 过滤空组:range 建在 content 检查前,若所有想法 content 都空会留空组。
+        if #map[range] > 0 then groups[#groups + 1] = {range = range, texts = map[range]} end
+    end
     return map, groups
 end
 
@@ -126,18 +135,44 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
         }
     end
     progress("underlines", 1, 1, "")
-    local reviews_data
-    local errors = {}
-    local ok, data = pcall(function() return self.api:web_chapter_reviews(book_id, chapter_uid) end)
-    if ok then
-        reviews_data = data
-    else
-        errors[#errors + 1] = tostring(data)
-        logger.warn("[撷思][WebFetch] reviews failed",
-            "book=", tostring(book_id), "chapter=", chapter_uid, "error=", tostring(data))
+    local marks_rows = by_uid[chapter_uid]
+    -- 提取该章划线的 range(去重保序),按 range 拉全部想法。
+    local ranges, seen = {}, {}
+    for _, row in ipairs(marks_rows or {}) do
+        local r = tostring(row.range or "")
+        if r ~= "" and not seen[r] then seen[r] = true; ranges[#ranges + 1] = r end
+    end
+    -- /book/readreviews 按 range 返回该段【全部】想法(每 range 最多 count=30),
+    -- 远比 /web/review/list 的"章级热门前1-2条"完整。这是 fork 时换端点丢掉
+    -- 的能力,现恢复(miuread/weread 原版均用此端点)。
+    local all_reviews, errors = {}, {}
+    if #ranges > 0 and self.api.readreviews then
+        local batches = self.api:review_batches(ranges, 5)
+        for index, batch in ipairs(batches) do
+            progress("thoughts", index, #batches, "")
+            local ok, resp = pcall(function() return self.api:readreviews(book_id, chapter_uid, batch) end)
+            if ok and type(resp) == "table" and type(resp.reviews) == "table" then
+                for _, r in ipairs(resp.reviews) do all_reviews[#all_reviews + 1] = r end
+            elseif ok then
+                -- 返回结构异常:降级逐 range 补(防一批异常拖垮整章)。
+                logger.warn("[撷思][WebFetch] readreviews 结构异常,逐 range 补",
+                    "book=", tostring(book_id), "chapter=", chapter_uid, "batch=", index)
+                for _, item in ipairs(batch) do
+                    local s_ok, s_resp = pcall(function() return self.api:readreviews(book_id, chapter_uid, {item}) end)
+                    if s_ok and type(s_resp) == "table" and type(s_resp.reviews) == "table" then
+                        for _, r in ipairs(s_resp.reviews) do all_reviews[#all_reviews + 1] = r end
+                    end
+                end
+            else
+                errors[#errors + 1] = tostring(resp)
+                logger.warn("[撷思][WebFetch] readreviews 批次失败",
+                    "book=", tostring(book_id), "chapter=", chapter_uid,
+                    "batch=", index, "/", tostring(#batches), "error=", tostring(resp))
+            end
+        end
     end
     progress("thoughts", 1, 1, "")
-    local result = WebFetch.build_chapter(book_id, chapter_uid, by_uid[chapter_uid], reviews_data)
+    local result = WebFetch.build_chapter(book_id, chapter_uid, marks_rows, {reviews = all_reviews})
     result.errors = errors
     return result
 end
