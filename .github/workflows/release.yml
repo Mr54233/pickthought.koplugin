@@ -34,7 +34,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: 撷思 PickThought ${{ steps.ver.outputs.version }}
-          prerelease: ${{ !contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: pickthought.koplugin.zip
           body: |
             ## 安装
