@@ -754,17 +754,22 @@ function Plugin:restore_original(path)
     end
     local backup=path..".orig"
     if not U.file_exists(backup) then self:info("没有找到原书备份("..backup..")") return end
-    -- 书正开着时替换文件,阅读器缓存会失效,需要用户重开;文管里还原则无感。
+    -- 书正开着时,reloadDocument 会自动重载原版;文管里还原则下次打开即原版。
     local is_open=path==self:current_doc_path()
     UIManager:show(ConfirmBox:new{
-        text="将用原书备份覆盖当前划线版,书内注入的划线与想法会移除(想法缓存保留)。"
-            ..(is_open and "\n还原后请重新打开本书。" or ""),
+        text="将用原书备份覆盖当前划线版,书内注入的划线与想法会移除(想法缓存保留)。",
         ok_text="还原原书",
         ok_callback=function()
             os.remove(path)
             local ok,err=os.rename(backup,path)
-            if ok then self:toast(is_open and "已还原原书,请重新打开本书" or "已还原原书",3)
-            else self:info("还原失败:\n"..tostring(err or "重命名失败")) end
+            if not ok then self:info("还原失败:\n"..tostring(err or "重命名失败")); return end
+            if is_open and self.ui and type(self.ui.reloadDocument)=="function" then
+                -- 自动重载:丢弃注入版缓存,重读已替换的原版文件,免得用户手动关闭再开。
+                local reload_ok=pcall(function() self.ui:reloadDocument(nil, true) end)
+                self:toast(reload_ok and "已还原原书" or "已还原原书,请重新打开本书",3)
+            else
+                self:toast("已还原原书",3)
+            end
         end,
         cancel_text="取消",
     })
