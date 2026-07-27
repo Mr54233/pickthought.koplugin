@@ -19,16 +19,59 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 配置 git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: 打包插件
-        run: |
-          zip -r pickthought.koplugin.zip pickthought.koplugin
+        run: zip -r pickthought.koplugin.zip pickthought.koplugin
 
       - name: 读取版本号
         id: ver
         run: |
           ver=$(grep 'version' pickthought.koplugin/_meta.lua | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
           echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: 算校验值
+        id: hash
+        run: |
+          sha=$(sha256sum pickthought.koplugin.zip | awk '{print $1}')
+          size=$(wc -c < pickthought.koplugin.zip)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "size=$size" >> "$GITHUB_OUTPUT"
+
+      - name: 生成 update.json 并提交 main
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          SHA: ${{ steps.hash.outputs.sha }}
+          SIZE: ${{ steps.hash.outputs.size }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          git checkout main
+          python3 - << PY
+          import json
+          base = "https://github.com/Mr54233/pickthought.koplugin/releases/download/$TAG/pickthought.koplugin.zip"
+          mirrors = [p+base for p in ["https://ghfast.top/","https://gh-proxy.com/","https://ghproxy.net/"]]
+          m = {
+            "version": "$VER",
+            "name": f"撷思 PickThought $VER",
+            "package_type": "full",
+            "package_url": base,
+            "package_urls": [base] + mirrors,
+            "size": int("$SIZE"),
+            "sha256": "$SHA",
+            "notes": "撷思 PickThought $VER 发布。"
+          }
+          with open("update.json","w") as f:
+              json.dump(m, f, ensure_ascii=False, indent=2)
+          PY
+          git add update.json
+          git commit -m "chore(release): 更新清单 v$VER" || echo "no change to update.json"
+          git push origin main
 
       - name: 发 Release
         uses: softprops/action-gh-release@v2
@@ -49,4 +92,5 @@ jobs:
             KOReader ≥ v2025.08(需要内建的 `ffi/archiver` 与 `lua-ljsqlite3`)。
 
             ---
+
             本插件衍生自 [miuread-koreader](https://github.com/miumiupy98-art/miuread-koreader) 与 [weread.koplugin](https://github.com/finlater/weread.koplugin),基于 AGPL-3.0 许可证发布。
