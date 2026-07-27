@@ -44,6 +44,20 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "size=$size" >> "$GITHUB_OUTPUT"
 
+      - name: 摘抄本次更新
+        id: notes
+        run: |
+          prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          if [ -n "$prev" ]; then
+            notes=$(git log --pretty=format:"- %s" "$prev"..HEAD | grep -vE '^- chore\(release\)|^- chore: bump' || true)
+          fi
+          if [ -z "$notes" ]; then notes="- 版本发布"; fi
+          {
+            echo "notes<<EOF"
+            echo "$notes"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: 生成 update.json 并提交 main
         env:
           VER: ${{ steps.ver.outputs.version }}
@@ -80,6 +94,12 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: pickthought.koplugin.zip
           body: |
+            ## 本次更新
+
+            ${{ steps.notes.outputs.notes }}
+
+            ---
+
             ## 安装
 
             1. 下载 `pickthought.koplugin.zip` 并解压
