@@ -528,7 +528,7 @@ function Plugin:_on_sync_progress(runtime,state)
     if not runtime.big_book_notified and runtime.mode~="reinject"
         and state and state.stage=="fetch" then
         local total=tonumber(state.total) or 0
-        local limit=tonumber(self.store:preferences().sync_batch_limit) or 300
+        local limit=tonumber(self.store:preferences().sync_batch_limit) or 200
         if total>limit then
             runtime.big_book_notified=true
             self:toast(string.format(

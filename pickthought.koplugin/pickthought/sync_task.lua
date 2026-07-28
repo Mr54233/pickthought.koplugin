@@ -412,7 +412,7 @@ function SyncTask:start(task, on_progress, on_done)
     -- 只用上次拉取的数据重跑映射+注入,零网络。
     local mode = tostring(task.mode or "sync")
     -- 分批风控:每次同步最多拉这么多个新章节,大书分多次完成。
-    local batch_limit = tonumber(self.store:preferences().sync_batch_limit) or 300
+    local batch_limit = tonumber(self.store:preferences().sync_batch_limit) or 200
     self.keep_awake_enabled = self.store:preferences().sync_keep_awake ~= false
 
     local child = function()
