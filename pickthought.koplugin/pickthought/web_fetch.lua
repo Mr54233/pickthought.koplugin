@@ -1,8 +1,14 @@
--- 数据源:微信读书 web 端(Cookie 鉴权,网关 Bearer key 已不可靠)。
--- 热门划线整本一次拉回按章分组;章节想法按章拉取;输出与原
--- Annotations:fetch_chapter 完全同形,sync/epub_inject 无感消费:
+-- 数据源:微信读书划线 + 想法。
+-- 划线走 /book/underlines(gateway,按章,返回该章所有划线,不限热度);
+-- 想法走 /book/readreviews(gateway,按 range 拉该段全部,count=30)。
+-- 输出与原 Annotations:fetch_chapter 同形:
 -- {underlines, review_map, review_groups, underline_count, thought_count,
 --  thought_entry_count, errors, underline_request_ok}
+--
+-- 历史:fork 时网关 403,把 underlines 换成 /web/book/bestbookmarks(web,整本热门 top),
+-- 但 bestbookmarks 只给热门划线 range,非热门段(却有想法)的 range 丢失,readreviews
+-- 按缺不全的 range 拉就漏大量想法(真机:118 章 bestbookmarks 1 划线,实际该章几十个 range)。
+-- 现恢复上游(weread/miuread)的 underlines 做法——该章所有划线,range 覆盖全。
 local logger = require("logger")
 
 local WebFetch = {}
@@ -19,21 +25,27 @@ local function clean_quote(text)
     return (tostring(text or ""):gsub("%[插图%]", ""))
 end
 
-function WebFetch.group_marks(data)
-    local by_uid = {}
-    local box = type(data) == "table" and (type(data.bestBookMarks) == "table" and data.bestBookMarks or data) or {}
-    for _, item in ipairs(box.items or {}) do
-        if type(item) == "table" then
-            local uid = scalar_str(item.chapterUid)
-            local range = scalar_str(item.range)
-            if uid ~= "" and range ~= "" then
-                by_uid[uid] = by_uid[uid] or {}
-                local rows = by_uid[uid]
-                rows[#rows + 1] = {range = range, markText = scalar_str(item.markText)}
+-- 从 /book/underlines 返回里提取该章划线条目。
+-- gateway 返回结构含 underlines/updated/bookmarks 任一键(同 miuread array_from);
+-- 兼容直接是数组的情况。每条归一化为 {range, markText},range 兼容 range/markRange/bookmarkRange。
+local function extract_underlines(data)
+    local raw = {}
+    if type(data) == "table" then
+        for _, key in ipairs({"underlines", "updated", "bookmarks"}) do
+            if type(data[key]) == "table" then raw = data[key]; break end
+        end
+        if #raw == 0 and type(data[1]) == "table" then raw = data end
+    end
+    local out = {}
+    for _, row in ipairs(raw) do
+        if type(row) == "table" then
+            local range = scalar_str(row.range or row.markRange or row.bookmarkRange)
+            if range ~= "" then
+                out[#out + 1] = {range = range, markText = scalar_str(row.markText or row.mark_text)}
             end
         end
     end
-    return by_uid
+    return out
 end
 
 function WebFetch.build_reviews(data)
@@ -107,40 +119,30 @@ function WebFetch.build_chapter(book_id, uid, marks_rows, reviews_data)
 end
 
 function WebFetch:new(api)
-    return setmetatable({api = api, marks = {}}, self)
-end
-
-function WebFetch:_marks_for(book_id)
-    local key = tostring(book_id)
-    if self.marks[key] == nil then
-        local ok, data = pcall(function() return self.api:web_bestbookmarks(key) end)
-        if not ok then return nil, tostring(data) end
-        self.marks[key] = WebFetch.group_marks(data)
-    end
-    return self.marks[key]
+    return setmetatable({api = api}, self)
 end
 
 function WebFetch:fetch_chapter(book_id, uid, progress)
     progress = progress or function() end
     local chapter_uid = tostring(uid)
-    local by_uid, marks_err = self:_marks_for(book_id)
-    if not by_uid then
-        logger.warn("[撷思][WebFetch] bestbookmarks failed",
-            "book=", tostring(book_id), "error=", tostring(marks_err))
+    -- /book/underlines:该章所有划线(不限热度),比 bestbookmarks(整本热门 top)覆盖全。
+    local ok, data = pcall(function() return self.api:underlines(book_id, chapter_uid) end)
+    if not ok then
+        logger.warn("[撷思][WebFetch] underlines failed",
+            "book=", tostring(book_id), "chapter=", chapter_uid, "error=", tostring(data))
         return {
             book_id = tostring(book_id), chapter_uid = chapter_uid,
             underlines = {}, review_map = {}, review_groups = {},
             underline_count = 0, thought_count = 0, thought_entry_count = 0,
-            errors = {marks_err}, underline_request_ok = false,
+            errors = {tostring(data)}, underline_request_ok = false,
         }
     end
     progress("underlines", 1, 1, "")
-    local marks_rows = by_uid[chapter_uid]
+    local marks_rows = extract_underlines(data)
     -- 提取该章划线的 range(去重保序),按 range 拉全部想法。
     local ranges, seen = {}, {}
-    for _, row in ipairs(marks_rows or {}) do
-        local r = tostring(row.range or "")
-        if r ~= "" and not seen[r] then seen[r] = true; ranges[#ranges + 1] = r end
+    for _, row in ipairs(marks_rows) do
+        if not seen[row.range] then seen[row.range] = true; ranges[#ranges + 1] = row.range end
     end
     -- /book/readreviews 按 range 返回该段【全部】想法(每 range 最多 count=30),
     -- 远比 /web/review/list 的"章级热门前1-2条"完整。这是 fork 时换端点丢掉
