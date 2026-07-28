@@ -216,6 +216,8 @@ local function is_auth_error(value)
         or lower:find("api key is not configured", 1, true) ~= nil
         or text:find("未登录", 1, true) ~= nil
         or text:find("登录过期", 1, true) ~= nil
+        or text:find("登录授权已过期", 1, true) ~= nil
+        or text:find("重新登录", 1, true) ~= nil
         or text:find("登录超时", 1, true) ~= nil
         or text:find("登录失效", 1, true) ~= nil
         or text:find("登录状态已失效", 1, true) ~= nil
@@ -269,5 +271,21 @@ end
 Http.auth_error_code = auth_error_code
 Http.auth_error_message = auth_error_message
 Http.is_auth_error = is_auth_error
+
+-- 区分网络错误(连接/超时)与鉴权错误——同步失败时告诉用户是"网络问题"还是"登录问题"。
+local function is_network_error(value)
+    local text = tostring(value or "")
+    local lower = text:lower()
+    return lower:find("network request failed", 1, true) ~= nil
+        or lower:find("http nil", 1, true) ~= nil
+        or lower:find("status=nil", 1, true) ~= nil
+        or lower:find("connection", 1, true) ~= nil
+        or lower:find("broken pipe", 1, true) ~= nil
+        or lower:find("timed out", 1, true) ~= nil
+        or lower:find("timeout", 1, true) ~= nil
+        or text:find("网络不可用", 1, true) ~= nil
+        or text:find("网络请求失败", 1, true) ~= nil
+end
+Http.is_network_error = is_network_error
 
 return Http

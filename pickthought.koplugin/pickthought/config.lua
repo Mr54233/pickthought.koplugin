@@ -20,6 +20,8 @@ local C = {
         "https://ghproxy.net/",
     },
 
+    AUTO_UPDATE_INTERVAL = 24 * 60 * 60,
+    AUTO_UPDATE_RETRY_INTERVAL = 6 * 60 * 60,
     READ_INTERVAL = 30,
     IDLE_TIMEOUT = 600,
     REMOTE_THRESHOLD = 2,

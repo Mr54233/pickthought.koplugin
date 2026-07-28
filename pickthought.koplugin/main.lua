@@ -49,6 +49,7 @@ function Plugin:init()
     self.updater=Updater:new(self.http,self.store,self.version,ROOT)
     self.sync_task=SyncTask:new(self.store)
     UIManager:scheduleIn(0.8,function() self:_recover_sync_state() end)
+    UIManager:scheduleIn(5,function() self:maybe_auto_check_update(false) end)
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
     local state=self.updater:startup()
@@ -333,6 +334,38 @@ function Plugin:update_about_menu()
     }
 end
 
+-- 启动后静默检查更新(每 24h 一次,失败 6h 后重试)。有新版 toast 提示,不弹窗。
+-- 移植自 miuread maybe_auto_check_update。
+function Plugin:maybe_auto_check_update(force)
+    if self._auto_update_check_running then return false end
+    local now = os.time()
+    local interval = Config.AUTO_UPDATE_INTERVAL
+    local state = self.store:get("update_check", {})
+    local last = tonumber(state.last_attempt_at) or 0
+    if not force and now - last < interval then return false end
+    if not self:is_online() then return false end
+    self._auto_update_check_running = true
+    state.last_attempt_at = now
+    self.store:set("update_check", state)
+    UIManager:scheduleIn(0.05, self:safe("auto-update", function()
+        local m = self.updater:check()
+        self._auto_update_check_running = false
+        local fresh = self.store:get("update_check", {})
+        if m and not m.current then
+            fresh.last_success_at = os.time()
+            self.store:set("update_check", fresh)
+            self:toast(string.format("发现新版本 %s,「更新与关于」查看", tostring(m.version or "")), 5)
+        elseif m then
+            fresh.last_success_at = os.time()
+            self.store:set("update_check", fresh)
+        else
+            fresh.last_attempt_at = os.time() - (interval - Config.AUTO_UPDATE_RETRY_INTERVAL)
+            self.store:set("update_check", fresh)
+        end
+    end))
+    return true
+end
+
 function Plugin:check_update()
     if not self:is_online() then self:info(_("Network unavailable")); return end
     local Trapper=require("ui/trapper")
@@ -613,6 +646,10 @@ function Plugin:_finish_sync(runtime,result)
     local hint=err:find("断点",1,true) and "" or "\n\n已拉取章节保存在断点缓存,再次同步会继续。"
     if Http.is_auth_error(err) then
         self:_auth_fail(err)
+        return
+    end
+    if Http.is_network_error(err) then
+        self:_sync_fail("网络问题,同步未完成\n\n"..U.first_line(err,160).."\n\n请检查网络后重试")
         return
     end
     self:_sync_fail("同步未完成:\n"..U.first_line(err,220)..hint)
