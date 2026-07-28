@@ -88,15 +88,25 @@ function WebFetch.build_reviews(data)
 end
 
 function WebFetch.build_chapter(book_id, uid, marks_rows, reviews_data)
+    local review_map, review_groups = WebFetch.build_reviews(reviews_data)
     local underlines, seen = {}, {}
     for _, row in ipairs(marks_rows or {}) do
         if row.range ~= "" and not seen[row.range] then
             seen[row.range] = true
-            underlines[#underlines + 1] = {range = row.range, markText = row.markText}
+            -- /book/underlines 不返回 markText(划线文本),chapter_map 靠它做引文对齐就全空。
+            -- 用同 range 想法的 abstract(原文摘要)填充——abstract 是划线原文片段,
+            -- 做引文对齐和 markText 同效果,不再纯靠标题兜底(标题差一个字就全丢)。
+            local markText = tostring(row.markText or "")
+            if markText == "" then
+                local texts = review_map[row.range]
+                if texts and texts[1] then
+                    markText = clean_quote(texts[1].abstract or "")
+                end
+            end
+            underlines[#underlines + 1] = {range = row.range, markText = markText}
         end
     end
-    local review_map, review_groups = WebFetch.build_reviews(reviews_data)
-    -- 想法有自己的锚点 range:没有对应热门划线时补一条划线行,
+    -- 想法有自己的锚点 range:没有对应划线时补一条划线行,
     -- 引文用想法的 abstract(已清理),这样虚线和弹窗链接才有落点。
     for _, group in ipairs(review_groups) do
         if not seen[group.range] then
