@@ -1,15 +1,15 @@
 {
-  "version": "0.1.2",
-  "name": "撷思 PickThought 0.1.2",
+  "version": "0.1.3",
+  "name": "撷思 PickThought 0.1.3",
   "package_type": "full",
-  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.2/pickthought.koplugin.zip",
+  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.3/pickthought.koplugin.zip",
   "package_urls": [
-    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.2/pickthought.koplugin.zip",
-    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.2/pickthought.koplugin.zip",
-    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.2/pickthought.koplugin.zip",
-    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.2/pickthought.koplugin.zip"
+    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.3/pickthought.koplugin.zip",
+    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.3/pickthought.koplugin.zip",
+    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.3/pickthought.koplugin.zip",
+    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.3/pickthought.koplugin.zip"
   ],
-  "size": 99209,
-  "sha256": "15018a1a006d07898223b00c6a87e6dcd9cc82573483b2051a9e231f2991d0b9",
-  "notes": "撷思 PickThought 0.1.2 发布。"
+  "size": 101665,
+  "sha256": "7868f7c2665fb0e955f4e10b07d042db4660bcdc9fb46823b9c8585976be4523",
+  "notes": "撷思 PickThought 0.1.3 发布。"
 }
