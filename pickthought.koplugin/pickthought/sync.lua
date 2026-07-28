@@ -176,6 +176,20 @@ function Sync.run(deps)
         end
     end
 
+    -- 兜底:旧缓存的 underlines markText 为空(/book/underlines 不返回文本),
+    -- chapter_map 没引文素材。用同 range 想法的 abstract(原文摘要)补填,
+    -- 让旧缓存(重注/续传)也能正确映射,不用重新拉。
+    for _, ch in ipairs(fetched) do
+        for _, u in ipairs(ch.underlines or {}) do
+            if tostring(u.markText or ""):find("%S") == nil then
+                local texts = ch.review_map and ch.review_map[u.range]
+                if type(texts) == "table" and texts[1] and texts[1].abstract then
+                    u.markText = texts[1].abstract
+                end
+            end
+        end
+    end
+
     -- 每读一个 spine 文件发一次心跳(只作活动信号,不在文件中途响应取消),
     -- 免得特大书的纯 CPU 匹配被看门狗当成死吊。
     local map_count = 0
