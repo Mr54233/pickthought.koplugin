@@ -8,7 +8,7 @@ local ChapterMap = {}
 -- 匹配算法版本:任何影响匹配结果的改动(引文窗口、投票规则、目录页判定、
 -- 归一化规则)都必须 +1。映射缓存把它写进指纹,算法一改缓存整体作废——
 -- 否则旧算法缓存下来的「匹配失败」会永久生效,改进永远轮不到那些章节。
-ChapterMap.ALGO_VERSION = 6
+ChapterMap.ALGO_VERSION = 7
 
 -- 标题钥匙:剥掉「第X章/节/回…」编号前缀。微信与本地书的章号体系
 -- 经常不一致(实测:微信「第六章 姑娘请自重」= 本地「第二百八十四章
@@ -45,6 +45,24 @@ local function utf8_char(code)
         0x80 + math.floor(code / 0x40) % 0x40, 0x80 + code % 0x40)
 end
 
+-- 全角→半角(字母/数字/标点)。出版版标题/正文常用全角,不转就和半角对不上。
+-- 移植自 miuread bed9f5a (fix: correct chapter title extraction)。
+local function fold_fullwidth(value)
+    value = value:gsub("\239\188([\129-\191])", function(c) return string.char(c:byte() - 96) end)
+    value = value:gsub("\239\189([\128-\158])", function(c) return string.char(c:byte() - 32) end)
+    return value
+end
+
+-- 不可见字符/排版空白:nbsp、soft hyphen、全角空格、CJK标点、零宽、BOM 等。
+local BLANK_PATTERNS = {
+    "\194\160",             -- U+00A0 no-break space
+    "\194\173",             -- U+00AD soft hyphen
+    "\227\128[\128-\191]",  -- U+3000-U+303F 全角空格/CJK标点
+    "\226\128[\128-\191]",  -- U+2000-U+203F 各种space/dash/quote/ellipsis
+    "\226\129[\128-\175]",  -- U+2040-U+206F
+    "\239\187\191",         -- U+FEFF BOM
+}
+
 function ChapterMap.normalize(value)
     local text = tostring(value or ""):gsub("<[^>]*>", " ")
     -- 数值实体解码成字面 UTF-8:实体化编码的中文正文(&#x8FD9; 之类)必须还原,
@@ -52,11 +70,10 @@ function ChapterMap.normalize(value)
     text = text:gsub("&#[xX](%x+);", function(hex) return utf8_char(tonumber(hex, 16)) end)
     text = text:gsub("&#(%d+);", function(dec) return utf8_char(tonumber(dec, 10)) end)
     text = text:gsub("&(%a+);", function(name) return ENTITIES[name] or "" end)
-    -- 去掉 ASCII 空白与常见排版空白(nbsp、全角空格、零宽、BOM)。
+    -- 全角→半角,再去不可见字符/排版空白和 ASCII 空白。
+    text = fold_fullwidth(text)
+    for _, pattern in ipairs(BLANK_PATTERNS) do text = text:gsub(pattern, "") end
     text = text:gsub("%s+", "")
-    text = text:gsub("\194\160", ""):gsub("\227\128\128", "")
-    text = text:gsub("\226\128\139", ""):gsub("\226\128\140", ""):gsub("\226\128\141", "")
-    text = text:gsub("\239\187\191", "")
     return text
 end
 
