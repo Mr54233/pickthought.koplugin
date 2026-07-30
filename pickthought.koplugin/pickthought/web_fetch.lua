@@ -1,4 +1,5 @@
 -- 数据源:微信读书划线 + 想法。
+local Http_ok, Http = pcall(require, "pickthought.http")
 -- 划线走 /book/underlines(gateway,按章,返回该章所有划线,不限热度);
 -- 想法走 /book/readreviews(gateway,按 range 拉该段全部,count=30)。
 -- 输出与原 Annotations:fetch_chapter 同形:
@@ -177,6 +178,7 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
                 end
             else
                 errors[#errors + 1] = tostring(resp)
+                if Http_ok and Http.is_auth_error(resp) then break end
                 logger.warn("[撷思][WebFetch] readreviews 批次失败",
                     "book=", tostring(book_id), "chapter=", chapter_uid,
                     "batch=", index, "/", tostring(#batches), "error=", tostring(resp))

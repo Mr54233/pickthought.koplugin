@@ -157,6 +157,11 @@ function SyncTask:_hold_awake()
         -- 另一条独立休眠路径,用 PluginShare.pause_auto_suspend 一并按住
         -- (Kobo 等无 T1 的设备靠的就是这条)。
         pcall(function() require("pluginshare").pause_auto_suspend = true end)
+        -- 低内存模式:降 CREngine 缓存比例,给同步子进程腾内存(大书防 OOM)
+        pcall(function()
+            self._memory_mode = require("pickthought.memory_mode"):new(self.store)
+            self._memory_mode:set_enabled(true)
+        end)
         local reset = self:_reset_device_timeout()
         logger.info("[撷思][SyncTask] standby lock acquired", "t1_reset=", tostring(reset))
     else
@@ -167,6 +172,10 @@ end
 function SyncTask:_release_awake()
     if not self.standby_held then return end
     self.standby_held = false
+    if self._memory_mode then
+        pcall(function() self._memory_mode:set_enabled(false) end)
+        self._memory_mode = nil
+    end
     pcall(function() UIManager:allowStandby() end)
     pcall(function() require("pluginshare").pause_auto_suspend = false end)
     logger.info("[撷思][SyncTask] standby lock released")
