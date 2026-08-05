@@ -391,11 +391,15 @@ end
 function Plugin:_do_update(m)
     local Trapper=require("ui/trapper")
     Trapper:wrap(function()
-        if not Trapper:info("正在下载更新…\n(可能需要一点时间)") then return end
         local path
-        local ok_dl,err=pcall(function() path=self.updater:download(m) end)
+        local ok_dl,err=pcall(function()
+            path=self.updater:download(m, function(msg)
+                if not Trapper:info(msg) then error("已取消") end
+            end)
+        end)
         if not ok_dl or not path then
             Trapper:clear()
+            if tostring(err or ""):find("已取消") then return end
             self:_update_fail("下载失败：\n"..tostring(err or "未知错误"))
             return
         end

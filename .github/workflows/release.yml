@@ -64,10 +64,11 @@ jobs:
           SHA: ${{ steps.hash.outputs.sha }}
           SIZE: ${{ steps.hash.outputs.size }}
           TAG: ${{ github.ref_name }}
+          NOTES: ${{ steps.notes.outputs.notes }}
         run: |
           git checkout main
           python3 - << PY
-          import json
+          import json, os
           base = "https://github.com/Mr54233/pickthought.koplugin/releases/download/$TAG/pickthought.koplugin.zip"
           mirrors = [p+base for p in ["https://ghfast.top/","https://gh-proxy.com/","https://ghproxy.net/"]]
           m = {
@@ -78,7 +79,7 @@ jobs:
             "package_urls": [base] + mirrors,
             "size": int("$SIZE"),
             "sha256": "$SHA",
-            "notes": "撷思 PickThought $VER 发布。"
+            "notes": os.environ.get("NOTES", "").strip() or f"撷思 PickThought $VER 发布。"
           }
           with open("update.json","w") as f:
               json.dump(m, f, ensure_ascii=False, indent=2)

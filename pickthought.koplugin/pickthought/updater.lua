@@ -137,7 +137,7 @@ local function download_one(self,url,path)
     return nil,tostring(data or "下载失败")
 end
 
-function Updater:download(m)
+function Updater:download(m, on_progress)
     local urls=package_urls(m)
     if #urls==0 then error("更新包地址无效") end
     local p=self.store.updates_dir.."pickthought-"..U.id_name(m.version)..".zip"
@@ -147,10 +147,14 @@ function Updater:download(m)
     local last_error="下载失败"
 
     for index,url in ipairs(urls) do
+        if on_progress then on_progress(string.format("正在下载更新(%d/%d)…", index, #urls)) end
         local downloaded,err=download_one(self,url,p)
         local raw=downloaded and file_bytes(p) or nil
         if type(raw)=="string" and #raw>0 then
-            if expected_size and expected_size>0 and #raw~=expected_size then
+            if #raw > 10 * 1024 * 1024 then
+                last_error="更新包过大(超过 10MB)"
+                logger.warn("[撷思][Updater] package too large", url, "bytes=", tostring(#raw))
+            elseif expected_size and expected_size>0 and #raw~=expected_size then
                 last_error="更新包大小不符"
                 logger.warn("[撷思][Updater] size mismatch",url,"expected=",tostring(expected_size),"actual=",tostring(#raw))
             else
@@ -191,6 +195,12 @@ function Updater:install(path,manifest)
     local incoming=unpacked.."/pickthought.koplugin"
     if not U.file_exists(incoming.."/main.lua") or not U.file_exists(incoming.."/_meta.lua") then
         U.remove_tree(stage); return nil,"更新包缺少 pickthought.koplugin 或插件文件不完整"
+    end
+    -- 版本验证:解压后读 _meta.lua 确认 version == manifest version(防下载/解压损坏)
+    local meta_raw=U.read_file(incoming.."/_meta.lua",true) or ""
+    local staged_version=meta_raw:match('version%s*=%s*"([^"]+)"')
+    if staged_version and tostring(staged_version)~=tostring(manifest.version) then
+        U.remove_tree(stage); return nil,"更新包版本不匹配(期望 "..tostring(manifest.version)..",实际 "..tostring(staged_version)..")"
     end
     local roots=U.list(unpacked)
     if #roots~=1 or roots[1]~=incoming then
