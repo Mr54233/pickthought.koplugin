@@ -49,7 +49,10 @@ function Plugin:init()
     self.updater=Updater:new(self.http,self.store,self.version,ROOT)
     self.sync_task=SyncTask:new(self.store)
     UIManager:scheduleIn(0.8,function() self:_recover_sync_state() end)
-    UIManager:scheduleIn(5,function() self:maybe_auto_check_update(false) end)
+    -- 自动检查更新默认关,用户在设置里开启才生效
+    if self.store:preferences().auto_check_update==true then
+        UIManager:scheduleIn(5,function() self:maybe_auto_check_update(false) end)
+    end
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
     local state=self.updater:startup()
