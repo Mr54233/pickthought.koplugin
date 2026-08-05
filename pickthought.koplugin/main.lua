@@ -440,6 +440,7 @@ end
 -- opts.background=true 时静默后台启动(自动分批用),opts.silent 抑制报错弹窗。
 function Plugin:sync_entry(path,mode,opts)
     mode=mode or "sync"
+    opts=opts or {}  -- 多数调用点只传 path/mode,opts 缺省空表(防 .confirmed 访问崩溃)
     if self.sync_task and self.sync_task:busy() then self:_show_active_sync_dialog() return end
     if not tostring(path or ""):lower():match("%.epub$") then self:info("只支持 EPUB 格式的本地书") return end
     if not self:require_login() then return end
