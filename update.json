@@ -1,15 +1,15 @@
 {
-  "version": "0.1.5",
-  "name": "撷思 PickThought 0.1.5",
+  "version": "0.1.6",
+  "name": "撷思 PickThought 0.1.6",
   "package_type": "full",
-  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.5/pickthought.koplugin.zip",
+  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.6/pickthought.koplugin.zip",
   "package_urls": [
-    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.5/pickthought.koplugin.zip",
-    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.5/pickthought.koplugin.zip",
-    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.5/pickthought.koplugin.zip",
-    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.5/pickthought.koplugin.zip"
+    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.6/pickthought.koplugin.zip",
+    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.6/pickthought.koplugin.zip",
+    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.6/pickthought.koplugin.zip",
+    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.6/pickthought.koplugin.zip"
   ],
-  "size": 105491,
-  "sha256": "c28f5f6c77b7417332d17899a6b5c91e611bf66dad25052d26d80823af8ac494",
-  "notes": "撷思 PickThought 0.1.5 发布。"
+  "size": 105928,
+  "sha256": "4eba2986c1b8a426877ac5e163fbc43fedf2150d6a286b0169e09ebd64d677e6",
+  "notes": "- chore: 自动检查更新默认关\n- feat: 更新体验提升——下载进度/版本验证/大小上限/更新日志\n- fix: 注入 GC 增强——collect 替代 step + 注入前释放拉取残留\n- fix: 兼容 KOReader v2026.07——crengine 链接结构从 href 改为 xpointer\n- docs: 精简 README"
 }
