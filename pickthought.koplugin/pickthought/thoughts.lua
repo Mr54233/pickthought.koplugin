@@ -46,7 +46,7 @@ function Thoughts.mark_class(range)
 end
 
 function Thoughts.parse_href(href)
-    local anchor = tostring(href or ""):match("#?(pickthought%-[%x%.]+)")
+    local anchor = tostring(href or ""):match("(pickthought%-[%x%.]+)")
     if not anchor then return nil end
     local b, c, r = anchor:match("^pickthought%-([%x]+)%.([%x]+)%.([%x]+)$")
     if not b then return nil end

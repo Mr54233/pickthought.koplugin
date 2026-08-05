@@ -954,7 +954,7 @@ end
 -- ===== 想法弹窗体系（点击 EPUB 锚点 → 弹窗）=====
 local function extract_thought_href(value,seen,depth)
     if depth>4 or value==nil then return nil end
-    if type(value)=="string" then return value:match("(#?pickthought%-[%x%.]+)") end
+    if type(value)=="string" then return value:match("(pickthought%-[%x%.]+)") end
     if type(value)~="table" then return nil end
     seen=seen or {}; if seen[value] then return nil end; seen[value]=true
     for _,key in ipairs({"href","url","target","link","uri","dest","destination"}) do local found=extract_thought_href(value[key],seen,depth+1); if found then return found end end
