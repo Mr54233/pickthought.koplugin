@@ -458,6 +458,23 @@ function Plugin:sync_entry(path,mode,opts)
         })
         return
     end
+    -- 已有完整缓存(.completed)时,弹窗说明行为(从缓存继续,非清缓存重拉)。
+    -- 用户确认后才同步;要全新重拉引导走「重置本书」。opts.confirmed 避免重复弹窗。
+    if not opts.confirmed and mode~="reinject" then
+        local completed=self.store:book_cache_path(bound.book_id).."/sync-cache/.completed"
+        if U.file_exists(completed) then
+            UIManager:show(ConfirmBox:new{
+                text="检测到本书已有同步缓存,将从缓存继续,\n仅补齐拉取失败的章节。\n\n如需全部重新拉取,请先使用「重置本书」选项。",
+                ok_text="继续",
+                ok_callback=function()
+                    opts.confirmed=true
+                    UIManager:nextTick(function() self:sync_entry(path,mode,opts) end)
+                end,
+                cancel_text="取消",
+            })
+            return
+        end
+    end
     if self.sync_task and self.sync_task:available() then
         self:_start_sync_task(path,bound,mode,opts)
     elseif mode=="reinject" then

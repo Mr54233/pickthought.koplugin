@@ -477,10 +477,9 @@ function SyncTask:start(task, on_progress, on_done)
             local cache_dir = store:book_dir(book_id) .. "/sync-cache"
             UChild.mkdir(cache_dir)
             local completed_marker = cache_dir .. "/.completed"
-            if mode ~= "reinject" and UChild.file_exists(completed_marker) then
-                UChild.remove_tree(cache_dir)
-                UChild.mkdir(cache_dir)
-            end
+            -- 不再清 .completed 缓存:已缓存的章节 resumed 跳过(免费),失败的(缓存
+            -- 损坏/不存在)重拉。用户想全新重拉走「重置本书」。之前清缓存导致用户
+            -- 点「同步」补齐失败章节时缓存全没(issue #2 评论)。
             local function cache_path(uid) return cache_dir .. "/" .. UChild.id_name(uid) .. ".json" end
             local chapters_cache_path = cache_dir .. "/chapters.json"
             -- 章节列表也入缓存,离线重注才能完全不碰网络。
