@@ -49,7 +49,7 @@ jobs:
         run: |
           prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
           if [ -n "$prev" ]; then
-            notes=$(git log --pretty=format:"- %s" "$prev"..HEAD | grep -vE '^- chore\(release\)|^- chore: bump' || true)
+            notes=$(git log --pretty=format:"- %s" "$prev"..HEAD | grep -vE '^- chore\(release\)|^- chore:|^- docs:' || true)
           fi
           if [ -z "$notes" ]; then notes="- 版本发布"; fi
           {
