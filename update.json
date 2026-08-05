@@ -10,6 +10,6 @@
     "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.6/pickthought.koplugin.zip"
   ],
   "size": 106292,
-  "sha256": "f1ff58095c951c0f40127c6f13c53e4dc5b55ff67cfa3c95b0096d178bbb8fad",
-  "notes": "- fix: 同步不再清 .completed 缓存——从缓存继续补齐,非从头重拉\n- fix: workflow notes 过滤 chore/docs + 修正 update.json notes\n- feat: 更新体验提升——下载进度/版本验证/大小上限/更新日志\n- fix: 注入 GC 增强——collect 替代 step + 注入前释放拉取残留\n- fix: 兼容 KOReader v2026.07——crengine 链接结构从 href 改为 xpointer"
+  "sha256": "d0572e7bd577a56bf9f77b82399377c762c8a035db49411896ca882bea51f7df",
+  "notes": "- fix: config.lua VERSION 同步 bump(之前一直 0.1.0,updater 版本对比永远 mismatch)\n- fix: 同步不再清 .completed 缓存——从缓存继续补齐,非从头重拉\n- fix: workflow notes 过滤 chore/docs + 修正 update.json notes\n- feat: 更新体验提升——下载进度/版本验证/大小上限/更新日志\n- fix: 注入 GC 增强——collect 替代 step + 注入前释放拉取残留\n- fix: 兼容 KOReader v2026.07——crengine 链接结构从 href 改为 xpointer"
 }
