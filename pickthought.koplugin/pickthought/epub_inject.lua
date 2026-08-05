@@ -313,7 +313,7 @@ function M.inject_copy(src, book_id, chapters, opts)
                 end
                 if opts.progress then pcall(opts.progress, entry.path, seen_entries, total_entries) end
                 content = nil
-                collectgarbage("step", 200)
+                collectgarbage("collect")
             end
         end
     end

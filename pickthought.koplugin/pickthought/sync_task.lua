@@ -579,6 +579,9 @@ function SyncTask:start(task, on_progress, on_done)
                 if file:match("%.tmp%-%d+%-%d+$") then os.remove(file) end
             end
 
+            -- 注入前释放拉取阶段的网络缓存/JSON 对象,降内存水位(低内存设备防 OOM)
+            collectgarbage("collect")
+
             local report, sync_err = Sync.run{
                 doc_path = doc_path,
                 book_id = book_id,
