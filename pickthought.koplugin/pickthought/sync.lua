@@ -1,6 +1,6 @@
 -- 同步编排:拉取微信读书划线与想法 → 想法缓存 → 章节映射 → 注入并替换原书。
 -- 替换语义:首次同步把原书备份为 <path>.orig,注入版顶替原路径——KOReader 的
--- 阅读进度/侧车跟着路径走,进度得以保留;再次同步从 .orig 干净原书重新注入。
+-- 阅读进度/侧车跟着路径走,进度得以保留;后续批次在当前副本上增量追加。
 -- 全部外部能力经 deps 注入,便于桌面测试;UI(进度/取消)由调用方通过 progress 提供。
 --
 -- deps:
@@ -35,14 +35,17 @@ function Sync.run(deps)
     local rename = deps.rename or os.rename
     local remove = deps.remove or os.remove
 
-    -- 源解析:书架路径若已是注入版(有 .orig 备份),从干净备份重新注入。
+    -- 已有注入版时,增量同步直接以当前书为源;首次/全量重建才从 .orig 读取。
     local doc_path = tostring(deps.doc_path)
     local backup = Sync.backup_path(doc_path)
-    local src = file_exists(backup) and backup or doc_path
+    local current_meta = deps.load_meta(doc_path)
+    local append = deps.append == true and current_meta and current_meta.has
+        and current_meta.has[EpubInject.MARKER] == true
+    local src = append and doc_path or (file_exists(backup) and backup or doc_path)
 
     local meta, meta_err = deps.load_meta(src)
     if not meta then return nil, meta_err end
-    if meta.has and meta.has[EpubInject.MARKER] then
+    if meta.has and meta.has[EpubInject.MARKER] and not append then
         if src == doc_path then
             return nil, "这本书已被注入过,但找不到原书备份(" .. backup .. "),无法重新同步"
         end
@@ -58,12 +61,20 @@ function Sync.run(deps)
     local fetched = {}
     local total_underlines = 0
     local total_thought_entries = 0
-    -- 分批风控:每次同步最多向网络拉 fetch_budget 个新章节(缓存命中免费),
-    -- 到量干净收工,剩余章节记入 chapters_pending,下次同步自动续。
+    -- fetch_budget 是网络预算; chapter_budget 是 CPU/注入预算,两者不能混用。
     local fetch_budget = tonumber(deps.fetch_budget)
     if fetch_budget and fetch_budget <= 0 then fetch_budget = nil end
+    local chapter_start = math.max(1, tonumber(deps.chapter_start) or 1)
+    if not append then chapter_start = 1 end
+    local chapter_budget = tonumber(deps.chapter_budget)
+    if chapter_budget and chapter_budget <= 0 then chapter_budget = nil end
+    local skip_resumed = deps.skip_resumed == true
     local fresh_fetches = 0
     local chapters_pending = 0
+    local rate_limited = false
+    local rate_limit_wait
+    local next_index = chapter_start
+    local selected_end = #chapter_list
     -- 硬失败=整章划线都没拉到(决定是否中止);部分失败=划线在手、想法批次有缺(只计报告)。
     local hard_failures, partial_errors = 0, 0
     local thoughts_saved, save_failures = 0, 0
@@ -75,8 +86,17 @@ function Sync.run(deps)
         if #text > 160 then text = text:sub(1, 160) .. "…" end
         return text
     end
-    for i, ch in ipairs(chapter_list) do
+    if not skip_resumed and chapter_budget then
+        selected_end = math.min(#chapter_list, chapter_start + chapter_budget - 1)
+    end
+    local i = chapter_start
+    while i <= #chapter_list do
+        local ch = chapter_list[i]
         if fetch_budget and fresh_fetches >= fetch_budget then
+            chapters_pending = #chapter_list - i + 1
+            break
+        end
+        if not skip_resumed and i > selected_end then
             chapters_pending = #chapter_list - i + 1
             break
         end
@@ -88,25 +108,34 @@ function Sync.run(deps)
         if not (good and type(data) == "table" and data.resumed) then
             fresh_fetches = fresh_fetches + 1
         end
-        if good and type(data) == "table" and data.underline_request_ok ~= false then
+        if good and type(data) == "table" and data.resumed and skip_resumed then
+            -- 完整缓存只扫描以寻找新增/缺失章节,不重复写库和重注入旧章节。
+        elseif good and type(data) == "table" and data.underline_request_ok ~= false then
+            local chapter_rate_limited = data.rate_limited == true
+            if chapter_rate_limited then
+                rate_limited = true
+                rate_limit_wait = tonumber(data.rate_limit_wait) or rate_limit_wait
+            end
             -- 断点缓存命中(resumed)不算网络成功,不能复位熔断计数:
             -- 离线续传时散布的缓存命中会把计数清零,让熔断永不触发。
             if not data.resumed then consecutive_hard = 0 end
             if #(data.errors or {}) > 0 then partial_errors = partial_errors + 1 end
-            total_underlines = total_underlines + (data.underline_count or 0)
-            total_thought_entries = total_thought_entries + (data.thought_entry_count or 0)
-            if (data.underline_count or 0) > 0 then
-                fetched[#fetched + 1] = {
-                    uid = ch.uid, title = ch.title,
-                    underlines = data.underlines, review_map = data.review_map,
-                }
-            end
-            if #(data.review_groups or {}) > 0 then
-                local ok_save, saved = pcall(deps.save_thoughts, deps.book_id, ch.uid, data.review_groups)
-                if ok_save and saved then
-                    thoughts_saved = thoughts_saved + 1
-                else
-                    save_failures = save_failures + 1
+            if not chapter_rate_limited then
+                total_underlines = total_underlines + (data.underline_count or 0)
+                total_thought_entries = total_thought_entries + (data.thought_entry_count or 0)
+                if (data.underline_count or 0) > 0 then
+                    fetched[#fetched + 1] = {
+                        uid = ch.uid, title = ch.title,
+                        underlines = data.underlines, review_map = data.review_map,
+                    }
+                end
+                if #(data.review_groups or {}) > 0 then
+                    local ok_save, saved = pcall(deps.save_thoughts, deps.book_id, ch.uid, data.review_groups)
+                    if ok_save and saved then
+                        thoughts_saved = thoughts_saved + 1
+                    else
+                        save_failures = save_failures + 1
+                    end
                 end
             end
         else
@@ -124,8 +153,17 @@ function Sync.run(deps)
                     consecutive_hard, short_err(last_error))
             end
         end
+        next_index = rate_limited and i or (i + 1)
+        if rate_limited then
+            chapters_pending = #chapter_list - next_index + 1
+            break
+        end
+        i = i + 1
     end
-    if hard_failures >= #chapter_list then
+    if chapters_pending == 0 and next_index <= #chapter_list then
+        chapters_pending = #chapter_list - next_index + 1
+    end
+    if hard_failures > 0 and #fetched == 0 then
         return nil, string.format("划线拉取失败(共 %d 章)。\n最后错误:%s",
             hard_failures, short_err(last_error))
     end
@@ -134,20 +172,37 @@ function Sync.run(deps)
             return nil, string.format("有 %d 章拉取失败,已成功的章节没有划线。\n最后错误:%s",
                 hard_failures, short_err(last_error))
         end
-        if chapters_pending > 0 then
+        if chapters_pending > 0 and not rate_limited then
             return nil, string.format("本批 %d 章都没有划线;还剩 %d 章,再次同步继续拉取",
                 #chapter_list - chapters_pending, chapters_pending)
         end
-        return nil, "这本书在微信读书里没有划线"
+        if not skip_resumed and not rate_limited then return nil, "这本书在微信读书里没有划线" end
+        return {
+            no_changes = true, chapters_total = #chapter_list,
+            chapters_pending = chapters_pending, next_index = next_index,
+            total_underlines = 0, total_thought_entries = 0,
+            chapters_with_data = 0, chapters_matched = 0,
+            unmatched = {}, unmatched_underlines = 0,
+            fetch_errors = hard_failures + partial_errors,
+            rate_limited = rate_limited or nil,
+            rate_limit_wait = rate_limit_wait,
+        }
     end
 
     if not step("map", 0, 1, "匹配本地章节") then return nil, "已取消" end
     -- 映射结果缓存:章节→文件的映射对同一本源书是稳定的,续批/离线重注
     -- 只需要匹配没见过的新章节。缓存带源文件指纹,源变了整体作废。
     local map_store, map_signature
+    -- 增量注入的当前 EPUB 已含旧批次标记;新章节映射仍从 .orig 干净正文读取,
+    -- 避免 HTML 标记增长后改变引文定位结果。
+    local map_meta = meta
+    if append and file_exists(backup) then
+        map_meta = deps.load_meta(backup) or meta
+    end
     if deps.map_cache_path then
         -- 指纹 = 源书大小 + 匹配算法版本:换书或改算法都让旧映射作废重建。
-        map_signature = tostring(U.file_size(src) or 0) .. "@" .. tostring(ChapterMap.ALGO_VERSION)
+        local map_source = file_exists(backup) and backup or doc_path
+        map_signature = tostring(U.file_size(map_source) or 0) .. "@" .. tostring(ChapterMap.ALGO_VERSION)
         local raw = U.read_file(deps.map_cache_path, true)
         if raw then
             local ok_decode, decoded = pcall(Json.decode, raw)
@@ -193,13 +248,13 @@ function Sync.run(deps)
     -- 每读一个 spine 文件发一次心跳(只作活动信号,不在文件中途响应取消),
     -- 免得特大书的纯 CPU 匹配被看门狗当成死吊。
     local map_count = 0
-    local spine_total = #(meta.spine or {})
+    local spine_total = #(map_meta.spine or {})
     local mapped_new, unmatched_new = {}, {}
     if #todo > 0 then
-        mapped_new, unmatched_new = ChapterMap.build(meta.spine, function(href)
+        mapped_new, unmatched_new = ChapterMap.build(map_meta.spine, function(href)
             map_count = map_count + 1
             step("map", map_count, spine_total, href)
-            return deps.read_text(meta, href)
+            return deps.read_text(map_meta, href)
         end, todo)
     end
 
@@ -255,7 +310,20 @@ function Sync.run(deps)
         if ok_encode then U.atomic_write(deps.map_cache_path, encoded, true) end
     end
     if #mapped == 0 then
-        return nil, "没有任何章节能匹配到本地书,请确认绑定的和本地打开的是同一本书"
+        if not skip_resumed then
+            return nil, "没有任何章节能匹配到本地书,请确认绑定的和本地打开的是同一本书"
+        end
+        return {
+            no_changes = true, chapters_total = #chapter_list,
+            chapters_pending = chapters_pending, next_index = next_index,
+            total_underlines = total_underlines,
+            total_thought_entries = total_thought_entries,
+            chapters_with_data = #fetched, chapters_matched = 0,
+            unmatched = unmatched, unmatched_underlines = unmatched_underlines,
+            fetch_errors = hard_failures + partial_errors,
+            rate_limited = rate_limited or nil,
+            rate_limit_wait = rate_limit_wait,
+        }
     end
     -- 未匹配章节连带损失的划线数(报告要能说清"失败带走了多少")。
     local underlines_by_uid = {}
@@ -268,7 +336,7 @@ function Sync.run(deps)
     if not step("inject", 0, 1) then return nil, "已取消" end
     -- 注入到中间文件(无 .epub 后缀,不会闪现在书架),成功后原子换位。
     local temp_dest = doc_path .. ".pickthought-new"
-    local stats, inject_err = deps.inject(src, deps.book_id, mapped, temp_dest)
+    local stats, inject_err = deps.inject(src, deps.book_id, mapped, temp_dest, {append = append})
     if not stats then return nil, inject_err end
 
     -- 重叠划线被合并的,把想法并进存活锚点的组:点一个虚线看到这一段全部想法。
@@ -319,11 +387,14 @@ function Sync.run(deps)
             return n
         end)(),
         chapters_pending = chapters_pending,
+        next_index = next_index,
         total_underlines = total_underlines,
         total_thought_entries = total_thought_entries,
         unmatched = unmatched,
         unmatched_underlines = unmatched_underlines,
         fetch_errors = hard_failures + partial_errors,
+        rate_limited = rate_limited or nil,
+        rate_limit_wait = rate_limit_wait,
     }
 end
 

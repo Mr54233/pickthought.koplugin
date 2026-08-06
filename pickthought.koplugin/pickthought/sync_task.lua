@@ -417,7 +417,7 @@ function SyncTask:start(task, on_progress, on_done)
     local doc_path = tostring(task.doc_path or "")
     local book_id = tostring(task.book_id or "")
     local doc_title = tostring(task.title or "")
-    -- mode: "sync"=全新拉取(完成过的旧缓存先清);"reinject"=纯离线,
+    -- mode: "sync"=联网增量同步(复用缓存并按游标续传);"reinject"=纯离线,
     -- 只用上次拉取的数据重跑映射+注入,零网络。
     local mode = tostring(task.mode or "sync")
     -- 分批风控:每次同步最多拉这么多个新章节,大书分多次完成。
@@ -477,6 +477,7 @@ function SyncTask:start(task, on_progress, on_done)
             local cache_dir = store:book_dir(book_id) .. "/sync-cache"
             UChild.mkdir(cache_dir)
             local completed_marker = cache_dir .. "/.completed"
+            local state_path = cache_dir .. "/state.json"
             -- 不再清 .completed 缓存:已缓存的章节 resumed 跳过(免费),失败的(缓存
             -- 损坏/不存在)重拉。用户想全新重拉走「重置本书」。之前清缓存导致用户
             -- 点「同步」补齐失败章节时缓存全没(issue #2 评论)。
@@ -512,6 +513,25 @@ function SyncTask:start(task, on_progress, on_done)
                     end
                 end
                 return true
+            end
+            local previous_state = {}
+            local state_raw = UChild.read_file(state_path, true)
+            if state_raw then
+                local state_ok, decoded = pcall(JsonChild.decode, state_raw)
+                if state_ok and type(decoded) == "table" then previous_state = decoded end
+            end
+            local completed = UChild.file_exists(completed_marker)
+            local incremental = mode == "sync"
+            local retry_after = tonumber(previous_state.retry_after)
+            if retry_after and retry_after > os.time() then
+                FFIUtil.usleep((retry_after - os.time()) * 1000000)
+            end
+            local chapter_start = 1
+            if incremental and not completed then
+                chapter_start = tonumber(previous_state.next_index)
+                    or ((tonumber(previous_state.total) or 0)
+                        - (tonumber(previous_state.pending) or 0) + 1)
+                chapter_start = math.max(1, chapter_start)
             end
             local cached_annotations = {
                 fetch_chapter = function(_, bid, uid)
@@ -596,6 +616,7 @@ function SyncTask:start(task, on_progress, on_done)
                     -- 免得纯本地打包被误报成「等待网络」。
                     local last_emit = 0
                     return EpubInject.inject_copy(src, bid, mapped, {dest = dest,
+                        append = incremental and (completed or chapter_start > 1),
                         progress = function(_, done, total)
                             local now2 = os.time()
                             if now2 - last_emit < 2 then return end
@@ -609,6 +630,10 @@ function SyncTask:start(task, on_progress, on_done)
                         end})
                 end,
                 fetch_budget = mode ~= "reinject" and batch_limit or nil,
+                chapter_budget = mode ~= "reinject" and batch_limit or nil,
+                chapter_start = mode ~= "reinject" and chapter_start or 1,
+                skip_resumed = incremental and completed,
+                append = incremental and (completed or chapter_start > 1),
                 map_cache_path = cache_dir .. "/map.json",
                 progress = function(phase, i, n, text)
                     if cancelled() then return false end
@@ -632,7 +657,10 @@ function SyncTask:start(task, on_progress, on_done)
             if mode ~= "reinject" then
                 local pending = tonumber(report.chapters_pending) or 0
                 local state_ok, state_json = pcall(JsonChild.encode, {
-                    total = report.chapters_total, pending = pending, updated_at = os.time(),
+                    total = report.chapters_total, pending = pending,
+                    next_index = tonumber(report.next_index) or (report.chapters_total + 1),
+                    retry_after = report.rate_limit_wait and (os.time() + report.rate_limit_wait) or nil,
+                    updated_at = os.time(),
                 })
                 if state_ok then UChild.atomic_write(cache_dir .. "/state.json", state_json, true) end
                 -- 全部章节拉完才算「完成」:打标记保留缓存供离线重注,

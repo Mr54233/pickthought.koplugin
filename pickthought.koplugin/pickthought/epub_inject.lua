@@ -157,7 +157,9 @@ function M.inject_copy(src, book_id, chapters, opts)
 
     local meta, err = EpubReader.load(src, opts.archiver)
     if not meta then return nil, err end
-    if meta.has[M.MARKER] then return nil, "该文件已是撷思版副本,请对原书执行注入" end
+    if meta.has[M.MARKER] and not opts.append then
+        return nil, "该文件已是撷思版副本,请对原书执行注入"
+    end
     if drm_blocked(meta, opts.archiver) then return nil, "该 EPUB 受 DRM 保护,无法注入想法" end
 
     -- 预归组:这里只做 href 匹配,把章节按目标文件分组;正文读取与划线定位
@@ -233,6 +235,15 @@ function M.inject_copy(src, book_id, chapters, opts)
         return fail("无法打开 EPUB:" .. tostring(src))
     end
     local marker_chapters = {}
+    if opts.append and meta.has[M.MARKER] then
+        local raw_marker = EpubReader.read(meta, M.MARKER, opts.archiver)
+        local ok_marker, old_marker = pcall(Json.decode, raw_marker or "")
+        if ok_marker and type(old_marker) == "table" and type(old_marker.chapters) == "table" then
+            for _, row in ipairs(old_marker.chapters) do
+                if type(row) == "table" then marker_chapters[#marker_chapters + 1] = row end
+            end
+        end
+    end
     local injected_uids = {}
     -- 跨文件聚合每条划线的着落:拆分章一章对多文件,同一条划线在没对齐的文件里
     -- 各计一次 unlocated,直接累加会虚高数倍(真机:4 万条划线报 3.2 万未注入,

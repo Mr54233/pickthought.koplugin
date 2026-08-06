@@ -223,6 +223,16 @@ local function is_auth_error(value)
         or text:find("登录状态已失效", 1, true) ~= nil
 end
 
+local function is_rate_limit_error(value)
+    local text = tostring(value or "")
+    local lower = text:lower()
+    return lower:find("http 429", 1, true) ~= nil
+        or lower:find("http 499", 1, true) ~= nil
+        or text:find("请求频率超限", 1, true) ~= nil
+        or text:find("-2014", 1, true) ~= nil
+        or lower:find("rate limit", 1, true) ~= nil
+end
+
 function Http:json(opt)
     local text, code, headers, url = self:request(opt)
     text = text or ""
@@ -271,6 +281,7 @@ end
 Http.auth_error_code = auth_error_code
 Http.auth_error_message = auth_error_message
 Http.is_auth_error = is_auth_error
+Http.is_rate_limit_error = is_rate_limit_error
 
 -- 区分网络错误(连接/超时)与鉴权错误——同步失败时告诉用户是"网络问题"还是"登录问题"。
 local function is_network_error(value)

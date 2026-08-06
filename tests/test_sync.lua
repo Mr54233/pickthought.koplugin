@@ -250,6 +250,80 @@ T.case("分批预算:拉满即收工,缓存命中免费", function()
     T.eq(#calls.injected.mapped, 5, "已拉到的 5 章照常注入")
 end)
 
+T.case("章节批次预算限制缓存回放,不再一次性注入全书", function()
+    local rows = {}
+    for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
+    local fetch_calls = 0
+    local deps, calls = make_deps({
+        api = {chapters = function() return {data = rows} end},
+        annotations = {
+            fetch_chapter = function()
+                fetch_calls = fetch_calls + 1
+                return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                    review_map = {}, review_groups = {}, resumed = true,
+                    underline_count = 1, thought_count = 0, thought_entry_count = 0, errors = {}}
+            end,
+        },
+        chapter_budget = 3,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "应成功: " .. tostring(err))
+    T.eq(fetch_calls, 3, "缓存回放也只处理本批 3 章")
+    T.eq(report.chapters_pending, 7, "剩余 7 章")
+    T.eq(report.next_index, 4, "下批从第 4 章开始")
+    T.eq(#calls.injected.mapped, 3, "本批只注入 3 章")
+end)
+
+T.case("已完成缓存续同步跳过旧章,只注入新章", function()
+    local rows = {}
+    for i = 1, 5 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
+    local deps, calls = make_deps({
+        api = {chapters = function() return {data = rows} end},
+        annotations = {
+            fetch_chapter = function(_, _, uid)
+                if tonumber(uid) < 5 then
+                    return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                        review_map = {}, review_groups = {}, resumed = true,
+                        underline_count = 1, thought_count = 0, thought_entry_count = 0, errors = {}}
+                end
+                return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                    review_map = {}, review_groups = {},
+                    underline_count = 1, thought_count = 0, thought_entry_count = 0, errors = {}}
+            end,
+        },
+        skip_resumed = true,
+        fetch_budget = 1,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "应成功: " .. tostring(err))
+    T.eq(report.chapters_pending, 0, "新章处理后无剩余")
+    T.eq(report.next_index, 6, "游标到章节末尾")
+    T.eq(#calls.injected.mapped, 1, "旧缓存不重复注入")
+end)
+
+T.case("限流章节不推进游标,下次同步可重试", function()
+    local deps, calls = make_deps({
+        annotations = {
+            fetch_chapter = function(_, _, uid)
+                if tostring(uid) == "1" then
+                    return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                        review_map = {}, review_groups = {}, underline_count = 1,
+                        thought_count = 0, thought_entry_count = 0, errors = {}, rate_limited = true,
+                        rate_limit_wait = 7}
+                end
+                return {underlines = {}, review_map = {}, review_groups = {},
+                    underline_count = 0, thought_count = 0, thought_entry_count = 0, errors = {}}
+            end,
+        },
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "限流应返回可续传报告: " .. tostring(err))
+    T.eq(report.rate_limited, true, "报告标记限流")
+    T.eq(report.rate_limit_wait, 7, "报告携带下次重试等待时间")
+    T.eq(report.next_index, 1, "限流章下次仍从当前章开始")
+    T.eq(calls.injected, nil, "限流章的半成品不注入")
+end)
+
 T.case("连续硬失败触发断网熔断", function()
     local rows = {}
     for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end

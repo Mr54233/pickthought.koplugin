@@ -1,5 +1,6 @@
 -- 数据源:微信读书划线 + 想法。
 local Http_ok, Http = pcall(require, "pickthought.http")
+local Socket_ok, socket = pcall(require, "socket")
 -- 划线走 /book/underlines(gateway,按章,返回该章所有划线,不限热度);
 -- 想法走 /book/readreviews(gateway,按 range 拉该段全部,count=30)。
 -- 输出与原 Annotations:fetch_chapter 同形:
@@ -14,6 +15,10 @@ local logger = require("logger")
 
 local WebFetch = {}
 WebFetch.__index = WebFetch
+
+local function pause(seconds)
+    if Socket_ok and socket and type(socket.sleep) == "function" then socket.sleep(seconds) end
+end
 
 local function scalar_str(v)
     local kind = type(v)
@@ -130,12 +135,16 @@ function WebFetch.build_chapter(book_id, uid, marks_rows, reviews_data)
 end
 
 function WebFetch:new(api)
-    return setmetatable({api = api}, self)
+    return setmetatable({api = api, rate_limit_streak = 0, rate_limit_until = 0}, self)
 end
 
 function WebFetch:fetch_chapter(book_id, uid, progress)
     progress = progress or function() end
     local chapter_uid = tostring(uid)
+    local now = os.time()
+    if self.rate_limit_until and self.rate_limit_until > now then
+        pause(self.rate_limit_until - now)
+    end
     -- /book/underlines:该章所有划线(不限热度),比 bestbookmarks(整本热门 top)覆盖全。
     local ok, data = pcall(function() return self.api:underlines(book_id, chapter_uid) end)
     if not ok then
@@ -159,12 +168,15 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
     -- 远比 /web/review/list 的"章级热门前1-2条"完整。这是 fork 时换端点丢掉
     -- 的能力,现恢复(miuread/weread 原版均用此端点)。
     local all_reviews, errors = {}, {}
+    local rate_limited = false
+    local rate_limit_wait
     if #ranges > 0 and self.api.readreviews then
         local batches = self.api:review_batches(ranges, 5)
         for index, batch in ipairs(batches) do
             progress("thoughts", index, #batches, "")
             local ok, resp = pcall(function() return self.api:readreviews(book_id, chapter_uid, batch) end)
             if ok and type(resp) == "table" and type(resp.reviews) == "table" then
+                self.rate_limit_streak = 0
                 for _, r in ipairs(resp.reviews) do all_reviews[#all_reviews + 1] = r end
             elseif ok then
                 -- 返回结构异常:降级逐 range 补(防一批异常拖垮整章)。
@@ -179,6 +191,17 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
             else
                 errors[#errors + 1] = tostring(resp)
                 if Http_ok and Http.is_auth_error(resp) then break end
+                if Http_ok and Http.is_rate_limit_error(resp) then
+                    self.rate_limit_streak = math.min(5, (self.rate_limit_streak or 0) + 1)
+                    local wait = math.min(30, 2 ^ self.rate_limit_streak)
+                    self.rate_limit_until = os.time() + wait
+                    rate_limited = true
+                    rate_limit_wait = wait
+                    logger.warn("[撷思][WebFetch] rate limited; stop current chapter",
+                        "book=", tostring(book_id), "chapter=", chapter_uid,
+                        "wait=", tostring(wait), "streak=", tostring(self.rate_limit_streak))
+                    break
+                end
                 logger.warn("[撷思][WebFetch] readreviews 批次失败",
                     "book=", tostring(book_id), "chapter=", chapter_uid,
                     "batch=", index, "/", tostring(#batches), "error=", tostring(resp))
@@ -188,6 +211,8 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
     progress("thoughts", 1, 1, "")
     local result = WebFetch.build_chapter(book_id, chapter_uid, marks_rows, {reviews = all_reviews})
     result.errors = errors
+    result.rate_limited = rate_limited or nil
+    result.rate_limit_wait = rate_limit_wait
     return result
 end
 

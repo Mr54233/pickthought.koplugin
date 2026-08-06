@@ -1,4 +1,13 @@
+package.preload["ltn12"] = function()
+    return {source = {string = function(value) return value end},
+        sink = {table = function() return function() end end}}
+end
+package.preload["socketutil"] = function()
+    return {set_timeout = function() end, reset_timeout = function() end}
+end
+
 local WebFetch = require("pickthought.web_fetch")
+local Http = require("pickthought.http")
 
 -- /book/underlines 按章返回(该章所有划线,不限热度)
 local UNDERLINES_116 = {underlines = {
@@ -136,4 +145,15 @@ T.case("fetch_chapter: readreviews 按 range 拉同段多条(gateway 嵌套)", f
         if g.range == "2974-3006" then found = #g.texts end
     end
     T.eq(found, 2, "2974-3006 段两条想法(pageReviews 展开)")
+end)
+
+T.case("499 限流被识别并停止当前章节批次", function()
+    T.ok(Http.is_rate_limit_error("HTTP 499: 请求频率超限,请稍后再试"), "499 限流错误应识别")
+    local result = WebFetch:new(make_api(
+        function() return UNDERLINES_116 end,
+        function() error("HTTP 499: 请求频率超限,请稍后再试") end
+    )):fetch_chapter("b1", 116)
+    T.eq(result.rate_limited, true, "章节标记限流")
+    T.eq(result.rate_limit_wait, 2, "首次限流建议等待 2 秒")
+    T.eq(result.underline_count, 2, "已有划线仍保留在结果中")
 end)

@@ -747,8 +747,9 @@ function Plugin:_sync_run(path,bound)
             save_thoughts=function(book_id,uid,groups) return Thoughts.save(self.store,book_id,uid,groups) end,
             merge_thoughts=function(book_id,uid,from,into) return Thoughts.merge(self.store,book_id,uid,from,into) end,
             map_cache_path=self.store:book_dir(bound.book_id).."/sync-cache/map.json",
-            inject=function(src,book_id,mapped,dest)
-                return EpubInject.inject_copy(src,book_id,mapped,{dest=dest})
+            inject=function(src,book_id,mapped,dest,options)
+                return EpubInject.inject_copy(src,book_id,mapped,
+                    {dest=dest,append=options and options.append==true})
             end,
             progress=function(phase,i,n,text)
                 local msg
@@ -778,6 +779,17 @@ function Plugin:_sync_run(path,bound)
 end
 
 function Plugin:_sync_report(report)
+    if report.no_changes then
+        local pending = tonumber(report.chapters_pending) or 0
+        local reason = report.rate_limited
+            and "\n\n微信读书触发频率限制,稍后重试即可继续。" or ""
+        if pending > 0 then
+            self:info(string.format("本批没有可注入的新数据\n\n还剩 %d 章,再次同步会继续。%s", pending, reason))
+        else
+            self:info("没有新的章节需要同步" .. reason)
+        end
+        return
+    end
     -- 用户视角只有三个数:拿到多少、放进书里多少、没放进多少。
     -- 细节(重叠合并/定位方式/章节匹配)进日志不进对话框。
     local lines={
@@ -799,6 +811,9 @@ function Plugin:_sync_report(report)
     end
     if (report.fetch_errors or 0)>0 then
         lines[#lines+1]=string.format("有 %d 章没拉全,重新同步可补",report.fetch_errors)
+    end
+    if report.rate_limited then
+        lines[#lines+1]="微信读书触发频率限制,本批已提前停止;稍后重试即可继续"
     end
     if (report.save_failures or 0)>0 then
         lines[#lines+1]=string.format("有 %d 章想法没存上(检查存储空间)",report.save_failures)

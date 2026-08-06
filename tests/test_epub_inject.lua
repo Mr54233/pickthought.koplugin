@@ -100,6 +100,28 @@ T.case("拒绝二次注入(is_copy)", function()
     T.ok(stats == nil and tostring(err):find("撷思", 1, true), "对副本注入应拒绝并报中文错")
 end)
 
+T.case("增量注入保留旧标记并追加新章节", function()
+    local first_stats, first_err, first_arc = run_inject(book_files(), CHAPTERS)
+    T.ok(first_stats, "首批注入应成功: " .. tostring(first_err))
+    local old_files = STUBS.written(first_arc._last_writer)
+    local second_chapter = {
+        {chapter_uid = "43", href = "Text/ch2.xhtml",
+            underlines = {{range = "0-7", markText = "滟滟随波千万里"}}, review_map = {}},
+    }
+    local second_stats, second_err, second_arc = run_inject(old_files, second_chapter, nil, {
+        append = true, dest = "/books/书.撷思.epub",
+    })
+    T.ok(second_stats, "追加注入应成功: " .. tostring(second_err))
+    local marker
+    for _, entry in ipairs(STUBS.written(second_arc._last_writer)) do
+        if entry.path == EpubInject.MARKER then marker = entry.content end
+    end
+    local decoded = Json.decode(marker)
+    T.eq(#decoded.chapters, 2, "旧章和新章标记都保留")
+    T.eq(decoded.chapters[1].uid, "42", "旧章节标记保留")
+    T.eq(decoded.chapters[2].uid, "43", "新章节标记追加")
+end)
+
 T.case("章节匹配:后缀与未匹配", function()
     local chapters = {
         {chapter_uid = "42", href = "ch1.xhtml", underlines = CHAPTERS[1].underlines,

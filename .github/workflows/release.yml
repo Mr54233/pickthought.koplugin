@@ -14,7 +14,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: 安装 LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit
+
+      - name: 运行测试
+        run: luajit tests/run.lua
+
+      - name: 编译全部 Lua 文件
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            luajit -b "$file" /tmp/pickthought-lua-check.luac
+          done < <(find pickthought.koplugin -type f -name '*.lua' -print0)
+
+      - name: 检查补丁格式
+        run: git diff --check
+
   release:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -34,6 +61,10 @@ jobs:
         id: ver
         run: |
           ver=$(grep 'version' pickthought.koplugin/_meta.lua | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+          config_ver=$(grep 'VERSION' pickthought.koplugin/pickthought/config.lua | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+          tag_ver="${GITHUB_REF_NAME#v}"
+          test "$ver" = "$config_ver"
+          test "$ver" = "$tag_ver"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
 
       - name: 算校验值
