@@ -15,6 +15,10 @@ local lfs = require("libs/libkoreader-lfs")
 local SyncTask = {}
 SyncTask.__index = SyncTask
 
+-- Kindle 512 MB 机型在可用内存约 100 MB 时，fork reader.lua 子进程会被内核
+-- 拒绝。这里留出保守余量，避免把底层 ENOMEM 直接抛给用户。
+local MIN_FORK_AVAILABLE_KB = 128 * 1024
+
 local function lower_worker_priority()
     local ok,ffi=pcall(require,"ffi")
     if not ok or not ffi then return end
@@ -87,6 +91,17 @@ local function file_mtime(path)
     return attr and tonumber(attr.modification or attr.change) or nil
 end
 
+local function parse_memory_available_kb(raw)
+    local values = {}
+    for key, value in tostring(raw or ""):gmatch("([%a_]+):%s*(%d+)%s*kB") do
+        values[key] = tonumber(value)
+    end
+    if values.MemAvailable then return values.MemAvailable end
+    if values.MemFree then
+        return values.MemFree + (values.Buffers or 0) + (values.Cached or 0)
+    end
+end
+
 local function process_exists(pid)
     pid=tonumber(pid)
     if not pid or pid<=1 then return false end
@@ -148,6 +163,59 @@ function SyncTask:_reset_device_timeout()
     return false
 end
 
+function SyncTask:_memory_available_kb()
+    return parse_memory_available_kb(U.read_file("/proc/meminfo", true))
+end
+
+function SyncTask:_enable_memory_mode()
+    if self._memory_mode then return true end
+    local ok, mode = pcall(function()
+        return require("pickthought.memory_mode"):new(self.store)
+    end)
+    if not ok then
+        logger.warn("[撷思][SyncTask] memory mode unavailable", tostring(mode))
+        return nil, tostring(mode)
+    end
+    local called, enabled, enable_error = pcall(mode.set_enabled, mode, true)
+    if not called or not enabled then
+        local message = enable_error or enabled
+        logger.warn("[撷思][SyncTask] memory mode enable failed", tostring(message))
+        return nil, tostring(message)
+    end
+    self._memory_mode = mode
+    return true
+end
+
+function SyncTask:_release_memory_mode()
+    local mode = self._memory_mode
+    self._memory_mode = nil
+    if mode then
+        local called, restored, restore_error = pcall(mode.set_enabled, mode, false)
+        if not called or not restored then
+            logger.warn("[撷思][SyncTask] memory mode restore failed",
+                tostring(restore_error or restored))
+        end
+    end
+end
+
+function SyncTask:_prepare_worker_memory()
+    local before = self:_memory_available_kb()
+    self:_enable_memory_mode()
+    pcall(function() require("pickthought.thoughts").clear_memory_cache() end)
+    collectgarbage("collect")
+    local after = self:_memory_available_kb()
+    logger.info("[撷思][SyncTask] pre-fork memory",
+        "before_kb=", tostring(before), "after_kb=", tostring(after),
+        "minimum_kb=", tostring(MIN_FORK_AVAILABLE_KB))
+    if after and after < MIN_FORK_AVAILABLE_KB then
+        self:_release_memory_mode()
+        return nil, string.format(
+            "设备可用内存不足(%.0f MB)，未启动同步。请关闭其他书籍或重启 KOReader 后重试。",
+            after / 1024)
+    end
+    return true
+end
+
 function SyncTask:_hold_awake()
     if not self.keep_awake_enabled or self.standby_held then return end
     local ok, err = pcall(function() UIManager:preventStandby() end)
@@ -157,11 +225,7 @@ function SyncTask:_hold_awake()
         -- 另一条独立休眠路径,用 PluginShare.pause_auto_suspend 一并按住
         -- (Kobo 等无 T1 的设备靠的就是这条)。
         pcall(function() require("pluginshare").pause_auto_suspend = true end)
-        -- 低内存模式:降 CREngine 缓存比例,给同步子进程腾内存(大书防 OOM)
-        pcall(function()
-            self._memory_mode = require("pickthought.memory_mode"):new(self.store)
-            self._memory_mode:set_enabled(true)
-        end)
+        self:_enable_memory_mode()
         local reset = self:_reset_device_timeout()
         logger.info("[撷思][SyncTask] standby lock acquired", "t1_reset=", tostring(reset))
     else
@@ -170,14 +234,12 @@ function SyncTask:_hold_awake()
 end
 
 function SyncTask:_release_awake()
-    if not self.standby_held then return end
-    self.standby_held = false
-    if self._memory_mode then
-        pcall(function() self._memory_mode:set_enabled(false) end)
-        self._memory_mode = nil
+    if self.standby_held then
+        self.standby_held = false
+        pcall(function() UIManager:allowStandby() end)
+        pcall(function() require("pluginshare").pause_auto_suspend = false end)
     end
-    pcall(function() UIManager:allowStandby() end)
-    pcall(function() require("pluginshare").pause_auto_suspend = false end)
+    self:_release_memory_mode()
     logger.info("[撷思][SyncTask] standby lock released")
 end
 
@@ -696,9 +758,16 @@ function SyncTask:start(task, on_progress, on_done)
         UChild.atomic_write(result_path, encoded, true)
     end
 
+    local prepared, prepare_error = self:_prepare_worker_memory()
+    if not prepared then
+        os.remove(worker_settings_path)
+        return false, prepare_error
+    end
+
     local ok, pid, err = pcall(FFIUtil.runInSubProcess, child, false, false)
     if not ok or not pid then
         os.remove(worker_settings_path)
+        self:_release_memory_mode()
         return false, tostring(err or pid or "无法启动同步子进程")
     end
 
@@ -727,5 +796,8 @@ function SyncTask:start(task, on_progress, on_done)
     self:_schedule()
     return true
 end
+
+SyncTask.MIN_FORK_AVAILABLE_KB = MIN_FORK_AVAILABLE_KB
+SyncTask._parse_memory_available_kb = parse_memory_available_kb
 
 return SyncTask
