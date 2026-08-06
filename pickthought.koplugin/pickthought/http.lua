@@ -3,6 +3,7 @@ local socketutil = require("socketutil")
 local ok_http, http = pcall(require, "socket.http")
 local ok_https, https = pcall(require, "ssl.https")
 local ok_socket, socket = pcall(require, "socket")
+local lfs = require("libs/libkoreader-lfs")
 local Json = require("pickthought.json")
 local Cookies = require("pickthought.cookies")
 local Protocol = require("pickthought.protocol")
@@ -48,8 +49,108 @@ local function pause(seconds)
     end
 end
 
+local function clock_now()
+    if ok_socket and socket and type(socket.gettime) == "function" then
+        return socket.gettime()
+    end
+    return os.time()
+end
+
 function Http:new(store)
-    return setmetatable({store = store, user_agent = Protocol.USER_AGENT}, self)
+    local data_dir = store and tostring(store.data_dir or "") or ""
+    return setmetatable({
+        store = store, user_agent = Protocol.USER_AGENT,
+        last_weread_request_at_by_scope = {},
+        shared_pacing_path = data_dir ~= "" and (data_dir .. "/weread-pacing.json") or nil,
+    }, self)
+end
+
+function Http:_pacing_path(scope)
+    local path = tostring(self.shared_pacing_path or "")
+    if path == "" then return "" end
+    scope = tostring(scope or "global"):gsub("[^%w%-_]", "-")
+    if scope == "" or scope == "global" then return path end
+    return path:gsub("%.json$", "") .. "-" .. scope .. ".json"
+end
+
+local function release_pacing_lock(path)
+    if type(lfs.rmdir) == "function" then pcall(lfs.rmdir, path) end
+end
+
+local function pacing_lock_stale(path)
+    if type(lfs.attributes) ~= "function" then return false end
+    local ok, modified = pcall(lfs.attributes, path, "modification")
+    return ok and tonumber(modified) and os.time() - tonumber(modified) > 10
+end
+
+local function acquire_pacing_lock(path)
+    if type(lfs.mkdir) ~= "function" then return false end
+    local deadline = clock_now() + 2
+    while clock_now() < deadline do
+        if lfs.mkdir(path) == true then return true end
+        if pacing_lock_stale(path) then release_pacing_lock(path) end
+        pause(0.04)
+    end
+    return false
+end
+
+function Http:_reserve_shared_pacing(scope, interval, jitter)
+    local path = self:_pacing_path(scope)
+    interval = math.max(0, tonumber(interval) or 0)
+    jitter = math.max(0, tonumber(jitter) or 0)
+    if path == "" or interval <= 0 then return 0 end
+
+    local lock_path = path .. ".lock"
+    if not acquire_pacing_lock(lock_path) then return 0 end
+    local ok, wait = pcall(function()
+        local now = clock_now()
+        local next_at = 0
+        local raw = Util.read_file(path, true)
+        if raw then
+            local decoded, state = pcall(Json.decode, raw)
+            if decoded and type(state) == "table" then next_at = tonumber(state.next_at) or 0 end
+        end
+        if next_at < now - interval or next_at > now + 120 then next_at = now end
+        local scheduled = math.max(now, next_at)
+        local extra = jitter > 0 and math.random() * jitter or 0
+        local wrote, err = Util.atomic_write(path, Json.encode({
+            next_at = scheduled + interval + extra,
+            scope = tostring(scope or "global"), updated_at = os.time(),
+        }), true)
+        if not wrote then
+            logger.warn("[撷思][HTTP] shared pacing state write failed", tostring(err))
+            return 0
+        end
+        return math.max(0, scheduled - now)
+    end)
+    release_pacing_lock(lock_path)
+    if not ok then
+        logger.warn("[撷思][HTTP] shared pacing reservation failed", tostring(wait))
+        return 0
+    end
+    return tonumber(wait) or 0
+end
+
+function Http:_pace(url, opt)
+    opt = opt or {}
+    if not is_weread_url(url) or opt.pacing == false then return end
+    local scope = tostring(opt.pacing_scope or opt.rate_limit_scope or "global")
+    local interval = tonumber(opt.min_interval) or 0
+    local jitter = tonumber(opt.pacing_jitter) or 0
+    if interval <= 0 and jitter <= 0 then return end
+    local now = clock_now()
+    local last = tonumber((self.last_weread_request_at_by_scope or {})[scope]) or 0
+    local wait = math.max(0, interval - (now - last))
+    if wait > 0 then pause(wait) end
+    if opt.shared_pacing == true then
+        local shared_wait = self:_reserve_shared_pacing(scope, interval, jitter)
+        if shared_wait > 0 then pause(shared_wait) end
+    elseif jitter > 0 then
+        pause(math.random() * jitter)
+    end
+    local requested_at = clock_now()
+    self.last_weread_request_at_by_scope = self.last_weread_request_at_by_scope or {}
+    self.last_weread_request_at_by_scope[scope] = requested_at
 end
 
 function Http:_jar()
@@ -155,6 +256,7 @@ function Http:request(opt)
     local last_text, last_code, last_headers, last_url, last_error
 
     for attempt = 1, retries + 1 do
+        self:_pace(opt.url, opt)
         local text, code, headers, url, err = self:_request_once(opt)
         last_text, last_code, last_headers, last_url, last_error = text, code, headers, url, err
         if code and not transient_status(code) then return text, code, headers, url end

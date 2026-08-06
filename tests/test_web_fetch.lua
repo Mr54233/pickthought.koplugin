@@ -8,6 +8,7 @@ end
 
 local WebFetch = require("pickthought.web_fetch")
 local Http = require("pickthought.http")
+local Api = require("pickthought.api")
 
 -- /book/underlines 按章返回(该章所有划线,不限热度)
 local UNDERLINES_116 = {underlines = {
@@ -156,4 +157,73 @@ T.case("499 限流被识别并停止当前章节批次", function()
     T.eq(result.rate_limited, true, "章节标记限流")
     T.eq(result.rate_limit_wait, 2, "首次限流建议等待 2 秒")
     T.eq(result.underline_count, 2, "已有划线仍保留在结果中")
+end)
+
+T.case("Web 接口失败时回退 Agent Gateway", function()
+    local calls = {}
+    local fake_http = {
+        get_json = function(_, url)
+            calls[#calls + 1] = url
+            error("HTTP 503")
+        end,
+        post_json = function(_, url, payload)
+            calls[#calls + 1] = url
+            if url:find("readReviews", 1, true) then error("HTTP 503") end
+            return {underlines = {{range = "0-7", markText = "春江潮水连海平"}}}
+        end,
+    }
+    local fake_store = {auth = function() return {api_key = "test-key"} end}
+    local api = Api:new(fake_http, fake_store)
+    local underlines = api:underlines("b1", 116)
+    T.eq(underlines._annotation_source, "agent", "Web underlines 失败后走 Agent")
+    local reviews = api:readreviews("b1", 116, {{range = "0-7"}})
+    T.eq(reviews._annotation_source, "agent", "Web readReviews 失败后走 Agent")
+    T.ok(calls[1]:find("/web/book/underlines", 1, true), "先尝试 Web underlines")
+    T.ok(calls[2]:find("api/agent/gateway", 1, true), "underlines 回退 Gateway")
+    T.ok(calls[3]:find("/web/book/readReviews", 1, true), "先尝试 Web readReviews")
+    T.ok(calls[4]:find("api/agent/gateway", 1, true), "readReviews 回退 Gateway")
+end)
+
+T.case("Web 接口成功时不调用 Agent Gateway", function()
+    local calls = {}
+    local fake_http = {
+        get_json = function(_, url, options)
+            calls[#calls + 1] = {url = url, options = options}
+            return {underlines = {}}
+        end,
+        post_json = function(_, url, payload, options)
+            calls[#calls + 1] = {url = url, options = options}
+            return {reviews = {}}
+        end,
+    }
+    local fake_store = {auth = function() return {api_key = "test-key"} end}
+    local api = Api:new(fake_http, fake_store)
+    T.eq(api:underlines("b1", 116)._annotation_source, "web", "Web underlines 成功优先")
+    T.eq(api:readreviews("b1", 116, {{range = "0-7"}})._annotation_source, "web",
+        "Web readReviews 成功优先")
+    T.eq(#calls, 2, "Web 成功不触发 Agent")
+    T.eq(calls[1].options.pacing_scope, "annotations-web", "Web 使用独立节流域")
+    T.eq(calls[2].options.shared_pacing, true, "Web 使用共享节流")
+end)
+
+T.case("大批次参数错误时二分拆分,不逐条盲重试", function()
+    local ranges = {
+        {range = "1-2", markText = "亲密关系中满足的秘诀"},
+        {range = "3-4", markText = "我们总是喜欢那些喜欢我们的人。"},
+        {range = "5-6", markText = "独立段的想法"},
+    }
+    local calls = {}
+    local fetcher = WebFetch:new({
+        underlines = function() return {underlines = ranges} end,
+        review_batches = function(_, items) return {items} end,
+        readreviews = function(_, _, _, batch)
+            calls[#calls + 1] = #batch
+            if #batch > 1 then error("params error(node)") end
+            return {reviews = {}}
+        end,
+    })
+    local result = fetcher:fetch_chapter("b1", 116)
+    T.eq(#calls, 5, "3 个 range 的二分请求为 5 次,不退化为额外逐条循环")
+    T.eq(result.rate_limited, nil, "参数错误不应误判为限流")
+    T.eq(#result.errors, 0, "拆分后单 range 全部成功")
 end)

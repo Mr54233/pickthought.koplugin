@@ -244,7 +244,37 @@ function Api:web_progress(id)
     return data
 end
 
-function Api:_chapter_call(name, id, chapter_uid, extra)
+local WEB_ANNOTATION_OPTIONS = {
+    auth = true, retries = 1, timeout = {10, 18},
+    pacing_scope = "annotations-web", min_interval = 0.45,
+    pacing_jitter = 0.10, shared_pacing = true,
+}
+
+local AGENT_ANNOTATION_OPTIONS = {
+    retries = 0, timeout = {10, 18},
+    pacing_scope = "annotations-agent", min_interval = 4.25,
+    pacing_jitter = 0.35, shared_pacing = true,
+}
+
+local function annotation_batch_error(value)
+    local text = tostring(value or ""):lower()
+    return text:find("params error", 1, true) ~= nil
+        or text:find("invalid range", 1, true) ~= nil
+        or text:find("invalid parameter", 1, true) ~= nil
+        or text:find("range error", 1, true) ~= nil
+end
+
+local function annotation_headers(book_id, chapter_uid)
+    return {
+        Accept = "application/json, text/plain, */*",
+        Origin = WEB,
+        Referer = Protocol.reader_url(book_id, chapter_uid),
+        ["Cache-Control"] = "no-cache, no-store, max-age=0",
+        Pragma = "no-cache",
+    }
+end
+
+function Api:_chapter_call(name, id, chapter_uid, extra, request_options)
     local last
     local candidates = unique_candidates(chapter_uid)
     if #candidates == 0 then error(name .. ": invalid chapterUid") end
@@ -252,7 +282,7 @@ function Api:_chapter_call(name, id, chapter_uid, extra)
         local payload = U.copy(extra or {})
         payload.bookId = tostring(id)
         payload.chapterUid = uid
-        local ok, value = pcall(self.call, self, name, payload)
+        local ok, value = pcall(self.call, self, name, payload, request_options)
         if ok then return value end
         last = value
         if not tostring(value):lower():find("params error%(node%)") then error(value) end
@@ -261,7 +291,40 @@ function Api:_chapter_call(name, id, chapter_uid, extra)
 end
 
 function Api:underlines(id, chapter_uid)
-    return self:_chapter_call("/book/underlines", id, chapter_uid)
+    local ok, value = pcall(function()
+        local last
+        for _, uid in ipairs(unique_candidates(chapter_uid)) do
+            local url = WEB .. "/web/book/underlines?bookId="
+                .. Protocol.escape(tostring(id or ""))
+                .. "&chapterUid=" .. Protocol.escape(uid)
+            local call_ok, data = pcall(function()
+                return self:_web_call(function()
+                    return self.http:get_json(url, {
+                        auth = true, retries = WEB_ANNOTATION_OPTIONS.retries,
+                        timeout = WEB_ANNOTATION_OPTIONS.timeout,
+                        pacing_scope = WEB_ANNOTATION_OPTIONS.pacing_scope,
+                        min_interval = WEB_ANNOTATION_OPTIONS.min_interval,
+                        pacing_jitter = WEB_ANNOTATION_OPTIONS.pacing_jitter,
+                        shared_pacing = WEB_ANNOTATION_OPTIONS.shared_pacing,
+                        headers = annotation_headers(id, uid),
+                    })
+                end)
+            end)
+            if call_ok and type(data) == "table" then return data end
+            last = call_ok and "web underlines returned invalid data" or data
+            if not annotation_batch_error(last) then error(last) end
+        end
+        error(last or "web underlines failed")
+    end)
+    if ok then
+        value._annotation_source = "web"
+        return value
+    end
+    logger.warn("[撷思][Api] web underlines unavailable; using Skill Gateway",
+        "book=", tostring(id), "chapter=", tostring(chapter_uid), "error=", tostring(value))
+    local result = self:_chapter_call("/book/underlines", id, chapter_uid, nil, AGENT_ANNOTATION_OPTIONS)
+    if type(result) == "table" then result._annotation_source = "agent" end
+    return result
 end
 
 function Api:review_batches(ranges, batch_size)
@@ -279,7 +342,43 @@ function Api:review_batches(ranges, batch_size)
 end
 
 function Api:readreviews(id, chapter_uid, batch)
-    return self:_chapter_call("/book/readreviews", id, chapter_uid, {reviews=sanitize(batch or {})})
+    local payload_batch = sanitize(batch or {})
+    local ok, value = pcall(function()
+        local last
+        for _, uid in ipairs(unique_candidates(chapter_uid)) do
+            local call_ok, data = pcall(function()
+                return self:_web_call(function()
+                    return self.http:post_json(WEB .. "/web/book/readReviews", {
+                        bookId = tostring(id or ""), chapterUid = uid, reviews = payload_batch,
+                    }, {
+                        auth = true, retries = WEB_ANNOTATION_OPTIONS.retries,
+                        timeout = WEB_ANNOTATION_OPTIONS.timeout,
+                        pacing_scope = WEB_ANNOTATION_OPTIONS.pacing_scope,
+                        min_interval = WEB_ANNOTATION_OPTIONS.min_interval,
+                        pacing_jitter = WEB_ANNOTATION_OPTIONS.pacing_jitter,
+                        shared_pacing = WEB_ANNOTATION_OPTIONS.shared_pacing,
+                        headers = annotation_headers(id, uid),
+                    })
+                end)
+            end)
+            if call_ok and type(data) == "table" then return data end
+            last = call_ok and "web readReviews returned invalid data" or data
+            if not annotation_batch_error(last) then error(last) end
+        end
+        error(last or "web readReviews failed")
+    end)
+    if ok then
+        value._annotation_source = "web"
+        return value
+    end
+    if annotation_batch_error(value) then error(value) end
+    logger.warn("[撷思][Api] web readReviews unavailable; using Skill Gateway",
+        "book=", tostring(id), "chapter=", tostring(chapter_uid),
+        "ranges=", tostring(#payload_batch), "error=", tostring(value))
+    local result = self:_chapter_call("/book/readreviews", id, chapter_uid,
+        {reviews = payload_batch}, AGENT_ANNOTATION_OPTIONS)
+    if type(result) == "table" then result._annotation_source = "agent" end
+    return result
 end
 
 Api._scalar = scalar

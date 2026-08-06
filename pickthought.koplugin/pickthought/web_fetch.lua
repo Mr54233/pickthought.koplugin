@@ -20,6 +20,14 @@ local function pause(seconds)
     if Socket_ok and socket and type(socket.sleep) == "function" then socket.sleep(seconds) end
 end
 
+local function is_data_specific_error(value)
+    local text = tostring(value or ""):lower()
+    return text:find("params error", 1, true) ~= nil
+        or text:find("invalid range", 1, true) ~= nil
+        or text:find("invalid parameter", 1, true) ~= nil
+        or text:find("range error", 1, true) ~= nil
+end
+
 local function scalar_str(v)
     local kind = type(v)
     if kind == "string" or kind == "number" then return tostring(v) end
@@ -171,41 +179,66 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
     local rate_limited = false
     local rate_limit_wait
     if #ranges > 0 and self.api.readreviews then
-        local batches = self.api:review_batches(ranges, 5)
-        for index, batch in ipairs(batches) do
-            progress("thoughts", index, #batches, "")
-            local ok, resp = pcall(function() return self.api:readreviews(book_id, chapter_uid, batch) end)
-            if ok and type(resp) == "table" and type(resp.reviews) == "table" then
-                self.rate_limit_streak = 0
-                for _, r in ipairs(resp.reviews) do all_reviews[#all_reviews + 1] = r end
-            elseif ok then
-                -- 返回结构异常:降级逐 range 补(防一批异常拖垮整章)。
-                logger.warn("[撷思][WebFetch] readreviews 结构异常,逐 range 补",
-                    "book=", tostring(book_id), "chapter=", chapter_uid, "batch=", index)
-                for _, item in ipairs(batch) do
-                    local s_ok, s_resp = pcall(function() return self.api:readreviews(book_id, chapter_uid, {item}) end)
-                    if s_ok and type(s_resp) == "table" and type(s_resp.reviews) == "table" then
-                        for _, r in ipairs(s_resp.reviews) do all_reviews[#all_reviews + 1] = r end
-                    end
-                end
-            else
-                errors[#errors + 1] = tostring(resp)
-                if Http_ok and Http.is_auth_error(resp) then break end
-                if Http_ok and Http.is_rate_limit_error(resp) then
-                    self.rate_limit_streak = math.min(5, (self.rate_limit_streak or 0) + 1)
-                    local wait = math.min(30, 2 ^ self.rate_limit_streak)
-                    self.rate_limit_until = os.time() + wait
-                    rate_limited = true
-                    rate_limit_wait = wait
-                    logger.warn("[撷思][WebFetch] rate limited; stop current chapter",
-                        "book=", tostring(book_id), "chapter=", chapter_uid,
-                        "wait=", tostring(wait), "streak=", tostring(self.rate_limit_streak))
-                    break
-                end
-                logger.warn("[撷思][WebFetch] readreviews 批次失败",
-                    "book=", tostring(book_id), "chapter=", chapter_uid,
-                    "batch=", index, "/", tostring(#batches), "error=", tostring(resp))
+        local batches = self.api:review_batches(ranges, 30)
+        local function append_reviews(resp)
+            local rows = type(resp) == "table" and (resp.reviews or resp.updated) or nil
+            if type(rows) ~= "table" and type(resp) == "table" and #resp > 0 then rows = resp end
+            if type(rows) ~= "table" then return false end
+            for _, row in ipairs(rows) do all_reviews[#all_reviews + 1] = row end
+            return true
+        end
+        local function split_batch(batch)
+            local middle = math.floor(#batch / 2)
+            local left, right = {}, {}
+            for index, item in ipairs(batch) do
+                if index <= middle then left[#left + 1] = item else right[#right + 1] = item end
             end
+            return left, right
+        end
+        local function fetch_batch(batch, index, depth)
+            depth = tonumber(depth) or 0
+            progress("thoughts", index, #batches,
+                depth > 0 and ("缩小想法批次至 " .. tostring(#batch)) or "")
+            local ok, resp = pcall(function()
+                return self.api:readreviews(book_id, chapter_uid, batch)
+            end)
+            if ok and append_reviews(resp) then
+                self.rate_limit_streak = 0
+                return true, false
+            end
+
+            local error_text = ok and "readreviews returned invalid data" or tostring(resp)
+            if not ok and Http_ok and Http.is_auth_error(resp) then return false, true end
+            if not ok and Http_ok and Http.is_rate_limit_error(resp) then
+                self.rate_limit_streak = math.min(5, (self.rate_limit_streak or 0) + 1)
+                local wait = math.min(30, 2 ^ self.rate_limit_streak)
+                self.rate_limit_until = os.time() + wait
+                rate_limited, rate_limit_wait = true, wait
+                logger.warn("[撷思][WebFetch] rate limited; stop current chapter",
+                    "book=", tostring(book_id), "chapter=", chapter_uid,
+                    "wait=", tostring(wait), "streak=", tostring(self.rate_limit_streak))
+                return false, true
+            end
+            if not ok and is_data_specific_error(resp) and #batch > 1 then
+                local left, right = split_batch(batch)
+                logger.warn("[撷思][WebFetch] readreviews batch rejected; reducing size",
+                    "book=", tostring(book_id), "chapter=", chapter_uid,
+                    "from=", tostring(#batch), "left=", tostring(#left),
+                    "right=", tostring(#right))
+                local left_ok, left_stop = fetch_batch(left, index, depth + 1)
+                if left_stop then return false, true end
+                local right_ok, right_stop = fetch_batch(right, index, depth + 1)
+                return left_ok and right_ok, right_stop
+            end
+            errors[#errors + 1] = error_text
+            logger.warn("[撷思][WebFetch] readreviews batch failed",
+                "book=", tostring(book_id), "chapter=", chapter_uid,
+                "batch=", index, "/", tostring(#batches), "error=", error_text)
+            return false, false
+        end
+        for index, batch in ipairs(batches) do
+            local _, stop = fetch_batch(batch, index, 0)
+            if stop then break end
         end
     end
     progress("thoughts", 1, 1, "")
