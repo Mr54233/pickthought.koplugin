@@ -696,11 +696,15 @@ function Plugin:_recover_sync_state()
     -- 避免用 init 时的内存快照幽灵接管一个已经收尾的任务。
     self.store:reload()
     local state=self.store:get("sync_runtime",{})
-    if state.status~="active" or type(state.task)~="table" then return end
+    if state.status~="active" or type(state.task)~="table" then
+        self.sync_task:clear_stale_awake()
+        return
+    end
     -- 描述符体检:进度与结果文件都没了说明任务早已收尾/被清理,直接清状态。
     if not U.file_exists(tostring(state.task.progress_path or ""))
         and not U.file_exists(tostring(state.task.result_path or "")) then
         self:_clear_sync_state()
+        self.sync_task:clear_stale_awake()
         return
     end
     local runtime={doc_path=state.doc_path,book_id=state.book_id,title=state.title,
@@ -716,6 +720,7 @@ function Plugin:_recover_sync_state()
     end
     self._sync_runtime=nil
     self:_clear_sync_state()
+    self.sync_task:clear_stale_awake()
     logger.info("[撷思][Sync] 上次同步已中断",tostring(err))
     UIManager:scheduleIn(1.5,function()
         self:toast("上次同步已中断,断点已保留;再次同步会继续",4)

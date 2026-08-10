@@ -11,6 +11,7 @@ local UIManager = require("ui/uimanager")
 local Device = require("device")
 local logger = require("logger")
 local lfs = require("libs/libkoreader-lfs")
+local PowerInhibit = require("pickthought.power_inhibit")
 
 local SyncTask = {}
 SyncTask.__index = SyncTask
@@ -48,7 +49,8 @@ local function serializable_copy(value, seen)
 end
 
 function SyncTask:new(store)
-    return setmetatable({
+    local owner_token = tostring(os.time()) .. "-" .. tostring(math.random(100000,999999))
+    local instance = setmetatable({
         store = store,
         job = nil,
         poll_task = nil,
@@ -58,8 +60,14 @@ function SyncTask:new(store)
         foreground_poll_interval = 0.40,
         background_poll_interval = 1.50,
         owner_path = store.temp_dir .. "/sync-task-owner.json",
-        owner_token = tostring(os.time()) .. "-" .. tostring(math.random(100000,999999)),
+        owner_token = owner_token,
     }, self)
+    instance.power_inhibit = PowerInhibit:new{
+        device = Device,
+        marker_path = store.temp_dir .. "/sync-keep-awake.json",
+        token = owner_token,
+    }
+    return instance
 end
 
 function SyncTask:set_backgrounded(value)
@@ -217,28 +225,28 @@ function SyncTask:_prepare_worker_memory()
 end
 
 function SyncTask:_hold_awake()
-    if not self.keep_awake_enabled or self.standby_held then return end
-    local ok, err = pcall(function() UIManager:preventStandby() end)
-    if ok then
+    if not self.keep_awake_enabled then return end
+    if not self.standby_held then
+        local ok, err = pcall(function() UIManager:preventStandby() end)
+        if not ok then
+            logger.warn("[撷思][SyncTask] standby lock failed", tostring(err))
+            return
+        end
         self.standby_held = true
-        -- T1 重置只管 Kindle 框架的息屏;KOReader 自带的 AutoSuspend 插件是
-        -- 另一条独立休眠路径,用 PluginShare.pause_auto_suspend 一并按住
-        -- (Kobo 等无 T1 的设备靠的就是这条)。
-        pcall(function() require("pluginshare").pause_auto_suspend = true end)
         self:_enable_memory_mode()
-        local reset = self:_reset_device_timeout()
-        logger.info("[撷思][SyncTask] standby lock acquired", "t1_reset=", tostring(reset))
-    else
-        logger.warn("[撷思][SyncTask] standby lock failed", tostring(err))
     end
+    local system_lock = self.power_inhibit:acquire()
+    local reset = self:_reset_device_timeout()
+    logger.info("[撷思][SyncTask] standby lock acquired",
+        "system_lock=", tostring(system_lock), "t1_reset=", tostring(reset))
 end
 
 function SyncTask:_release_awake()
     if self.standby_held then
         self.standby_held = false
         pcall(function() UIManager:allowStandby() end)
-        pcall(function() require("pluginshare").pause_auto_suspend = false end)
     end
+    self.power_inhibit:release()
     self:_release_memory_mode()
     logger.info("[撷思][SyncTask] standby lock released")
 end
@@ -335,10 +343,13 @@ function SyncTask:_poll()
             "gap=",tostring(now-job.last_poll_at))
         job.last_progress_at=now
         job.waiting_notified=false
+        self.power_inhibit:verify(true)
+        self:_reset_device_timeout()
     end
     job.last_poll_at=now
-    if not job.last_keepalive or now-job.last_keepalive>=5 then
+    if not job.last_keepalive or now-job.last_keepalive>=60 then
         job.last_keepalive=now
+        self.power_inhibit:verify(true)
         self:_reset_device_timeout()
     end
 
@@ -381,10 +392,6 @@ function SyncTask:_poll()
             state.updated_at=now
             if job.on_progress then job.on_progress(state) end
         end
-        if idle>=300 and self.standby_held then
-            self:_release_awake()
-            logger.info("[撷思][SyncTask] standby lock released while waiting", "pid=", tostring(job.pid))
-        end
         -- 看门狗:子进程心跳很密(章节/想法批次/注入条目都会发),清醒状态下
         -- 静默 6 分钟远超单次请求最坏重试周期,只能是 DNS 无超时之类的死吊——
         -- 终止并保留断点,把「莫名其妙的卡死」变成有限失败 + 续传。
@@ -415,6 +422,11 @@ function SyncTask:cancel()
     U.atomic_write(job.cancel_path, "1", true)
 end
 
+function SyncTask:clear_stale_awake()
+    if self.job then return false end
+    return self.power_inhibit:clear_stale()
+end
+
 function SyncTask:attach(descriptor,on_progress,on_done)
     if self.job then return false,"已有同步任务正在运行" end
     if not self:available() then return false,"当前 KOReader 不支持后台同步" end
@@ -423,6 +435,7 @@ function SyncTask:attach(descriptor,on_progress,on_done)
     if not pid or not descriptor.progress_path or not descriptor.result_path
         or not descriptor.cancel_path then return false,"同步任务记录不完整" end
     self.keep_awake_enabled=self.store:preferences().sync_keep_awake~=false
+    if not self.keep_awake_enabled then self.power_inhibit:clear_stale() end
     self.job={
         pid=pid,progress_path=descriptor.progress_path,result_path=descriptor.result_path,
         cancel_path=descriptor.cancel_path,worker_settings_path=descriptor.worker_settings_path,
@@ -485,6 +498,7 @@ function SyncTask:start(task, on_progress, on_done)
     -- 分批风控:每次同步最多拉这么多个新章节,大书分多次完成。
     local batch_limit = tonumber(self.store:preferences().sync_batch_limit) or 200
     self.keep_awake_enabled = self.store:preferences().sync_keep_awake ~= false
+    if not self.keep_awake_enabled then self.power_inhibit:clear_stale() end
 
     local child = function()
         lower_worker_priority()
