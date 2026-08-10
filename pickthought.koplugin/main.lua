@@ -20,6 +20,7 @@ local Thoughts=require("pickthought.thoughts")
 local Binding=require("pickthought.binding")
 local SyncTask=require("pickthought.sync_task")
 local SyncProgress=require("pickthought.sync_progress")
+local SyncReport=require("pickthought.sync_report")
 local _=Text.tr
 local unpack_args=unpack or table.unpack
 local source=debug.getinfo(1,"S").source:gsub("^@",""); local ROOT=source:match("^(.*)/main%.lua$") or "."
@@ -797,45 +798,16 @@ function Plugin:_sync_report(report)
         end
         return
     end
-    -- 用户视角只有三个数:拿到多少、放进书里多少、没放进多少。
-    -- 细节(重叠合并/定位方式/章节匹配)进日志不进对话框。
-    local lines={
-        "同步完成",
-        "",
-        string.format("想法 %d 条 · 划线 %d 条",
-            report.total_thought_entries or 0,report.total_underlines or 0),
-        string.format("注入成功:%d 处锚点,%d 章(重复划线已合并 %d 条,想法不丢)",
-            report.marks or 0,report.injected or 0,report.overlapped or 0),
-        string.format("未注入:%d 条(本地正文对不上)",report.unlocated or 0),
-    }
-    if (report.chapters_pending or 0)>0 then
-        lines[#lines+1]=string.format("分批:还剩 %d 章未拉取;菜单「继续拉取后续章节」手动拉,或继续阅读时自动补",
-            report.chapters_pending)
-    end
-    if #(report.unmatched or {})>0 then
-        lines[#lines+1]=string.format("有 %d 章没对上本地书(损失 %d 条)",
-            #report.unmatched,report.unmatched_underlines or 0)
-    end
-    if (report.fetch_errors or 0)>0 then
-        lines[#lines+1]=string.format("有 %d 章没拉全,重新同步可补",report.fetch_errors)
-    end
-    if report.rate_limited then
-        lines[#lines+1]="微信读书触发频率限制,本批已提前停止;稍后重试即可继续"
-    end
-    if (report.save_failures or 0)>0 then
-        lines[#lines+1]=string.format("有 %d 章想法没存上(检查存储空间)",report.save_failures)
-    end
+    local lines=SyncReport.build(report)
     logger.info("[撷思][Sync] report",
         "chapters=",tostring(report.chapters_with_data),"/",tostring(report.chapters_total),
         "matched=",tostring(report.chapters_matched),
         "marks=",tostring(report.marks),"aligned=",tostring(report.quote_aligned),
         "numeric=",tostring(report.numeric),"overlapped=",tostring(report.overlapped),
         "unlocated=",tostring(report.unlocated))
-    lines[#lines+1]=""
-    lines[#lines+1]="已替换原书(阅读进度保留)"
-    lines[#lines+1]="原版备份:"..tostring(report.backup or "")
     UIManager:show(ConfirmBox:new{
         text=table.concat(lines,"\n"),
+        icon="check",
         flush_events_on_show=true,
         ok_text="打开划线版",
         ok_callback=function()
@@ -946,10 +918,13 @@ function Plugin:_do_reset_book_data(book_dir, path, title)
     end
     Thoughts.clear_memory_cache()
     self._sync_state_cache = nil
+    local was_open = path == self:current_doc_path()
     local restored = self:_restore_original_file(path)
     local msg = "已重置《"..title.."》\n\n"
     if cleared > 0 then msg = msg .. string.format("清理 %d 项,约 %.1f MB\n", cleared, size_bytes/1048576) end
-    if restored then msg = msg .. "书已还原原版\n" end
+    if restored then
+        msg = msg .. (was_open and "书已还原原版,当前书已自动重新打开\n" or "书已还原原版\n")
+    end
     msg = msg .. "重新同步即可恢复"
     self:info(msg)
 end

@@ -50,6 +50,8 @@ local function make_deps(overrides)
                 dest = dest, options = options}
             return {injected = #mapped, marks = #mapped,
                 unmatched = {}, quote_aligned = #mapped, dropped = 0,
+                underlines_resolved = #mapped, thoughts_linked = 1,
+                thoughts_linked_by_uid = {["1"] = 1},
                 merges = {{uid = "1", from = "2-5", into = "0-7"}}}
         end,
         merge_thoughts = function(book_id, uid, from, into)
@@ -86,6 +88,14 @@ T.case("同步全流程", function()
     T.eq(report.fetch_errors, 0, "无拉取错误")
     T.eq(report.total_underlines, 1, "拉取划线总数")
     T.eq(report.total_thought_entries, 1, "拉取想法总数")
+    T.eq(report.underlines_injected, 1, "注入成功划线")
+    T.eq(report.underlines_failed, 0, "注入失败划线")
+    T.eq(report.thoughts_injected, 1, "注入成功想法")
+    T.eq(report.thoughts_failed, 0, "注入失败想法")
+    T.eq(report.batch_start, 1, "本批从第 1 章开始")
+    T.eq(report.batch_end, 2, "本批处理到第 2 章")
+    T.eq(report.chapters_processed, 2, "本批处理 2 章")
+    T.eq(report.chapters_fetch_succeeded, 2, "两章划线请求均成功")
     T.eq(report.chapters_matched, 1, "匹配章数")
     T.eq(report.unmatched_underlines, 0, "未匹配无连带损失")
     T.eq(calls.merged.from, "2-5", "重叠想法合并被分发")
@@ -109,6 +119,15 @@ T.case("重同步从 .orig 干净备份注入", function()
     T.eq(#calls.renames, 1, "只有注入版顶位一次")
     T.eq(calls.renames[1][2], "/books/书.epub", "顶上原路径")
     T.eq(report.dest, "/books/书.epub", "dest 仍是书架路径")
+end)
+
+T.case("想法缓存写入失败不计入注入成功", function()
+    local deps = make_deps({save_thoughts = function() return nil end})
+    local report, err = Sync.run(deps)
+    T.ok(report, "同步仍应完成: " .. tostring(err))
+    T.eq(report.save_failures, 1, "记录想法缓存失败章节")
+    T.eq(report.thoughts_injected, 0, "不可打开的想法不计成功")
+    T.eq(report.thoughts_failed, 1, "不可打开的想法计入失败")
 end)
 
 T.case("增量同步保留干净备份并原子替换当前注入版", function()
@@ -358,6 +377,10 @@ T.case("章节批次预算限制缓存回放,不再一次性注入全书", funct
     T.eq(fetch_calls, 3, "缓存回放也只处理本批 3 章")
     T.eq(report.chapters_pending, 7, "剩余 7 章")
     T.eq(report.next_index, 4, "下批从第 4 章开始")
+    T.eq(report.batch_start, 1, "本批起点")
+    T.eq(report.batch_end, 3, "本批终点")
+    T.eq(report.chapters_processed, 3, "本批实际处理数")
+    T.eq(report.chapters_fetch_succeeded, 3, "本批拉取成功数")
     T.eq(#calls.injected.mapped, 3, "本批只注入 3 章")
 end)
 
@@ -409,6 +432,7 @@ T.case("限流章节不推进游标,下次同步可重试", function()
     T.eq(report.rate_limited, true, "报告标记限流")
     T.eq(report.rate_limit_wait, 7, "报告携带下次重试等待时间")
     T.eq(report.next_index, 1, "限流章下次仍从当前章开始")
+    T.eq(report.chapters_processed, 0, "限流章未完成,不计入本批")
     T.eq(calls.injected, nil, "限流章的半成品不注入")
 end)
 

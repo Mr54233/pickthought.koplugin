@@ -87,10 +87,13 @@ function Sync.run(deps)
     local rate_limited = false
     local rate_limit_wait
     local next_index = chapter_start
+    local batch_start_index, batch_end_index
+    local chapters_processed, chapters_fetch_succeeded = 0, 0
     local selected_end = #chapter_list
     -- 硬失败=整章划线都没拉到(决定是否中止);部分失败=划线在手、想法批次有缺(只计报告)。
     local hard_failures, partial_errors = 0, 0
     local thoughts_saved, save_failures = 0, 0
+    local thought_save_failed = {}
     local consecutive_hard = 0
     -- 记住最后一次真实错误:失败消息必须告诉用户到底错在哪,不能只说「网络失败」。
     local last_error
@@ -122,6 +125,8 @@ function Sync.run(deps)
             fresh_fetches = fresh_fetches + 1
         end
         local chapter_rate_limited = good and type(data) == "table" and data.rate_limited == true
+        local skipped_completed_cache = good and type(data) == "table"
+            and data.resumed and skip_resumed
         if chapter_rate_limited then
             rate_limited = true
             rate_limit_wait = tonumber(data.rate_limit_wait) or rate_limit_wait
@@ -146,6 +151,7 @@ function Sync.run(deps)
                     thoughts_saved = thoughts_saved + 1
                 else
                     save_failures = save_failures + 1
+                    thought_save_failed[tostring(ch.uid)] = true
                 end
             end
         else
@@ -163,6 +169,15 @@ function Sync.run(deps)
                     consecutive_hard, short_err(last_error))
             end
         end
+        if not chapter_rate_limited and not skipped_completed_cache then
+            batch_start_index = batch_start_index or i
+            batch_end_index = i
+            chapters_processed = chapters_processed + 1
+            if good and type(data) == "table" and data.underline_request_ok ~= false
+                and #(data.errors or {}) == 0 then
+                chapters_fetch_succeeded = chapters_fetch_succeeded + 1
+            end
+        end
         next_index = rate_limited and i or (i + 1)
         if rate_limited then
             chapters_pending = #chapter_list - next_index + 1
@@ -172,6 +187,14 @@ function Sync.run(deps)
     end
     if chapters_pending == 0 and next_index <= #chapter_list then
         chapters_pending = #chapter_list - next_index + 1
+    end
+    local function with_batch_fields(report)
+        report.batch_start = batch_start_index
+        report.batch_end = batch_end_index
+        report.chapters_processed = chapters_processed
+        report.chapters_fetch_succeeded = chapters_fetch_succeeded
+        report.batch_limit = chapter_budget or fetch_budget or #chapter_list
+        return report
     end
     if hard_failures > 0 and #fetched == 0 then
         return nil, string.format("划线拉取失败(共 %d 章)。\n最后错误:%s",
@@ -187,7 +210,7 @@ function Sync.run(deps)
                 #chapter_list - chapters_pending, chapters_pending)
         end
         if not skip_resumed and not rate_limited then return nil, "这本书在微信读书里没有划线" end
-        return {
+        return with_batch_fields{
             no_changes = true, chapters_total = #chapter_list,
             chapters_pending = chapters_pending, next_index = next_index,
             total_underlines = 0, total_thought_entries = 0,
@@ -331,11 +354,19 @@ function Sync.run(deps)
         local ok_encode, encoded = pcall(Json.encode, {signature = map_signature, map = map_store})
         if ok_encode then U.atomic_write(deps.map_cache_path, encoded, true) end
     end
+    -- 未匹配章节连带损失的划线数(报告要能说清"失败带走了多少")。
+    local underlines_by_uid = {}
+    for _, ch in ipairs(fetched) do underlines_by_uid[tostring(ch.uid)] = #(ch.underlines or {}) end
+    local unmatched_underlines = 0
+    for _, row in ipairs(unmatched) do
+        unmatched_underlines = unmatched_underlines + (underlines_by_uid[tostring(row.uid)] or 0)
+    end
+
     if #mapped == 0 then
         if not skip_resumed then
             return nil, "没有任何章节能匹配到本地书,请确认绑定的和本地打开的是同一本书"
         end
-        return {
+        return with_batch_fields{
             no_changes = true, chapters_total = #chapter_list,
             chapters_pending = chapters_pending, next_index = next_index,
             total_underlines = total_underlines,
@@ -346,13 +377,6 @@ function Sync.run(deps)
             rate_limited = rate_limited or nil,
             rate_limit_wait = rate_limit_wait,
         }
-    end
-    -- 未匹配章节连带损失的划线数(报告要能说清"失败带走了多少")。
-    local underlines_by_uid = {}
-    for _, ch in ipairs(fetched) do underlines_by_uid[tostring(ch.uid)] = #(ch.underlines or {}) end
-    local unmatched_underlines = 0
-    for _, row in ipairs(unmatched) do
-        unmatched_underlines = unmatched_underlines + (underlines_by_uid[tostring(row.uid)] or 0)
     end
 
     if not step("inject", 0, 1) then return nil, "已取消" end
@@ -388,7 +412,16 @@ function Sync.run(deps)
         return nil, "无法替换原书:" .. tostring(swap_err or "重命名失败")
     end
 
-    return {
+    local underlines_injected = math.min(total_underlines,
+        math.max(0, tonumber(stats.underlines_resolved) or 0))
+    local thoughts_injected = math.max(0, tonumber(stats.thoughts_linked) or 0)
+    for uid, count in pairs(stats.thoughts_linked_by_uid or {}) do
+        if thought_save_failed[tostring(uid)] then
+            thoughts_injected = thoughts_injected - (tonumber(count) or 0)
+        end
+    end
+    thoughts_injected = math.min(total_thought_entries, math.max(0, thoughts_injected))
+    return with_batch_fields{
         dest = doc_path,
         backup = backup,
         injected = stats.injected,
@@ -412,6 +445,10 @@ function Sync.run(deps)
         next_index = next_index,
         total_underlines = total_underlines,
         total_thought_entries = total_thought_entries,
+        underlines_injected = underlines_injected,
+        underlines_failed = total_underlines - underlines_injected,
+        thoughts_injected = thoughts_injected,
+        thoughts_failed = total_thought_entries - thoughts_injected,
         unmatched = unmatched,
         unmatched_underlines = unmatched_underlines,
         fetch_errors = hard_failures + partial_errors,
