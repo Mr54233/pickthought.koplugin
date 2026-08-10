@@ -89,6 +89,22 @@ T.case("read 取单条目", function()
     T.ok(missing == nil and err ~= nil, "缺失条目返回 nil, err")
 end)
 
+T.case("each_spine 单次打开流式读取全部正文", function()
+    local book = fake_book()
+    local meta = EpubReader.load("fake.epub", book)
+    local opened_after_load = book._reader_new_count
+    local rows = {}
+    local ok, err = EpubReader.each_spine(meta, function(item, content, read_err, index)
+        rows[#rows + 1] = {href = item.href, content = content, err = read_err, index = index}
+    end, book)
+    T.ok(ok, "流式读取成功: " .. tostring(err))
+    T.eq(book._reader_new_count - opened_after_load, 1, "全部 spine 只新建一个 Reader")
+    T.eq(#rows, 2, "读取两个 spine")
+    T.eq(rows[1].href, "OEBPS/Text/ch 1.xhtml", "第一个正文")
+    T.eq(rows[1].index, 1, "保留 spine 序号")
+    T.ok(rows[2].content:find("二", 1, true), "第二个正文内容")
+end)
+
 T.case("坏包报错", function()
     local no_container = STUBS.archiver_mock({{path = "mimetype", content = "application/epub+zip"}})
     local meta, err = EpubReader.load("bad.epub", no_container)

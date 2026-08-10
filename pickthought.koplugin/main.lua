@@ -749,6 +749,7 @@ function Plugin:_sync_run(path,bound)
             annotations=WebFetch:new(self.api),
             load_meta=function(p) return EpubReader.load(p) end,
             read_text=function(m,href) return (EpubReader.read(m,href)) end,
+            read_spine=function(m,callback) return EpubReader.each_spine(m,callback) end,
             save_thoughts=function(book_id,uid,groups) return Thoughts.save(self.store,book_id,uid,groups) end,
             merge_thoughts=function(book_id,uid,from,into) return Thoughts.merge(self.store,book_id,uid,from,into) end,
             map_cache_path=self.store:book_dir(bound.book_id).."/sync-cache/map.json",

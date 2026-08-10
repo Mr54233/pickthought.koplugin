@@ -10,6 +10,7 @@
 --   annotations     :fetch_chapter(book_id, uid) → 与 annotations.lua 同形
 --   load_meta(path) → meta, err(epub_reader.load 的形状)
 --   read_text(meta, href) → html|nil
+--   read_spine(meta, callback)(可选) → 单遍流式读取全部 spine；缺省回退 read_text
 --   save_thoughts(book_id, uid, review_groups)
 --   inject(src, book_id, mapped_chapters, dest) → stats, err(epub_inject.inject_copy)
 --   progress(phase, i, n, text) → 返回 false 表示取消(可选)
@@ -19,6 +20,7 @@ local ChapterMap = require("pickthought.chapter_map")
 local EpubInject = require("pickthought.epub_inject")
 local Json = require("pickthought.json")
 local U = require("pickthought.util")
+local logger = require("logger")
 
 local Sync = {}
 
@@ -248,11 +250,26 @@ function Sync.run(deps)
     local spine_total = #(map_meta.spine or {})
     local mapped_new, unmatched_new = {}, {}
     if #todo > 0 then
-        mapped_new, unmatched_new = ChapterMap.build(map_meta.spine, function(href)
-            map_count = map_count + 1
-            step("map", map_count, spine_total, href)
-            return deps.read_text(map_meta, href)
-        end, todo)
+        local map_started_at = os.time()
+        if deps.read_spine then
+            mapped_new, unmatched_new = ChapterMap.build_stream(map_meta.spine, function(visit)
+                return deps.read_spine(map_meta, function(item, content, err, index)
+                    map_count = map_count + 1
+                    step("map", map_count, spine_total, item and item.href)
+                    visit(item, content, err, index)
+                end)
+            end, todo)
+        else
+            mapped_new, unmatched_new = ChapterMap.build(map_meta.spine, function(href)
+                map_count = map_count + 1
+                step("map", map_count, spine_total, href)
+                return deps.read_text(map_meta, href)
+            end, todo)
+        end
+        logger.info("[撷思][ChapterMap] completed",
+            "spine=", tostring(spine_total), "chapters=", tostring(#todo),
+            "streamed=", tostring(deps.read_spine ~= nil),
+            "elapsed_s=", tostring(math.max(0, os.time() - map_started_at)))
     end
 
     -- 合并:按 fetched 原序拼装(拆分章一 uid 多行),新结果回写缓存。

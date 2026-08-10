@@ -130,7 +130,7 @@ end
 -- 单文件流式:内存里同一时刻只保留一个正文文件的文本(百兆大书在
 -- 256MB 的老设备上不能把全书文本都攥在手里),对它一次性统计所有章节的
 -- 引文命中与标题命中,然后立刻释放。
-function ChapterMap.build(spine, read_text, chapters)
+local function build_with_scanner(spine, chapters, scan)
     chapters = chapters or {}
     -- 预计算每章引文与规范化标题;全部标题用于识别目录页
     -- (一个文件若包含大半章节标题,它是目录/导航页,标题兜底绝不能落在上面)。
@@ -149,12 +149,11 @@ function ChapterMap.build(spine, read_text, chapters)
 
     local scores = {}       -- [ci] = {{href, score}, ...}(spine 顺序)
     local title_hits = {}   -- [ci] = {href, ...}(已排除目录页)
-    for _, item in ipairs(spine or {}) do
-        local ok, html = pcall(read_text, item.href)
-        local text = (ok and html) and ChapterMap.normalize(html) or nil
+    local function process_item(spine_index, item, html, read_err)
+        local text = html and ChapterMap.normalize(html) or nil
         if not text then
             logger.warn("[撷思][ChapterMap] 读取章节失败",
-                "href=", tostring(item.href), "err=", tostring(html))
+                "href=", tostring(item.href), "err=", tostring(read_err))
         elseif text ~= "" then
             -- 目录页检测不再单独扫 all_titles(大书是 千标题×千文件 的天文数字):
             -- 复用下面每章标题命中的结果,统计本文件命中了多少个「不同标题」,
@@ -171,7 +170,9 @@ function ChapterMap.build(spine, read_text, chapters)
                     end
                     if score > 0 then
                         scores[ci] = scores[ci] or {}
-                        scores[ci][#scores[ci] + 1] = {href = item.href, score = score}
+                        scores[ci][#scores[ci] + 1] = {
+                            href = item.href, score = score, spine_index = spine_index,
+                        }
                     end
                 end
                 local title = titles[ci]
@@ -186,13 +187,22 @@ function ChapterMap.build(spine, read_text, chapters)
             if distinct_count < toc_threshold then
                 for _, ci in ipairs(file_title_cis) do
                     title_hits[ci] = title_hits[ci] or {}
-                    title_hits[ci][#title_hits[ci] + 1] = item.href
+                    title_hits[ci][#title_hits[ci] + 1] = {
+                        href = item.href, spine_index = spine_index,
+                    }
                 end
             end
         end
         text = nil
         collectgarbage("step", 400)
     end
+    local scan_ok, scan_err = scan(process_item)
+    if scan_ok == nil then error(scan_err or "无法读取 EPUB 正文") end
+    local function by_spine(a, b)
+        return (tonumber(a.spine_index) or 0) < (tonumber(b.spine_index) or 0)
+    end
+    for _, rows in pairs(scores) do table.sort(rows, by_spine) end
+    for _, rows in pairs(title_hits) do table.sort(rows, by_spine) end
 
     -- 一个微信章可以映射到多个本地文件(实测:微信版《剑来》把本地两章
     -- 合并成一章,单文件模型让每章后半的划线永远落不进书)。
@@ -227,7 +237,7 @@ function ChapterMap.build(spine, read_text, chapters)
                 -- 多个文件里,quote_only 把关后多注不错,只会多救回。
                 local hits = title_hits[ci] or {}
                 if #hits >= 1 and #hits <= 3 then
-                    for _, href in ipairs(hits) do targets[#targets + 1] = href end
+                    for _, hit in ipairs(hits) do targets[#targets + 1] = hit.href end
                 end
             end
             if #targets > 0 then
@@ -247,6 +257,24 @@ function ChapterMap.build(spine, read_text, chapters)
         end
     end
     return mapped, unmatched
+end
+
+function ChapterMap.build(spine, read_text, chapters)
+    return build_with_scanner(spine, chapters, function(visit)
+        for index, item in ipairs(spine or {}) do
+            local ok, html, err = pcall(read_text, item.href)
+            visit(index, item, ok and html or nil, ok and err or html)
+        end
+        return true
+    end)
+end
+
+function ChapterMap.build_stream(spine, each_text, chapters)
+    return build_with_scanner(spine, chapters, function(visit)
+        return each_text(function(item, content, err, index)
+            visit(index, item, content, err)
+        end)
+    end)
 end
 
 return ChapterMap

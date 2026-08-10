@@ -224,3 +224,23 @@ T.case("多个微信章节命中同一文件且顺序保留", function()
     T.eq(mapped[1].chapter_uid, "41", "顺序保留")
     T.eq(mapped[2].chapter_uid, "42", "顺序保留")
 end)
+
+T.case("流式读取顺序不同也按 spine 顺序输出多目标", function()
+    local spine = {{href = "a.xhtml"}, {href = "b.xhtml"}}
+    local files = {
+        ["a.xhtml"] = "<p>甲文件专属引文其一。甲文件专属引文其二。</p>",
+        ["b.xhtml"] = "<p>乙文件专属引文其一。乙文件专属引文其二。</p>",
+    }
+    local chapters = {{uid = "1", title = "合并章", underlines = {
+        {markText = "甲文件专属引文其一"}, {markText = "甲文件专属引文其二"},
+        {markText = "乙文件专属引文其一"}, {markText = "乙文件专属引文其二"},
+    }}}
+    local mapped = ChapterMap.build_stream(spine, function(visit)
+        visit(spine[2], files["b.xhtml"], nil, 2)
+        visit(spine[1], files["a.xhtml"], nil, 1)
+        return true
+    end, chapters)
+    T.eq(#mapped, 2, "两个目标均命中")
+    T.eq(mapped[1].href, "a.xhtml", "恢复 spine 第一项")
+    T.eq(mapped[2].href, "b.xhtml", "恢复 spine 第二项")
+end)

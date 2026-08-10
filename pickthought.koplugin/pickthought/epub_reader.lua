@@ -132,4 +132,42 @@ function E.read(meta, name, archiver)
     return content
 end
 
+-- 单次打开顺序读取全部 spine 正文。回调参数为(item, content, err, spine_index)；
+-- ZIP 条目顺序可以与 OPF spine 不同，spine_index 供上层恢复书序。
+function E.each_spine(meta, callback, archiver)
+    local reader, err = open_reader(meta.path, archiver)
+    if not reader then return nil, err end
+    local wanted = {}
+    for index, item in ipairs(meta.spine or {}) do
+        local rows = wanted[item.href]
+        if not rows then rows = {}; wanted[item.href] = rows end
+        rows[#rows + 1] = {index = index, item = item}
+    end
+    local seen = {}
+    local ok, scan_err = xpcall(function()
+        for entry in reader:iterate() do
+            local rows = not seen[entry.path] and wanted[entry.path] or nil
+            if entry.mode == "file" and rows then
+                seen[entry.path] = true
+                local content = reader:extractToMemory(entry.path)
+                local read_err = content == nil and (reader.err or
+                    ("无法读取 EPUB 条目:" .. tostring(entry.path))) or nil
+                for _, row in ipairs(rows) do
+                    callback(row.item, content, read_err, row.index)
+                end
+            end
+        end
+        for href, rows in pairs(wanted) do
+            if not seen[href] then
+                for _, row in ipairs(rows) do
+                    callback(row.item, nil, "EPUB 中缺少 spine 条目:" .. tostring(href), row.index)
+                end
+            end
+        end
+    end, debug.traceback)
+    reader:close()
+    if not ok then error(scan_err) end
+    return true
+end
+
 return E

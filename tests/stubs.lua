@@ -145,7 +145,10 @@ function M.archiver_mock(files, mock_opts)
 
     local Reader = {}
     Reader.__index = Reader
-    function Reader:new() return setmetatable({entries = {}, size = 0}, self) end
+    function Reader:new()
+        mod._reader_new_count = (mod._reader_new_count or 0) + 1
+        return setmetatable({entries = {}, size = 0}, self)
+    end
     function Reader:open(path)
         self.path = path
         self.index = 0

@@ -684,6 +684,7 @@ function SyncTask:start(task, on_progress, on_done)
                 annotations = cached_annotations,
                 load_meta = function(p) return EpubReader.load(p) end,
                 read_text = function(m, href) return (EpubReader.read(m, href)) end,
+                read_spine = function(m, callback) return EpubReader.each_spine(m, callback) end,
                 save_thoughts = function(bid, uid, groups) return Thoughts.save(store, bid, uid, groups) end,
                 merge_thoughts = function(bid, uid, from, into) return Thoughts.merge(store, bid, uid, from, into) end,
                 inject = function(src, bid, mapped, dest)

@@ -250,6 +250,23 @@ T.case("分批预算:拉满即收工,缓存命中免费", function()
     T.eq(#calls.injected.mapped, 5, "已拉到的 5 章照常注入")
 end)
 
+T.case("同步优先使用单遍 spine 读取", function()
+    local deps, calls = make_deps()
+    deps.read_text = function() error("不应回退逐条读取") end
+    deps.read_spine = function(meta, callback)
+        calls.spine_scans = (calls.spine_scans or 0) + 1
+        for index, item in ipairs(meta.spine) do
+            local content = item.href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+            callback(item, content, nil, index)
+        end
+        return true
+    end
+    local report, err = Sync.run(deps)
+    T.ok(report, "流式同步成功: " .. tostring(err))
+    T.eq(calls.spine_scans, 1, "只执行一次 spine 扫描")
+    T.eq(calls.injected.mapped[1].href, "OEBPS/c1.xhtml", "映射结果不变")
+end)
+
 T.case("章节批次预算限制缓存回放,不再一次性注入全书", function()
     local rows = {}
     for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
