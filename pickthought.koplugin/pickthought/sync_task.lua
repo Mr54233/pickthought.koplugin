@@ -687,13 +687,14 @@ function SyncTask:start(task, on_progress, on_done)
                 read_spine = function(m, callback) return EpubReader.each_spine(m, callback) end,
                 save_thoughts = function(bid, uid, groups) return Thoughts.save(store, bid, uid, groups) end,
                 merge_thoughts = function(bid, uid, from, into) return Thoughts.merge(store, bid, uid, from, into) end,
-                inject = function(src, bid, mapped, dest)
+                inject = function(src, bid, mapped, dest, inject_opts)
                     -- 写包按条目回报(2 秒节流):大书注入+压缩要跑几分钟,
                     -- 百分比与文件计数都得动;心跳同时喂饱父进程的停顿检测,
                     -- 免得纯本地打包被误报成「等待网络」。
                     local last_emit = 0
                     return EpubInject.inject_copy(src, bid, mapped, {dest = dest,
                         append = incremental and (completed or chapter_start > 1),
+                        meta = inject_opts and inject_opts.meta,
                         progress = function(_, done, total)
                             local now2 = os.time()
                             if now2 - last_emit < 2 then return end

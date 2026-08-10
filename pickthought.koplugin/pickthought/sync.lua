@@ -350,7 +350,8 @@ function Sync.run(deps)
     if not step("inject", 0, 1) then return nil, "已取消" end
     -- 注入到中间文件(无 .epub 后缀,不会闪现在书架),成功后原子换位。
     local temp_dest = doc_path .. ".pickthought-new"
-    local stats, inject_err = deps.inject(src, deps.book_id, mapped, temp_dest, {append = append})
+    local stats, inject_err = deps.inject(src, deps.book_id, mapped, temp_dest,
+        {append = append, meta = meta})
     if not stats then return nil, inject_err end
 
     -- 重叠划线被合并的,把想法并进存活锚点的组:点一个虚线看到这一段全部想法。

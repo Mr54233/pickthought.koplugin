@@ -8,6 +8,8 @@ local Annotations = require("pickthought.annotations")
 local AnnotationStyle = require("pickthought.annotation_style")
 local EpubReader = require("pickthought.epub_reader")
 local Json = require("pickthought.json")
+local U = require("pickthought.util")
+local logger = require("logger")
 
 local M = {}
 
@@ -25,6 +27,64 @@ local STORED_EXTS = {
     jpg = true, jpeg = true, png = true, gif = true, webp = true,
     woff = true, woff2 = true, mp3 = true, m4a = true, mp4 = true, ogg = true,
 }
+
+local GC_FULL_INTERVAL = 16
+local GC_MEMORY_SAMPLE_INTERVAL = 8
+local GC_LARGE_ENTRY_BYTES = 2 * 1024 * 1024
+local GC_HEAP_GROWTH_KB = 8 * 1024
+local GC_LOW_MEMORY_KB = 128 * 1024
+
+local function memory_available_kb()
+    local raw = U.read_file("/proc/meminfo", true)
+    if not raw then return nil end
+    local values = {}
+    for key, value in raw:gmatch("([%a_]+):%s*(%d+)%s*kB") do
+        values[key] = tonumber(value)
+    end
+    return values.MemAvailable or (values.MemFree and
+        (values.MemFree + (values.Buffers or 0) + (values.Cached or 0)))
+end
+
+local function new_gc_policy(opts)
+    local gc = opts.collect_garbage or collectgarbage
+    local read_memory = opts.read_memory_available_kb or memory_available_kb
+    local heap = tonumber(gc("count")) or 0
+    local state = {
+        processed = 0, since_full = 0, full_collections = 0,
+        heap_after_full_kb = heap, peak_heap_kb = heap, min_available_kb = nil,
+    }
+    function state:release(content_bytes)
+        self.processed = self.processed + 1
+        self.since_full = self.since_full + 1
+        local current_heap = tonumber(gc("count")) or 0
+        self.peak_heap_kb = math.max(self.peak_heap_kb, current_heap)
+        local reason
+        if tonumber(content_bytes or 0) >= GC_LARGE_ENTRY_BYTES then
+            reason = "large_entry"
+        elseif current_heap - self.heap_after_full_kb >= GC_HEAP_GROWTH_KB then
+            reason = "heap_growth"
+        elseif self.since_full >= GC_FULL_INTERVAL then
+            reason = "interval"
+        elseif self.processed % GC_MEMORY_SAMPLE_INTERVAL == 0 then
+            local available = tonumber(read_memory())
+            if available then
+                self.min_available_kb = self.min_available_kb and
+                    math.min(self.min_available_kb, available) or available
+                if available < GC_LOW_MEMORY_KB then reason = "low_memory" end
+            end
+        end
+        if reason then
+            gc("collect")
+            self.full_collections = self.full_collections + 1
+            self.since_full = 0
+            self.heap_after_full_kb = tonumber(gc("count")) or 0
+        else
+            gc("step", 400)
+        end
+        return reason
+    end
+    return state
+end
 
 function M.copy_path(src)
     src = tostring(src or "")
@@ -155,8 +215,13 @@ function M.inject_copy(src, book_id, chapters, opts)
     local rename = opts.rename or os.rename
     local now = opts.now or os.time
 
-    local meta, err = EpubReader.load(src, opts.archiver)
-    if not meta then return nil, err end
+    local started_at = now()
+    local meta = opts.meta
+    if type(meta) ~= "table" or tostring(meta.path or "") ~= tostring(src) then
+        local err
+        meta, err = EpubReader.load(src, opts.archiver)
+        if not meta then return nil, err end
+    end
     if meta.has[M.MARKER] and not opts.append then
         return nil, "该文件已是撷思版副本,请对原书执行注入"
     end
@@ -251,6 +316,7 @@ function M.inject_copy(src, book_id, chapters, opts)
     local uid_track = {}   -- [uid] = {total = {range=true}, resolved = {range=true}}
     local total_entries = #meta.names
     local seen_entries = 0
+    local gc_policy = new_gc_policy(opts)
     local written = {["mimetype"] = true, [M.MARKER] = true}
     for entry in reader:iterate() do
         if entry.mode == "file" then
@@ -323,8 +389,9 @@ function M.inject_copy(src, book_id, chapters, opts)
                     return fail("写入副本失败:" .. entry.path)
                 end
                 if opts.progress then pcall(opts.progress, entry.path, seen_entries, total_entries) end
+                local content_bytes = #content
                 content = nil
-                collectgarbage("collect")
+                gc_policy:release(content_bytes)
             end
         end
     end
@@ -365,6 +432,15 @@ function M.inject_copy(src, book_id, chapters, opts)
         return nil, "无法生成副本:" .. tostring(rename_err or "重命名失败")
     end
     stats.dest = dest
+    stats.gc_full_collections = gc_policy.full_collections
+    stats.peak_heap_kb = math.floor(gc_policy.peak_heap_kb + 0.5)
+    stats.min_available_kb = gc_policy.min_available_kb
+    logger.info("[撷思][EpubInject] completed",
+        "entries=", tostring(gc_policy.processed),
+        "full_gc=", tostring(gc_policy.full_collections),
+        "peak_heap_kb=", tostring(stats.peak_heap_kb),
+        "min_available_kb=", tostring(stats.min_available_kb or "unknown"),
+        "elapsed_s=", tostring(math.max(0, now() - started_at)))
     return stats
 end
 

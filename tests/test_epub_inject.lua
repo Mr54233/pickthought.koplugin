@@ -346,3 +346,57 @@ T.case("rename 目标已存在时重试", function()
     T.ok(stats, "重试后应成功: " .. tostring(err))
     T.eq(calls, 2, "rename 失败后重试一次")
 end)
+
+T.case("小条目使用分步 GC 而非逐条完整回收", function()
+    local files = book_files()
+    for i = 1, 40 do
+        files[#files + 1] = {path = "OEBPS/Misc/" .. i .. ".txt", content = "small-" .. i}
+    end
+    local heap = 1000
+    local full, steps = 0, 0
+    local stats, err = run_inject(files, CHAPTERS, nil, {
+        collect_garbage = function(action)
+            if action == "count" then heap = heap + 1 return heap end
+            if action == "collect" then full = full + 1 heap = 1000
+            elseif action == "step" then steps = steps + 1 end
+        end,
+        read_memory_available_kb = function() return 300 * 1024 end,
+    })
+    T.ok(stats, "应成功: " .. tostring(err))
+    T.eq(stats.gc_full_collections, full, "报告完整 GC 次数")
+    T.ok(full >= 2 and full <= 3, "约每 16 条目完整回收: " .. tostring(full))
+    T.ok(steps > full, "多数条目使用分步 GC")
+end)
+
+T.case("低内存采样提前触发完整 GC", function()
+    local files = book_files()
+    for i = 1, 10 do
+        files[#files + 1] = {path = "OEBPS/Misc/" .. i .. ".txt", content = "small"}
+    end
+    local full = 0
+    local stats, err = run_inject(files, CHAPTERS, nil, {
+        collect_garbage = function(action)
+            if action == "count" then return 1000 end
+            if action == "collect" then full = full + 1 end
+        end,
+        read_memory_available_kb = function() return 100 * 1024 end,
+    })
+    T.ok(stats, "应成功: " .. tostring(err))
+    T.ok(full >= 1, "低于 128MB 时提前完整回收")
+    T.eq(stats.min_available_kb, 100 * 1024, "记录最低可用内存")
+end)
+
+T.case("注入复用已加载 meta", function()
+    local files = book_files()
+    local Arc = STUBS.archiver_mock(files)
+    local EpubReader = require("pickthought.epub_reader")
+    local meta = EpubReader.load("/books/书.epub", Arc)
+    local before = Arc._reader_new_count
+    local stats, err = EpubInject.inject_copy("/books/书.epub", "b001", CHAPTERS, {
+        archiver = Arc, meta = meta, now = function() return 123 end,
+        rename = function() return true end,
+        read_memory_available_kb = function() return 300 * 1024 end,
+    })
+    T.ok(stats, "应成功: " .. tostring(err))
+    T.eq(Arc._reader_new_count - before, 2, "只打开 mimetype 与写包 Reader,不重复 load")
+end)

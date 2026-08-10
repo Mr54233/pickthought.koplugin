@@ -755,7 +755,8 @@ function Plugin:_sync_run(path,bound)
             map_cache_path=self.store:book_dir(bound.book_id).."/sync-cache/map.json",
             inject=function(src,book_id,mapped,dest,options)
                 return EpubInject.inject_copy(src,book_id,mapped,
-                    {dest=dest,append=options and options.append==true})
+                    {dest=dest,append=options and options.append==true,
+                     meta=options and options.meta})
             end,
             progress=function(phase,i,n,text)
                 local msg

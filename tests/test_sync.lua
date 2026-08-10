@@ -45,8 +45,9 @@ local function make_deps(overrides)
             calls.saved[#calls.saved + 1] = {book_id = book_id, uid = tostring(uid), groups = groups}
             return #groups
         end,
-        inject = function(src, book_id, mapped, dest)
-            calls.injected = {src = src, book_id = book_id, mapped = mapped, dest = dest}
+        inject = function(src, book_id, mapped, dest, options)
+            calls.injected = {src = src, book_id = book_id, mapped = mapped,
+                dest = dest, options = options}
             return {injected = #mapped, marks = #mapped,
                 unmatched = {}, quote_aligned = #mapped, dropped = 0,
                 merges = {{uid = "1", from = "2-5", into = "0-7"}}}
@@ -76,6 +77,7 @@ T.case("同步全流程", function()
     T.eq(report.backup, "/books/书.epub.orig", "备份路径")
     T.eq(calls.injected.src, "/books/书.epub", "首次从原书注入")
     T.eq(calls.injected.dest, "/books/书.epub.pickthought-new", "注入到中间文件")
+    T.ok(type(calls.injected.options.meta) == "table", "复用已加载的 EPUB meta")
     T.eq(#calls.renames, 2, "两次换位")
     T.eq(calls.renames[1][1], "/books/书.epub", "原书让位")
     T.eq(calls.renames[1][2], "/books/书.epub.orig", "成为备份")
