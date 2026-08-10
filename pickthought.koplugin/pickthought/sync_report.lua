@@ -19,8 +19,9 @@ local function percent(done, total, decimals, trim_zero)
     return text .. "%"
 end
 
-function M.build(report)
+function M.build(report, options)
     report = report or {}
+    options = options or {}
     local total = number(report.chapters_total)
     local pending = math.min(total, number(report.chapters_pending))
     local processed_total = total - pending
@@ -75,7 +76,9 @@ function M.build(report)
         lines[#lines + 1] = string.format("下一批：第 %s–%s 章，共 %s 章",
             integer(next_start), integer(next_end), integer(next_count))
         lines[#lines + 1] = ""
-        lines[#lines + 1] = "菜单「继续拉取后续章节」手动拉，或继续阅读时自动补"
+        lines[#lines + 1] = options.auto_batch == false
+            and "菜单「继续拉取后续章节」手动拉，或阅读到边界时按提示后台补"
+            or "菜单「继续拉取后续章节」手动拉，或继续阅读时自动补"
     else
         lines[#lines + 1] = "全部章节已处理完成"
     end

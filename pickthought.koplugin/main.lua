@@ -21,6 +21,7 @@ local Binding=require("pickthought.binding")
 local SyncTask=require("pickthought.sync_task")
 local SyncProgress=require("pickthought.sync_progress")
 local SyncReport=require("pickthought.sync_report")
+local BatchSync=require("pickthought.batch_sync")
 local _=Text.tr
 local unpack_args=unpack or table.unpack
 local source=debug.getinfo(1,"S").source:gsub("^@",""); local ROOT=source:match("^(.*)/main%.lua$") or "."
@@ -298,10 +299,10 @@ function Plugin:settings_menu()
     return {
         {text="想法弹窗字体",sub_item_table_func=function() return self:thought_font_menu() end},
         {text="阅读时自动分批拉取后续章节",checked_func=function()
-            return self.store:preferences().auto_batch_sync~=false
+            return BatchSync.auto_enabled(self.store:preferences())
         end,callback=function()
             local p=self.store:preferences()
-            p.auto_batch_sync=not (p.auto_batch_sync~=false)
+            p.auto_batch_sync_opt_in=not BatchSync.auto_enabled(p)
             self.store:save_preferences(p)
         end},
         {text="同步时保持唤醒(防锁屏中断)",checked_func=function()
@@ -465,14 +466,32 @@ function Plugin:sync_entry(path,mode,opts)
     if not opts.confirmed and mode~="reinject" then
         local completed=self.store:book_cache_path(bound.book_id).."/sync-cache/.completed"
         if U.file_exists(completed) then
+            local state=self:_sync_state(bound.book_id) or {}
+            local processed=tonumber(state.total) or math.max(0,(tonumber(state.next_index) or 1)-1)
             UIManager:show(ConfirmBox:new{
-                text="检测到本书已有同步缓存,将从缓存继续,\n仅补齐拉取失败的章节。\n\n如需全部重新拉取,请先使用「重置本书」选项。",
+                text=string.format("检测到本书已有完整同步缓存\n\n当前已处理到第 %d 章\n本次将从第 %d 章开始检查新增章节\n结束章节需获取最新目录后确定\n同时补齐缓存中拉取失败的章节\n\n如需全部重新拉取,请先使用「重置本书」选项。",
+                    processed,processed+1),
                 ok_text="继续",
                 ok_callback=function()
                     opts.confirmed=true
                     UIManager:nextTick(function() self:sync_entry(path,mode,opts) end)
                 end,
                 cancel_text="取消",
+            })
+            return
+        end
+        local limit=tonumber(self.store:preferences().sync_batch_limit) or 200
+        local plan=BatchSync.plan(self:_sync_state(bound.book_id),limit)
+        if plan then
+            UIManager:show(ConfirmBox:new{
+                text=BatchSync.prompt_text(plan,opts.background==true),
+                flush_events_on_show=true,
+                ok_text=opts.background==true and "后台同步" or "开始同步",
+                ok_callback=function()
+                    opts.confirmed=true
+                    UIManager:nextTick(function() self:sync_entry(path,mode,opts) end)
+                end,
+                cancel_text="暂不拉取",
             })
             return
         end
@@ -510,6 +529,22 @@ function Plugin:_sync_state(book_id)
     return state
 end
 
+function Plugin:_batch_prompt_path(book_id)
+    return self.store:book_cache_path(book_id).."/sync-cache/prompt.json"
+end
+
+function Plugin:_batch_prompt_state(book_id)
+    local raw=U.read_file(self:_batch_prompt_path(book_id),true)
+    if not raw then return nil end
+    local ok,state=pcall(function() return require("pickthought.json").decode(raw) end)
+    return ok and type(state)=="table" and state or nil
+end
+
+function Plugin:_save_batch_prompt_state(book_id,state)
+    if type(state)~="table" then return false end
+    return U.atomic_write(self:_batch_prompt_path(book_id),require("pickthought.json").encode(state),true)
+end
+
 -- ===== 后台同步任务运行时 =====
 function Plugin:_persist_sync_state(runtime)
     self.store:set("sync_runtime",{
@@ -531,7 +566,7 @@ function Plugin:_start_sync_task(path,bound,mode,opts)
     if not ok then
         if opts.silent then logger.warn("[撷思][Sync] auto batch start failed",tostring(err))
         else self:info("无法启动后台同步:\n"..tostring(err)) end
-        return
+        return false
     end
     runtime.task=self.sync_task:descriptor()
     self._sync_runtime=runtime
@@ -545,6 +580,7 @@ function Plugin:_start_sync_task(path,bound,mode,opts)
         -- 推迟一拍再弹进度框,免得被菜单关闭的重绘顶掉。
         UIManager:nextTick(function() self:_show_active_sync_dialog() end)
     end
+    return true
 end
 
 function Plugin:_on_sync_progress(runtime,state)
@@ -557,9 +593,12 @@ function Plugin:_on_sync_progress(runtime,state)
         local limit=tonumber(self.store:preferences().sync_batch_limit) or 200
         if total>limit then
             runtime.big_book_notified=true
+            local continuation=BatchSync.auto_enabled(self.store:preferences())
+                and "或继续阅读时自动补。"
+                or "或阅读到边界时按提示后台补。"
             self:toast(string.format(
                 "本书共 %d 章。为防风控,单次最多拉 %d 章;"
-                .."其余用「继续拉取后续章节」按钮,或阅读时自动补。",total,limit),6)
+                .."其余用「继续拉取后续章节」按钮,%s",total,limit,continuation),6)
         end
     end
     if runtime.dialog then runtime.dialog:set_state(state) end
@@ -607,8 +646,7 @@ function Plugin:_maybe_auto_batch(page)
     local now=os.time()
     if self._auto_batch_checked_at and now-self._auto_batch_checked_at<30 then return end
     self._auto_batch_checked_at=now
-    if self._auto_batch_started then return end
-    if self.store:preferences().auto_batch_sync==false then return end
+    if self._auto_batch_started or self._batch_prompt_open then return end
     if not (self.sync_task and self.sync_task:available()) or self.sync_task:busy() then return end
     local path=self:current_doc_path()
     if not path or not tostring(path):lower():match("%.epub$") then return end
@@ -620,15 +658,43 @@ function Plugin:_maybe_auto_batch(page)
     if not doc then return end
     local ok_pages,total_pages=pcall(function() return doc:getPageCount() end)
     if not ok_pages or not tonumber(total_pages) or total_pages<=0 then return end
-    local percent=(tonumber(page) or 0)/total_pages
-    local total=math.max(1,tonumber(state.total) or 1)
-    local fetched_fraction=(total-(tonumber(state.pending) or 0))/total
-    -- 章节按书序分批,读进已同步范围的最后 5% 即触发下一批。
-    if percent < fetched_fraction-0.05 then return end
+    local preferences=self.store:preferences()
+    local auto=BatchSync.auto_enabled(preferences)
+    local should_offer,context=BatchSync.should_offer{
+        state=state, batch_limit=preferences.sync_batch_limit,
+        page=page, total_pages=total_pages,
+        dismissed=not auto and self:_batch_prompt_state(bound.book_id) or nil,
+    }
+    if not should_offer then return end
     if not self:logged_in() or not self:is_online() then return end
-    self._auto_batch_started=true
-    self:toast("接近已同步章节末尾,后台拉取下一批…",3)
-    self:_start_sync_task(path,bound,"sync",{background=true,silent=true})
+    if auto then
+        self._auto_batch_started=true
+        self:toast(BatchSync.background_text(context.plan),3)
+        if not self:_start_sync_task(path,bound,"sync",{background=true,silent=true}) then
+            self._auto_batch_started=nil
+        end
+        return
+    end
+
+    self._batch_prompt_open=true
+    UIManager:show(ConfirmBox:new{
+        text=BatchSync.prompt_text(context.plan,true),
+        flush_events_on_show=true,
+        ok_text="后台同步",
+        ok_callback=function()
+            self._batch_prompt_open=nil
+            self._auto_batch_started=true
+            if not self:_start_sync_task(path,bound,"sync",{background=true,silent=true}) then
+                self._auto_batch_started=nil
+            end
+        end,
+        cancel_text="暂不拉取",
+        cancel_callback=function()
+            self._batch_prompt_open=nil
+            local dismissal=BatchSync.dismissal(context)
+            if dismissal then self:_save_batch_prompt_state(bound.book_id,dismissal) end
+        end,
+    })
 end
 
 function Plugin:onPageUpdate(page)
@@ -798,7 +864,9 @@ function Plugin:_sync_report(report)
         end
         return
     end
-    local lines=SyncReport.build(report)
+    local lines=SyncReport.build(report,{
+        auto_batch=BatchSync.auto_enabled(self.store:preferences()),
+    })
     logger.info("[撷思][Sync] report",
         "chapters=",tostring(report.chapters_with_data),"/",tostring(report.chapters_total),
         "matched=",tostring(report.chapters_matched),

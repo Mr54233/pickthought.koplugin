@@ -45,3 +45,17 @@ T.case("同步报告最后一批不再提示下一批", function()
     T.ok(not text:find("下一批：", 1, true), "末批不显示下一批")
     T.ok(text:find("注入成功率：划线 100.00%，想法 --", 1, true), "无想法时不伪造成功率")
 end)
+
+T.case("询问模式的完成报告不误称自动补", function()
+    local text = table.concat(SyncReport.build({
+        batch_start = 1, batch_end = 200,
+        chapters_processed = 200, chapters_fetch_succeeded = 200,
+        chapters_total = 1000, chapters_pending = 800,
+        next_index = 201, batch_limit = 200,
+        total_underlines = 1, underlines_injected = 1,
+        total_thought_entries = 0, thoughts_injected = 0,
+        unmatched = {}, backup = "book.epub.orig",
+    }, {auto_batch = false}), "\n")
+    T.ok(text:find("阅读到边界时按提示后台补", 1, true), "关闭自动后说明询问模式")
+    T.ok(not text:find("继续阅读时自动补", 1, true), "关闭自动后不误称自动拉取")
+end)
