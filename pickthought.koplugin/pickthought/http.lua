@@ -43,6 +43,45 @@ local function transient_status(code)
         or code == 502 or code == 503 or code == 504
 end
 
+local RATE_LIMIT_MARKER = "[撷思RateLimit]"
+
+local function body_rate_limit_code(text)
+    text = tostring(text or "")
+    if text == "" then return nil end
+    local lower = text:lower()
+    local looks_limited = text:find("-2014", 1, true)
+        or text:find("请求频率超限", 1, true)
+        or lower:find("rate limit", 1, true)
+        or lower:find("too many requests", 1, true)
+    if not looks_limited then return nil end
+    local decoded, data = pcall(Json.decode, text)
+    if decoded and type(data) == "table" then
+        local code = data.errCode or data.errcode or data.code
+        local message = tostring(data.errMsg or data.errmsg or data.message or data.msg or "")
+        local message_lower = message:lower()
+        if tonumber(code) == -2014 or tonumber(code) == 429 or tonumber(code) == 499
+            or message:find("请求频率超限", 1, true)
+            or message_lower:find("rate limit", 1, true)
+            or message_lower:find("too many requests", 1, true) then
+            return tostring(code or "response")
+        end
+        return nil
+    end
+    return "response"
+end
+
+local function rate_limit_message(code, wait, active)
+    local prefix = active and "请求频率仍受限" or "请求频率暂时受限"
+    return prefix .. " " .. RATE_LIMIT_MARKER
+        .. " error_code=" .. tostring(code or "unknown")
+        .. " wait_seconds=" .. tostring(math.max(1, math.ceil(tonumber(wait) or 1)))
+        .. ": 已停止继续请求,同步断点会保留,请稍后重试。"
+end
+
+local function rate_limit_wait(value)
+    return tonumber(tostring(value or ""):match("%[撷思RateLimit%].-wait_seconds=(%d+)"))
+end
+
 local function pause(seconds)
     if ok_socket and socket and type(socket.sleep) == "function" then
         socket.sleep(seconds)
@@ -62,6 +101,7 @@ function Http:new(store)
         store = store, user_agent = Protocol.USER_AGENT,
         last_weread_request_at_by_scope = {},
         shared_pacing_path = data_dir ~= "" and (data_dir .. "/weread-pacing.json") or nil,
+        shared_rate_limit_path = data_dir ~= "" and (data_dir .. "/weread-rate-limit.json") or nil,
     }, self)
 end
 
@@ -73,22 +113,30 @@ function Http:_pacing_path(scope)
     return path:gsub("%.json$", "") .. "-" .. scope .. ".json"
 end
 
-local function release_pacing_lock(path)
+function Http:_rate_limit_path(scope)
+    local path = tostring(self.shared_rate_limit_path or "")
+    if path == "" then return "" end
+    scope = tostring(scope or "global"):gsub("[^%w%-_]", "-")
+    if scope == "" or scope == "global" then return path end
+    return path:gsub("%.json$", "") .. "-" .. scope .. ".json"
+end
+
+local function release_state_lock(path)
     if type(lfs.rmdir) == "function" then pcall(lfs.rmdir, path) end
 end
 
-local function pacing_lock_stale(path)
+local function state_lock_stale(path)
     if type(lfs.attributes) ~= "function" then return false end
     local ok, modified = pcall(lfs.attributes, path, "modification")
     return ok and tonumber(modified) and os.time() - tonumber(modified) > 10
 end
 
-local function acquire_pacing_lock(path)
+local function acquire_state_lock(path)
     if type(lfs.mkdir) ~= "function" then return false end
     local deadline = clock_now() + 2
     while clock_now() < deadline do
         if lfs.mkdir(path) == true then return true end
-        if pacing_lock_stale(path) then release_pacing_lock(path) end
+        if state_lock_stale(path) then release_state_lock(path) end
         pause(0.04)
     end
     return false
@@ -101,7 +149,7 @@ function Http:_reserve_shared_pacing(scope, interval, jitter)
     if path == "" or interval <= 0 then return 0 end
 
     local lock_path = path .. ".lock"
-    if not acquire_pacing_lock(lock_path) then return 0 end
+    if not acquire_state_lock(lock_path) then return 0 end
     local ok, wait = pcall(function()
         local now = clock_now()
         local next_at = 0
@@ -123,12 +171,67 @@ function Http:_reserve_shared_pacing(scope, interval, jitter)
         end
         return math.max(0, scheduled - now)
     end)
-    release_pacing_lock(lock_path)
+    release_state_lock(lock_path)
     if not ok then
         logger.warn("[撷思][HTTP] shared pacing reservation failed", tostring(wait))
         return 0
     end
     return tonumber(wait) or 0
+end
+
+function Http:_shared_rate_limit(scope)
+    local path = self:_rate_limit_path(scope)
+    if path == "" then return 0 end
+    local raw = Util.read_file(path, true)
+    if not raw then return 0 end
+    local decoded, state = pcall(Json.decode, raw)
+    local until_at = decoded and type(state) == "table" and tonumber(state.until_at) or nil
+    if not until_at then
+        pcall(os.remove, path)
+        return 0
+    end
+    local remaining = math.ceil(until_at - os.time())
+    if remaining <= 0 then
+        pcall(os.remove, path)
+        return 0
+    end
+    return remaining, state
+end
+
+function Http:_set_shared_rate_limit(seconds, code, url, scope)
+    local path = self:_rate_limit_path(scope)
+    seconds = math.max(30, math.min(1800, tonumber(seconds) or 300))
+    if path == "" then return seconds end
+
+    local lock_path = path .. ".lock"
+    if not acquire_state_lock(lock_path) then
+        logger.warn("[撷思][HTTP] shared rate-limit lock unavailable", "scope=", tostring(scope))
+        return seconds
+    end
+    local ok, wait = pcall(function()
+        local now = os.time()
+        local until_at = now + seconds
+        local raw = Util.read_file(path, true)
+        if raw then
+            local decoded, state = pcall(Json.decode, raw)
+            if decoded and type(state) == "table" then
+                until_at = math.max(until_at, tonumber(state.until_at) or 0)
+            end
+        end
+        local source = tostring(url or ""):gsub("%?.*$", "")
+        local wrote, err = Util.atomic_write(path, Json.encode({
+            until_at = until_at, code = tostring(code or "unknown"), source = source,
+            scope = tostring(scope or "global"), updated_at = now,
+        }), true)
+        if not wrote then error(err or "state write failed") end
+        return math.max(1, math.ceil(until_at - now))
+    end)
+    release_state_lock(lock_path)
+    if not ok then
+        logger.warn("[撷思][HTTP] shared rate-limit state write failed", tostring(wait))
+        return seconds
+    end
+    return tonumber(wait) or seconds
 end
 
 function Http:_pace(url, opt)
@@ -253,12 +356,40 @@ function Http:request(opt)
     local retries = tonumber(opt.retries)
     if retries == nil then retries = 2 end
     retries = math.max(0, math.min(5, retries))
+    local rate_limit_scope = tostring(opt.rate_limit_scope or "")
+    local rate_limit_enabled = rate_limit_scope ~= "" and is_weread_url(opt.url)
+    if rate_limit_enabled then
+        local remaining, state = self:_shared_rate_limit(rate_limit_scope)
+        if remaining > 0 then
+            if opt.rate_limit_fail_fast == true then
+                error(rate_limit_message(state and state.code, remaining, true))
+            end
+            pause(remaining)
+        end
+    end
     local last_text, last_code, last_headers, last_url, last_error
 
     for attempt = 1, retries + 1 do
         self:_pace(opt.url, opt)
         local text, code, headers, url, err = self:_request_once(opt)
         last_text, last_code, last_headers, last_url, last_error = text, code, headers, url, err
+        if rate_limit_enabled then
+            local limited_code
+            if tonumber(code) == 429 or tonumber(code) == 499 then
+                limited_code = tostring(code)
+            else
+                limited_code = body_rate_limit_code(text)
+            end
+            if limited_code then
+                local retry_after_value = hget(headers, "retry-after")
+                local retry_after = retry_after_value and tonumber(retry_after_value) or nil
+                local cooldown = tonumber(opt.rate_limit_cooldown) or 300
+                if retry_after then cooldown = math.max(cooldown, retry_after) end
+                local wait = self:_set_shared_rate_limit(cooldown, limited_code,
+                    url or opt.url, rate_limit_scope)
+                error(rate_limit_message(limited_code, wait, false))
+            end
+        end
         if code and not transient_status(code) then return text, code, headers, url end
         if code and transient_status(code) and attempt > retries then return text, code, headers, url end
         if not code and attempt > retries then
@@ -328,7 +459,8 @@ end
 local function is_rate_limit_error(value)
     local text = tostring(value or "")
     local lower = text:lower()
-    return lower:find("http 429", 1, true) ~= nil
+    return text:find(RATE_LIMIT_MARKER, 1, true) ~= nil
+        or lower:find("http 429", 1, true) ~= nil
         or lower:find("http 499", 1, true) ~= nil
         or text:find("请求频率超限", 1, true) ~= nil
         or text:find("-2014", 1, true) ~= nil
@@ -384,6 +516,7 @@ Http.auth_error_code = auth_error_code
 Http.auth_error_message = auth_error_message
 Http.is_auth_error = is_auth_error
 Http.is_rate_limit_error = is_rate_limit_error
+Http.rate_limit_wait = rate_limit_wait
 
 -- 区分网络错误(连接/超时)与鉴权错误——同步失败时告诉用户是"网络问题"还是"登录问题"。
 local function is_network_error(value)

@@ -108,34 +108,31 @@ function Sync.run(deps)
         if not (good and type(data) == "table" and data.resumed) then
             fresh_fetches = fresh_fetches + 1
         end
-        if good and type(data) == "table" and data.resumed and skip_resumed then
+        local chapter_rate_limited = good and type(data) == "table" and data.rate_limited == true
+        if chapter_rate_limited then
+            rate_limited = true
+            rate_limit_wait = tonumber(data.rate_limit_wait) or rate_limit_wait
+        elseif good and type(data) == "table" and data.resumed and skip_resumed then
             -- 完整缓存只扫描以寻找新增/缺失章节,不重复写库和重注入旧章节。
         elseif good and type(data) == "table" and data.underline_request_ok ~= false then
-            local chapter_rate_limited = data.rate_limited == true
-            if chapter_rate_limited then
-                rate_limited = true
-                rate_limit_wait = tonumber(data.rate_limit_wait) or rate_limit_wait
-            end
             -- 断点缓存命中(resumed)不算网络成功,不能复位熔断计数:
             -- 离线续传时散布的缓存命中会把计数清零,让熔断永不触发。
             if not data.resumed then consecutive_hard = 0 end
             if #(data.errors or {}) > 0 then partial_errors = partial_errors + 1 end
-            if not chapter_rate_limited then
-                total_underlines = total_underlines + (data.underline_count or 0)
-                total_thought_entries = total_thought_entries + (data.thought_entry_count or 0)
-                if (data.underline_count or 0) > 0 then
-                    fetched[#fetched + 1] = {
-                        uid = ch.uid, title = ch.title,
-                        underlines = data.underlines, review_map = data.review_map,
-                    }
-                end
-                if #(data.review_groups or {}) > 0 then
-                    local ok_save, saved = pcall(deps.save_thoughts, deps.book_id, ch.uid, data.review_groups)
-                    if ok_save and saved then
-                        thoughts_saved = thoughts_saved + 1
-                    else
-                        save_failures = save_failures + 1
-                    end
+            total_underlines = total_underlines + (data.underline_count or 0)
+            total_thought_entries = total_thought_entries + (data.thought_entry_count or 0)
+            if (data.underline_count or 0) > 0 then
+                fetched[#fetched + 1] = {
+                    uid = ch.uid, title = ch.title,
+                    underlines = data.underlines, review_map = data.review_map,
+                }
+            end
+            if #(data.review_groups or {}) > 0 then
+                local ok_save, saved = pcall(deps.save_thoughts, deps.book_id, ch.uid, data.review_groups)
+                if ok_save and saved then
+                    thoughts_saved = thoughts_saved + 1
+                else
+                    save_failures = save_failures + 1
                 end
             end
         else

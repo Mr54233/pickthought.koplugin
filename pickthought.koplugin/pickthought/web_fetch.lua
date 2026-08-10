@@ -1,8 +1,7 @@
 -- 数据源:微信读书划线 + 想法。
 local Http_ok, Http = pcall(require, "pickthought.http")
-local Socket_ok, socket = pcall(require, "socket")
--- 划线走 /book/underlines(gateway,按章,返回该章所有划线,不限热度);
--- 想法走 /book/readreviews(gateway,按 range 拉该段全部,count=30)。
+-- Web underlines/readReviews 优先,失败时回退 Gateway 同名接口;
+-- 按章取全部划线,再按 range 拉该段全部想法(count=30)。
 -- 输出与原 Annotations:fetch_chapter 同形:
 -- {underlines, review_map, review_groups, underline_count, thought_count,
 --  thought_entry_count, errors, underline_request_ok}
@@ -16,16 +15,17 @@ local logger = require("logger")
 local WebFetch = {}
 WebFetch.__index = WebFetch
 
-local function pause(seconds)
-    if Socket_ok and socket and type(socket.sleep) == "function" then socket.sleep(seconds) end
-end
-
 local function is_data_specific_error(value)
     local text = tostring(value or ""):lower()
     return text:find("params error", 1, true) ~= nil
         or text:find("invalid range", 1, true) ~= nil
         or text:find("invalid parameter", 1, true) ~= nil
         or text:find("range error", 1, true) ~= nil
+end
+
+local function rate_limit_details(value)
+    if not Http_ok or not Http.is_rate_limit_error(value) then return false end
+    return true, Http.rate_limit_wait(value)
 end
 
 local function scalar_str(v)
@@ -143,19 +143,16 @@ function WebFetch.build_chapter(book_id, uid, marks_rows, reviews_data)
 end
 
 function WebFetch:new(api)
-    return setmetatable({api = api, rate_limit_streak = 0, rate_limit_until = 0}, self)
+    return setmetatable({api = api}, self)
 end
 
 function WebFetch:fetch_chapter(book_id, uid, progress)
     progress = progress or function() end
     local chapter_uid = tostring(uid)
-    local now = os.time()
-    if self.rate_limit_until and self.rate_limit_until > now then
-        pause(self.rate_limit_until - now)
-    end
     -- /book/underlines:该章所有划线(不限热度),比 bestbookmarks(整本热门 top)覆盖全。
     local ok, data = pcall(function() return self.api:underlines(book_id, chapter_uid) end)
     if not ok then
+        local rate_limited, rate_limit_wait = rate_limit_details(data)
         logger.warn("[撷思][WebFetch] underlines failed",
             "book=", tostring(book_id), "chapter=", chapter_uid, "error=", tostring(data))
         return {
@@ -163,6 +160,7 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
             underlines = {}, review_map = {}, review_groups = {},
             underline_count = 0, thought_count = 0, thought_entry_count = 0,
             errors = {tostring(data)}, underline_request_ok = false,
+            rate_limited = rate_limited or nil, rate_limit_wait = rate_limit_wait,
         }
     end
     progress("underlines", 1, 1, "")
@@ -203,20 +201,17 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
                 return self.api:readreviews(book_id, chapter_uid, batch)
             end)
             if ok and append_reviews(resp) then
-                self.rate_limit_streak = 0
                 return true, false
             end
 
             local error_text = ok and "readreviews returned invalid data" or tostring(resp)
             if not ok and Http_ok and Http.is_auth_error(resp) then return false, true end
-            if not ok and Http_ok and Http.is_rate_limit_error(resp) then
-                self.rate_limit_streak = math.min(5, (self.rate_limit_streak or 0) + 1)
-                local wait = math.min(30, 2 ^ self.rate_limit_streak)
-                self.rate_limit_until = os.time() + wait
+            local limited, wait = rate_limit_details(resp)
+            if not ok and limited then
                 rate_limited, rate_limit_wait = true, wait
                 logger.warn("[撷思][WebFetch] rate limited; stop current chapter",
                     "book=", tostring(book_id), "chapter=", chapter_uid,
-                    "wait=", tostring(wait), "streak=", tostring(self.rate_limit_streak))
+                    "wait=", tostring(wait or "unknown"))
                 return false, true
             end
             if not ok and is_data_specific_error(resp) and #batch > 1 then

@@ -152,23 +152,129 @@ T.case("499 限流被识别并停止当前章节批次", function()
     T.ok(Http.is_rate_limit_error("HTTP 499: 请求频率超限,请稍后再试"), "499 限流错误应识别")
     local result = WebFetch:new(make_api(
         function() return UNDERLINES_116 end,
-        function() error("HTTP 499: 请求频率超限,请稍后再试") end
+        function() error("请求频率暂时受限 [撷思RateLimit] error_code=499 wait_seconds=300") end
     )):fetch_chapter("b1", 116)
     T.eq(result.rate_limited, true, "章节标记限流")
-    T.eq(result.rate_limit_wait, 2, "首次限流建议等待 2 秒")
+    T.eq(result.rate_limit_wait, 300, "使用 HTTP 层持久化冷却时间")
     T.eq(result.underline_count, 2, "已有划线仍保留在结果中")
+end)
+
+T.case("underlines 限流也停止当前章节并保留游标", function()
+    local result = WebFetch:new(make_api(
+        function() error("请求频率仍受限 [撷思RateLimit] error_code=429 wait_seconds=299") end,
+        readreviews_from(REVIEWS.reviews)
+    )):fetch_chapter("b1", 116)
+    T.eq(result.underline_request_ok, false, "划线请求没有伪装成成功")
+    T.eq(result.rate_limited, true, "划线路径也上报限流")
+    T.eq(result.rate_limit_wait, 299, "透传共享冷却剩余时间")
+end)
+
+T.case("HTTP 限流冷却跨实例持久化且按 scope 隔离", function()
+    local base = "tests/.tmp_rate_limit.json"
+    local first = Http:new({})
+    first.shared_rate_limit_path = base
+    local web_path = first:_rate_limit_path("annotations-web")
+    local agent_path = first:_rate_limit_path("annotations-agent")
+    os.remove(web_path)
+    os.remove(agent_path)
+
+    local transport_calls = 0
+    first._request_once = function(_, opt)
+        transport_calls = transport_calls + 1
+        return "busy", 429, {}, opt.url
+    end
+    local ok, err = pcall(function()
+        first:request({
+            url = "https://weread.qq.com/web/book/underlines?bookId=secret",
+            retries = 3, rate_limit_scope = "annotations-web",
+            rate_limit_fail_fast = true, rate_limit_cooldown = 300,
+        })
+    end)
+    T.eq(ok, false, "429 应转为统一限流错误")
+    T.ok(Http.is_rate_limit_error(err), "统一错误可识别")
+    T.eq(Http.rate_limit_wait(err), 300, "Retry-After 缺失时使用配置冷却且不崩")
+    T.eq(transport_calls, 1, "限流响应不进入普通网络重试")
+    local state_file = assert(io.open(web_path, "rb"))
+    local state = state_file:read("*a")
+    state_file:close()
+    T.ok(not state:find("secret", 1, true), "状态文件不记录查询参数")
+
+    local second = Http:new({})
+    second.shared_rate_limit_path = base
+    second._request_once = function()
+        transport_calls = transport_calls + 1
+        return "{}", 200, {}, "https://weread.qq.com/"
+    end
+    local second_ok, second_err = pcall(function()
+        second:request({
+            url = "https://weread.qq.com/web/book/underlines",
+            rate_limit_scope = "annotations-web", rate_limit_fail_fast = true,
+        })
+    end)
+    T.eq(second_ok, false, "新 Http 实例读取已有冷却")
+    T.ok(Http.is_rate_limit_error(second_err), "共享冷却返回统一错误")
+    T.eq(transport_calls, 1, "冷却期 fail-fast 不发请求")
+
+    local _, agent_code = second:request({
+        url = "https://i.weread.qq.com/api/agent/gateway",
+        rate_limit_scope = "annotations-agent", rate_limit_fail_fast = true,
+    })
+    T.eq(agent_code, 200, "Web 冷却不阻塞 Agent scope")
+    T.eq(transport_calls, 2, "Agent scope 正常发出请求")
+    os.remove(web_path)
+    os.remove(agent_path)
+end)
+
+T.case("HTTP 200 中的 -2014 业务错误也写入限流冷却", function()
+    local base = "tests/.tmp_body_rate_limit.json"
+    local http = Http:new({})
+    http.shared_rate_limit_path = base
+    local path = http:_rate_limit_path("annotations-web")
+    os.remove(path)
+    http._request_once = function(_, opt)
+        return '{"errCode":-2014,"errMsg":"请求频率超限"}', 200, {}, opt.url
+    end
+    local ok, err = pcall(function()
+        http:request({
+            url = "https://weread.qq.com/web/book/readReviews",
+            rate_limit_scope = "annotations-web", rate_limit_fail_fast = true,
+            rate_limit_cooldown = 300,
+        })
+    end)
+    T.eq(ok, false, "业务体限流不能当作 HTTP 成功")
+    T.ok(Http.is_rate_limit_error(err), "-2014 转为统一限流错误")
+    T.ok(Http.rate_limit_wait(err) >= 300, "业务体限流写入共享冷却")
+    local state_file = io.open(path, "rb")
+    T.ok(state_file ~= nil, "业务体限流状态已落盘")
+    if state_file then state_file:close() end
+    os.remove(path)
+end)
+
+T.case("正常业务内容含 rate limit 字样不会误判", function()
+    local http = Http:new({})
+    http._request_once = function(_, opt)
+        return '{"reviews":[{"content":"rate limit 只是正文"}]}', 200, {}, opt.url
+    end
+    local body, code = http:request({
+        url = "https://weread.qq.com/web/book/readReviews",
+        rate_limit_scope = "annotations-web", rate_limit_fail_fast = true,
+    })
+    T.eq(code, 200, "正常响应保持成功")
+    T.ok(body:find("rate limit", 1, true) ~= nil, "业务内容原样返回")
 end)
 
 T.case("Web 接口失败时回退 Agent Gateway", function()
     local calls = {}
+    local agent_options
     local fake_http = {
         get_json = function(_, url)
             calls[#calls + 1] = url
             error("HTTP 503")
         end,
-        post_json = function(_, url, payload)
+        post_json = function(_, url, payload, options)
             calls[#calls + 1] = url
             if url:find("readReviews", 1, true) then error("HTTP 503") end
+            agent_options = options
             return {underlines = {{range = "0-7", markText = "春江潮水连海平"}}}
         end,
     }
@@ -182,6 +288,9 @@ T.case("Web 接口失败时回退 Agent Gateway", function()
     T.ok(calls[2]:find("api/agent/gateway", 1, true), "underlines 回退 Gateway")
     T.ok(calls[3]:find("/web/book/readReviews", 1, true), "先尝试 Web readReviews")
     T.ok(calls[4]:find("api/agent/gateway", 1, true), "readReviews 回退 Gateway")
+    T.eq(agent_options.rate_limit_scope, "annotations-agent", "Agent 使用独立限流域")
+    T.eq(agent_options.rate_limit_fail_fast, true, "Agent 冷却期直接停止请求")
+    T.eq(agent_options.rate_limit_cooldown, 900, "Agent 冷却时间为 900 秒")
 end)
 
 T.case("Web 接口成功时不调用 Agent Gateway", function()
@@ -204,6 +313,9 @@ T.case("Web 接口成功时不调用 Agent Gateway", function()
     T.eq(#calls, 2, "Web 成功不触发 Agent")
     T.eq(calls[1].options.pacing_scope, "annotations-web", "Web 使用独立节流域")
     T.eq(calls[2].options.shared_pacing, true, "Web 使用共享节流")
+    T.eq(calls[1].options.rate_limit_scope, "annotations-web", "Web 使用独立限流域")
+    T.eq(calls[2].options.rate_limit_fail_fast, true, "Web 冷却期直接停止请求")
+    T.eq(calls[2].options.rate_limit_cooldown, 300, "Web 冷却时间为 300 秒")
 end)
 
 T.case("大批次参数错误时二分拆分,不逐条盲重试", function()

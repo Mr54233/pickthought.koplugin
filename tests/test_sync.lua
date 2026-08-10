@@ -308,7 +308,8 @@ T.case("限流章节不推进游标,下次同步可重试", function()
                 if tostring(uid) == "1" then
                     return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
                         review_map = {}, review_groups = {}, underline_count = 1,
-                        thought_count = 0, thought_entry_count = 0, errors = {}, rate_limited = true,
+                        thought_count = 0, thought_entry_count = 0, errors = {},
+                        underline_request_ok = false, rate_limited = true,
                         rate_limit_wait = 7}
                 end
                 return {underlines = {}, review_map = {}, review_groups = {},

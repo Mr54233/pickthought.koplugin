@@ -248,12 +248,16 @@ local WEB_ANNOTATION_OPTIONS = {
     auth = true, retries = 1, timeout = {10, 18},
     pacing_scope = "annotations-web", min_interval = 0.45,
     pacing_jitter = 0.10, shared_pacing = true,
+    rate_limit_scope = "annotations-web", rate_limit_fail_fast = true,
+    rate_limit_cooldown = 300,
 }
 
 local AGENT_ANNOTATION_OPTIONS = {
     retries = 0, timeout = {10, 18},
     pacing_scope = "annotations-agent", min_interval = 4.25,
     pacing_jitter = 0.35, shared_pacing = true,
+    rate_limit_scope = "annotations-agent", rate_limit_fail_fast = true,
+    rate_limit_cooldown = 900,
 }
 
 local function annotation_batch_error(value)
@@ -306,6 +310,9 @@ function Api:underlines(id, chapter_uid)
                         min_interval = WEB_ANNOTATION_OPTIONS.min_interval,
                         pacing_jitter = WEB_ANNOTATION_OPTIONS.pacing_jitter,
                         shared_pacing = WEB_ANNOTATION_OPTIONS.shared_pacing,
+                        rate_limit_scope = WEB_ANNOTATION_OPTIONS.rate_limit_scope,
+                        rate_limit_fail_fast = WEB_ANNOTATION_OPTIONS.rate_limit_fail_fast,
+                        rate_limit_cooldown = WEB_ANNOTATION_OPTIONS.rate_limit_cooldown,
                         headers = annotation_headers(id, uid),
                     })
                 end)
@@ -357,6 +364,9 @@ function Api:readreviews(id, chapter_uid, batch)
                         min_interval = WEB_ANNOTATION_OPTIONS.min_interval,
                         pacing_jitter = WEB_ANNOTATION_OPTIONS.pacing_jitter,
                         shared_pacing = WEB_ANNOTATION_OPTIONS.shared_pacing,
+                        rate_limit_scope = WEB_ANNOTATION_OPTIONS.rate_limit_scope,
+                        rate_limit_fail_fast = WEB_ANNOTATION_OPTIONS.rate_limit_fail_fast,
+                        rate_limit_cooldown = WEB_ANNOTATION_OPTIONS.rate_limit_cooldown,
                         headers = annotation_headers(id, uid),
                     })
                 end)
