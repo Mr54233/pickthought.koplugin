@@ -111,6 +111,74 @@ T.case("重同步从 .orig 干净备份注入", function()
     T.eq(report.dest, "/books/书.epub", "dest 仍是书架路径")
 end)
 
+T.case("增量同步保留干净备份并原子替换当前注入版", function()
+    local EpubInject = require("pickthought.epub_inject")
+    local meta_paths = {}
+    local deps, calls = make_deps({
+        append = true,
+        file_exists = function(p) return p == "/books/书.epub.orig" end,
+        load_meta = function(p)
+            meta_paths[#meta_paths + 1] = p
+            local has = {}
+            if p == "/books/书.epub" then has[EpubInject.MARKER] = true end
+            return {path = p, spine = {{href = "OEBPS/c1.xhtml"},
+                {href = "OEBPS/c2.xhtml"}}, has = has}
+        end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "应成功: " .. tostring(err))
+    T.eq(calls.injected.src, "/books/书.epub", "从当前注入版继续追加")
+    T.eq(calls.injected.options.append, true, "注入器使用追加模式")
+    T.eq(#calls.renames, 1, "只换入新版本,不移动当前书到备份")
+    T.eq(calls.renames[1][1], "/books/书.epub.pickthought-new", "新版本原子换位")
+    T.eq(calls.renames[1][2], "/books/书.epub", "覆盖当前注入版")
+    T.eq(#calls.removed, 0, "成功路径不删除当前书或备份")
+    T.ok(meta_paths[#meta_paths] == "/books/书.epub.orig", "映射读取干净备份")
+end)
+
+T.case("增量同步拒绝已污染的原书备份", function()
+    local EpubInject = require("pickthought.epub_inject")
+    local deps, calls = make_deps({
+        append = true,
+        file_exists = function(p) return p == "/books/书.epub.orig" end,
+        load_meta = function(p)
+            local has = {[EpubInject.MARKER] = true}
+            return {path = p, spine = {{href = "OEBPS/c1.xhtml"}}, has = has}
+        end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil and tostring(err):find("备份已被注入", 1, true),
+        "污染备份必须拒绝: " .. tostring(err))
+    T.eq(calls.injected, nil, "拒绝后不得生成新 EPUB")
+    T.eq(#calls.renames, 0, "拒绝后不得换位")
+end)
+
+T.case("增量换位失败保留当前书和干净备份", function()
+    local EpubInject = require("pickthought.epub_inject")
+    local deps, calls = make_deps({
+        append = true,
+        file_exists = function(p)
+            return p == "/books/书.epub" or p == "/books/书.epub.orig"
+        end,
+        load_meta = function(p)
+            local has = {}
+            if p == "/books/书.epub" then has[EpubInject.MARKER] = true end
+            return {path = p, spine = {{href = "OEBPS/c1.xhtml"},
+                {href = "OEBPS/c2.xhtml"}}, has = has}
+        end,
+    })
+    deps.rename = function(a, b)
+        calls.renames[#calls.renames + 1] = {a, b}
+        return nil, "busy"
+    end
+    local report, err = Sync.run(deps)
+    T.ok(report == nil and tostring(err):find("无法替换原书", 1, true),
+        "换位失败应报错: " .. tostring(err))
+    T.eq(#calls.renames, 1, "只尝试新版本换位一次")
+    T.eq(#calls.removed, 1, "只清理未换入的临时文件")
+    T.eq(calls.removed[1], "/books/书.epub.pickthought-new", "当前书与备份均不删除")
+end)
+
 T.case("已注入但无备份时拒绝并说明", function()
     local EpubInject = require("pickthought.epub_inject")
     local deps = make_deps({

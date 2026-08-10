@@ -53,6 +53,17 @@ function Sync.run(deps)
         end
         return nil, "原书备份本身是注入版,数据异常;请手动恢复原书后重试"
     end
+    local backup_meta
+    if append then
+        if not file_exists(backup) then
+            return nil, "这本书已被注入过,但找不到干净原书备份(" .. backup .. "),无法继续同步"
+        end
+        backup_meta, meta_err = deps.load_meta(backup)
+        if not backup_meta then return nil, meta_err end
+        if backup_meta.has and backup_meta.has[EpubInject.MARKER] then
+            return nil, "原书备份已被注入,无法保证可还原;请手动恢复干净原书备份后重试"
+        end
+    end
 
     if not step("chapters", 0, 1, "获取章节列表") then return nil, "已取消" end
     local ok, chapters_raw = pcall(function() return deps.api:chapters(deps.book_id) end)
@@ -194,10 +205,7 @@ function Sync.run(deps)
     local map_store, map_signature
     -- 增量注入的当前 EPUB 已含旧批次标记;新章节映射仍从 .orig 干净正文读取,
     -- 避免 HTML 标记增长后改变引文定位结果。
-    local map_meta = meta
-    if append and file_exists(backup) then
-        map_meta = deps.load_meta(backup) or meta
-    end
+    local map_meta = backup_meta or meta
     if deps.map_cache_path then
         -- 指纹 = 源书大小 + 匹配算法版本:换书或改算法都让旧映射作废重建。
         local map_source = file_exists(backup) and backup or doc_path
@@ -361,23 +369,22 @@ function Sync.run(deps)
         end
     end
 
-    if src == doc_path then
+    local backed_up = false
+    if src == doc_path and not append then
         -- 首次:原书让位为备份,注入版顶上原路径(进度侧车不动)。
         local ok_backup, backup_err = rename(doc_path, backup)
         if not ok_backup then
             remove(temp_dest)
             return nil, "无法备份原书:" .. tostring(backup_err or "重命名失败")
         end
+        backed_up = true
     end
     local ok_swap, swap_err = rename(temp_dest, doc_path)
     if not ok_swap then
-        remove(doc_path)
-        ok_swap, swap_err = rename(temp_dest, doc_path)
-    end
-    if not ok_swap then
         remove(temp_dest)
-        -- 回滚:无论首次还是重同步,书架路径上必须留有可读的书。
-        if not file_exists(doc_path) then rename(backup, doc_path) end
+        -- 首次注入已经让原书离位时才需要回滚。增量失败时旧注入版仍在原路径，
+        -- 绝不能删除它或移动干净 .orig；上一代只在原子替换成功时由系统丢弃。
+        if backed_up and not file_exists(doc_path) then rename(backup, doc_path) end
         return nil, "无法替换原书:" .. tostring(swap_err or "重命名失败")
     end
 
