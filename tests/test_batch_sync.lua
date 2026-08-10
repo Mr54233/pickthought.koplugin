@@ -48,6 +48,36 @@ T.case("任务运行时阅读到边界也绝不重复启动", function()
     T.eq(reason, "busy", "返回明确互斥原因")
 end)
 
+T.case("优先使用 EPUB 结构片段而不是失真的页数比例", function()
+    T.eq(BatchSync.fragment_index("/body/DocFragment[206]/body/div/p.0"), 206,
+        "解析带序号 DocFragment")
+    T.eq(BatchSync.fragment_index("/body/DocFragment/body/p.0"), 1,
+        "首个 DocFragment 无序号时按 1")
+    T.eq(BatchSync.fragment_index("/body/div/p.0"), nil, "非 EPUB 结构不误判")
+
+    local page_estimate = BatchSync.estimate_read_chapter(1383, 12991, 1615)
+    T.eq(page_estimate, 172, "真机页数比例会把第 201 章错估为 172")
+    local fragment_estimate = BatchSync.estimate_read_chapter(1383, 12991, 1615, 206, 1640)
+    T.eq(fragment_estimate, 203, "结构片段进度恢复到约第 203 章")
+
+    local offer, context = BatchSync.should_offer{
+        state = {total = 1615, pending = 1415, next_index = 201},
+        batch_limit = 200,
+        page = 1383, total_pages = 12991,
+        fragment = 206, fragment_total = 1640,
+    }
+    T.ok(offer, "真机第 201 章应触发续批询问")
+    T.eq(context.plan.start_index, 201, "仍从连续同步游标开始")
+end)
+
+T.case("拿不到结构片段时保留页数比例回退", function()
+    local offer = BatchSync.should_offer{
+        state = {total = 1000, pending = 800, next_index = 201},
+        batch_limit = 200, page = 200, total_pages = 1000,
+    }
+    T.ok(offer, "非 crengine 或结构读取失败时仍可按页数触发")
+end)
+
 T.case("拒绝一次后跨到下一阅读批次才再次询问", function()
     local state = {total = 1615, pending = 1415, next_index = 201}
     local before, reason = BatchSync.should_offer{

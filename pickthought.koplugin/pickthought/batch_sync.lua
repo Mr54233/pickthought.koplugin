@@ -76,9 +76,22 @@ function M.background_text(plan)
         format_integer(plan.start_index), format_integer(plan.end_index))
 end
 
-function M.estimate_read_chapter(page, total_pages, total_chapters)
+function M.fragment_index(xpointer)
+    xpointer = tostring(xpointer or "")
+    local index = tonumber(xpointer:match("/DocFragment%[(%d+)%]"))
+    if index then return index end
+    if xpointer:find("/DocFragment", 1, true) then return 1 end
+end
+
+function M.estimate_read_chapter(page, total_pages, total_chapters, fragment, fragment_total)
     page, total_pages, total_chapters = tonumber(page), tonumber(total_pages), positive(total_chapters)
-    if not page or not total_pages or total_pages <= 0 or not total_chapters then return nil end
+    fragment, fragment_total = positive(fragment), positive(fragment_total)
+    if not total_chapters then return nil end
+    if fragment and fragment_total and fragment <= fragment_total then
+        local fraction = fragment / fragment_total
+        return math.max(1, math.min(total_chapters, math.ceil(fraction * total_chapters)))
+    end
+    if not page or not total_pages or total_pages <= 0 then return nil end
     local fraction = math.max(0, math.min(1, page / total_pages))
     return math.max(1, math.min(total_chapters, math.ceil(fraction * total_chapters)))
 end
@@ -97,7 +110,8 @@ function M.should_offer(args)
     if not plan or not plan.total or not plan.pending or plan.pending <= 0 then
         return false, "nothing_pending"
     end
-    local read_chapter = M.estimate_read_chapter(args.page, args.total_pages, plan.total)
+    local read_chapter = M.estimate_read_chapter(args.page, args.total_pages, plan.total,
+        args.fragment, args.fragment_total)
     if not read_chapter then return false, "unknown_position" end
     if read_chapter < math.max(1, plan.start_index - 1) then return false, "before_boundary" end
 

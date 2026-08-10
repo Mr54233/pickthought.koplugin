@@ -641,7 +641,23 @@ function Plugin:_show_active_sync_dialog()
     if runtime.last_state then dialog:set_state(runtime.last_state) end
 end
 
--- ===== 自动分批:阅读接近已同步章节末尾时,后台拉下一批 =====
+function Plugin:_batch_fragment_position(doc,page,total_pages)
+    if not doc or type(doc.getPageXPointer)~="function" then return nil,nil end
+    local ok,current_xpointer=pcall(function() return doc:getPageXPointer(page) end)
+    local current=ok and BatchSync.fragment_index(current_xpointer) or nil
+    if not current then return nil,nil end
+
+    local cache=self._batch_fragment_cache
+    if not cache or cache.doc~=doc or cache.total_pages~=total_pages then
+        local last_ok,last_xpointer=pcall(function() return doc:getPageXPointer(total_pages) end)
+        cache={doc=doc,total_pages=total_pages,
+            total=last_ok and BatchSync.fragment_index(last_xpointer) or nil}
+        self._batch_fragment_cache=cache
+    end
+    return current,cache.total
+end
+
+-- ===== 阅读分批:到达已同步章节末尾时,自动或询问拉下一批 =====
 function Plugin:_maybe_auto_batch(page)
     local now=os.time()
     if self._auto_batch_checked_at and now-self._auto_batch_checked_at<30 then return end
@@ -658,15 +674,32 @@ function Plugin:_maybe_auto_batch(page)
     if not doc then return end
     local ok_pages,total_pages=pcall(function() return doc:getPageCount() end)
     if not ok_pages or not tonumber(total_pages) or total_pages<=0 then return end
+    local fragment,fragment_total=self:_batch_fragment_position(doc,page,total_pages)
     local preferences=self.store:preferences()
     local auto=BatchSync.auto_enabled(preferences)
+    local position_key=table.concat({tostring(bound.book_id),tostring(fragment),
+        tostring(fragment_total),tostring(state.next_index)},":")
+    if self._batch_position_log_key~=position_key then
+        self._batch_position_log_key=position_key
+        logger.info("[撷思][BatchSync] reading position",
+            "page=",tostring(page),"/",tostring(total_pages),
+            "fragment=",tostring(fragment),"/",tostring(fragment_total),
+            "next_index=",tostring(state.next_index))
+    end
     local should_offer,context=BatchSync.should_offer{
         state=state, batch_limit=preferences.sync_batch_limit,
         page=page, total_pages=total_pages,
+        fragment=fragment, fragment_total=fragment_total,
         dismissed=not auto and self:_batch_prompt_state(bound.book_id) or nil,
     }
     if not should_offer then return end
     if not self:logged_in() or not self:is_online() then return end
+    logger.info("[撷思][BatchSync] boundary reached",
+        "page=",tostring(page),"/",tostring(total_pages),
+        "fragment=",tostring(fragment),"/",tostring(fragment_total),
+        "estimated_chapter=",tostring(context.read_chapter),
+        "next_index=",tostring(context.plan.start_index),
+        "auto=",tostring(auto))
     if auto then
         self._auto_batch_started=true
         self:toast(BatchSync.background_text(context.plan),3)
