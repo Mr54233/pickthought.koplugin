@@ -1,6 +1,5 @@
 local logger = require("logger")
 local Thoughts = require("pickthought.thoughts")
-local ok_socket, socket = pcall(require, "socket")
 
 local Annotations = {}
 Annotations.__index = Annotations
@@ -8,66 +7,11 @@ Annotations.__index = Annotations
 local AnnotationStyle = require("pickthought.annotation_style")
 local CSS = AnnotationStyle.CSS
 
-local function pause(seconds)
-    if ok_socket and socket and type(socket.sleep) == "function" then socket.sleep(seconds) end
-end
-
-local function is_network_failure(value)
-    local text=tostring(value or ""):lower()
-    return text:find("network request failed",1,true)~=nil
-        or text:find("timeout",1,true)~=nil
-        or text:find("connection refused",1,true)~=nil
-        or text:find("network is unreachable",1,true)~=nil
-end
-
-local function call_with_retry(label, fn)
-    local last
-    for attempt = 1, 3 do
-        local ok, value = pcall(fn)
-        if ok and type(value) == "table" then return true, value, false end
-        last = ok and (label .. " returned invalid data") or tostring(value)
-        local network_down=is_network_failure(last)
-        local max_attempts=network_down and 2 or 3
-        if attempt < max_attempts then
-            logger.warn("[撷思][Annotations] retry", "label=", label, "attempt=", tostring(attempt), "error=", tostring(last))
-            pause(attempt == 1 and 0.6 or 1.4)
-        else
-            return false,last,network_down
-        end
-    end
-    return false,last,is_network_failure(last)
-end
-
 local function str(v) return v == nil and "" or tostring(v) end
-local function scalar_str(v)
-    local kind=type(v)
-    if kind=="string" or kind=="number" then return tostring(v) end
-    return ""
-end
 
 local function range_key(v)
     if type(v) ~= "table" then return "" end
-    return scalar_str(rawget(v,"range") or rawget(v,"markRange") or rawget(v,"bookmarkRange"))
-end
-
-local function array_from(data, names)
-    if type(data) ~= "table" then return {} end
-    for _, name in ipairs(names) do if type(data[name]) == "table" then return data[name] end end
-    if #data > 0 then return data end
-    return {}
-end
-
-local function table_entries(data)
-    local rows, invalid = {}, 0
-    if type(data) ~= "table" then return rows, invalid end
-    for _, value in ipairs(data) do
-        if type(value) == "table" then
-            rows[#rows + 1] = value
-        else
-            invalid = invalid + 1
-        end
-    end
-    return rows, invalid
+    return str(rawget(v,"range") or rawget(v,"markRange") or rawget(v,"bookmarkRange"))
 end
 
 local function parse_range(value)
@@ -77,166 +21,7 @@ local function parse_range(value)
     return a, b
 end
 
-local function review_texts(group)
-    local rows, seen, invalid = {}, {}, 0
-    local pages, skipped = table_entries(array_from(group, {"pageReviews", "reviews", "updated"}))
-    invalid = invalid + skipped
-    for _, page in ipairs(pages) do
-        -- Review payloads occasionally contain placeholders, functions or tables
-        -- with surprising metatables. Keep each entry isolated so one malformed
-        -- review can never abort the whole book download.
-        local ok, item = pcall(function()
-            if type(page) ~= "table" then return nil end
-            local nested = rawget(page, "review")
-            local r = type(nested) == "table" and nested or page
-            if type(r) ~= "table" then return nil end
-            local content = scalar_str(rawget(r, "content") or rawget(r, "review") or rawget(r, "text"))
-            if content == "" then return nil end
-            local author = type(rawget(r, "author")) == "table" and rawget(r, "author") or {}
-            local author_name = scalar_str(rawget(author, "nick") or rawget(author, "name") or rawget(r, "authorName"))
-            local key = scalar_str(rawget(r, "reviewId") or rawget(r, "id"))
-            if key == "" then key = content .. "\0" .. author_name end
-            return {
-                key = key,
-                content = content,
-                abstract = scalar_str(rawget(r, "abstract") or rawget(r, "contextAbstract") or rawget(r, "markText")),
-                created = tonumber(rawget(r, "createTime") or rawget(r, "createdAt") or 0) or 0,
-                author = author_name,
-                likes = tonumber(rawget(page, "likesCount") or rawget(r, "likesCount") or 0) or 0,
-                review_id = scalar_str(rawget(r, "reviewId") or rawget(r, "id")),
-            }
-        end)
-        if ok and item and not seen[item.key] then
-            seen[item.key] = true
-            item.key = nil
-            rows[#rows + 1] = item
-        elseif not ok or item == nil then
-            invalid = invalid + 1
-        end
-    end
-    return rows, invalid
-end
-
-local function normalize_reviews(data)
-    local map, groups, group_count, entry_count, invalid_count = {}, {}, 0, 0, 0
-    local source, skipped = table_entries(array_from(data, {"reviews", "updated"}))
-    invalid_count = invalid_count + skipped
-    for _, group in ipairs(source) do
-        local key = range_key(group)
-        if key ~= "" then
-            local texts, invalid = review_texts(group)
-            invalid_count = invalid_count + invalid
-            if #texts > 0 then
-                if not map[key] then group_count = group_count + 1; map[key] = {} end
-                for _, item in ipairs(texts) do map[key][#map[key] + 1] = item end
-                entry_count = entry_count + #texts
-            end
-        end
-    end
-    for key, texts in pairs(map) do groups[#groups + 1] = {range = key, texts = texts} end
-    table.sort(groups, function(a, b) return tostring(a.range) < tostring(b.range) end)
-    return map, groups, group_count, entry_count, invalid_count
-end
-
-function Annotations:new(api) return setmetatable({api = api}, self) end
-
-function Annotations:fetch_chapter(book_id, uid, progress)
-    local result = {book_id=str(book_id),chapter_uid=str(uid),underlines={},review_map={},review_groups={},underline_count=0,thought_count=0,thought_entry_count=0,errors={},underline_request_ok=false}
-    progress = progress or function() end
-    local ok, data = call_with_retry("underlines", function() return self.api:underlines(book_id, uid) end)
-    if not ok then
-        local err = str(data)
-        result.errors[#result.errors + 1] = err
-        logger.warn("[撷思][Annotations] underlines failed", "book=", result.book_id, "chapter=", result.chapter_uid, "error=", err)
-        return result
-    end
-    result.underline_request_ok = true
-    local invalid_underlines
-    result.underlines, invalid_underlines = table_entries(array_from(data, {"underlines", "updated", "bookmarks"}))
-    result.underline_count = #result.underlines
-    if invalid_underlines > 0 then
-        logger.warn("[撷思][Annotations] ignored invalid underline entries",
-            "book=", result.book_id, "chapter=", result.chapter_uid,
-            "count=", tostring(invalid_underlines))
-    end
-    local ranges, seen = {}, {}
-    for _, row in ipairs(result.underlines) do
-        local key = range_key(row)
-        if key ~= "" and not seen[key] then seen[key] = true; ranges[#ranges + 1] = key end
-    end
-    progress("underlines", result.underline_count, result.underline_count, "")
-    if #ranges == 0 then return result end
-    local groups = {}
-    local batches = self.api:review_batches(ranges, 5)
-    for index, batch in ipairs(batches) do
-        progress("thoughts", index, #batches, "")
-        local good, response, network_down = call_with_retry("thoughts batch " .. tostring(index), function()
-            return self.api:readreviews(book_id, uid, batch)
-        end)
-        if good then
-            local rows, invalid = table_entries(array_from(response, {"reviews", "updated"}))
-            for _, item in ipairs(rows) do groups[#groups + 1] = item end
-            if invalid > 0 then
-                logger.warn("[撷思][Annotations] ignored invalid review groups",
-                    "book=", result.book_id, "chapter=", result.chapter_uid,
-                    "batch=", tostring(index), "count=", tostring(invalid))
-            end
-        else
-            if network_down then
-                local err="batch "..tostring(index)..": "..str(response)
-                result.errors[#result.errors+1]=err
-                logger.warn("[撷思][Annotations] network unavailable; individual thought fallback skipped",
-                    "book=",result.book_id,"chapter=",result.chapter_uid,
-                    "batch=",tostring(index),"/",tostring(#batches),"error=",str(response))
-                break
-            end
-            -- A grouped request can fail even when each individual range is valid.
-            -- Fall back to one range at a time only for data-specific failures;
-            -- a network outage must not explode into dozens of extra requests.
-            local batch_errors = {}
-            logger.warn("[撷思][Annotations] thoughts batch failed; trying individual ranges",
-                "book=", result.book_id, "chapter=", result.chapter_uid,
-                "batch=", index, "/", #batches, "error=", str(response))
-            for item_index, item in ipairs(batch) do
-                progress("thoughts", index, #batches, "逐条补全 " .. tostring(item_index) .. "/" .. tostring(#batch))
-                local single_ok, single_response = call_with_retry(
-                    "thought range " .. tostring(index) .. "." .. tostring(item_index),
-                    function() return self.api:readreviews(book_id, uid, {item}) end)
-                if single_ok then
-                    local rows, invalid = table_entries(array_from(single_response, {"reviews", "updated"}))
-                    for _, row in ipairs(rows) do groups[#groups + 1] = row end
-                    if invalid > 0 then
-                        logger.warn("[撷思][Annotations] ignored invalid review groups",
-                            "book=", result.book_id, "chapter=", result.chapter_uid,
-                            "batch=", tostring(index), "item=", tostring(item_index),
-                            "count=", tostring(invalid))
-                    end
-                else
-                    batch_errors[#batch_errors + 1] = str(item.range) .. ": " .. str(single_response)
-                end
-            end
-            if #batch_errors > 0 then
-                local err = table.concat(batch_errors, "; ")
-                result.errors[#result.errors + 1] = "batch " .. index .. ": " .. err
-                logger.warn("[撷思][Annotations] thoughts individual fallback incomplete",
-                    "book=", result.book_id, "chapter=", result.chapter_uid,
-                    "batch=", index, "/", #batches, "error=", err)
-            end
-        end
-    end
-    local invalid_reviews
-    result.review_map, result.review_groups, result.thought_count,
-        result.thought_entry_count, invalid_reviews = normalize_reviews({reviews=groups})
-    if invalid_reviews > 0 then
-        logger.warn("[撷思][Annotations] ignored invalid review entries",
-            "book=", result.book_id, "chapter=", result.chapter_uid,
-            "count=", tostring(invalid_reviews))
-    end
-    logger.info("[撷思][Annotations] chapter fetched", "book=", result.book_id, "chapter=", result.chapter_uid,
-        "underlines=", result.underline_count, "thought_groups=", result.thought_count,
-        "thought_entries=", result.thought_entry_count, "errors=", #result.errors)
-    return result
-end
+function Annotations:new() return setmetatable({}, self) end
 
 local function utf8_len_at(text, i)
     local c = text:byte(i)
