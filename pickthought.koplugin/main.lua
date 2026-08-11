@@ -1159,11 +1159,14 @@ function Plugin:_show_thought_href(href)
         UIManager:show(TextViewer:new{
             text=text,
             title=U.trim(abstract) or "想法",
-            title_face=Font:getFace("cfont",18),
+            title_face=Font:getFace("x_smalltfont",18),
             title_multilines=true,
+            text_type="general",
+            alignment="left",
+            auto_para_direction=true,
             text_face=FaceFactory:getFace(self:_thought_font_name() or "cfont", self:_thought_font_pt(prefs.font)),
-            width=math.floor(Screen:getWidth()*(tonumber(prefs.width_ratio) or 0.91)),
-            height=math.floor(Screen:getHeight()*(tonumber(prefs.height_ratio) or 0.60)),
+            width=Screen:getWidth()-Screen:scaleBySize(24),
+            height=math.floor(Screen:getHeight()*(tonumber(prefs.height_ratio) or 0.62)),
             add_nav_bar=true,
         })
         logger.info("[撷思][ThoughtPopup] opened",
