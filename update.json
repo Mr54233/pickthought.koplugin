@@ -1,15 +1,15 @@
 {
-  "version": "0.1.8",
-  "name": "撷思 PickThought 0.1.8",
+  "version": "0.2.0",
+  "name": "撷思 PickThought 0.2.0",
   "package_type": "full",
-  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.8/pickthought.koplugin.zip",
+  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.2.0/pickthought.koplugin.zip",
   "package_urls": [
-    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.8/pickthought.koplugin.zip",
-    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.8/pickthought.koplugin.zip",
-    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.8/pickthought.koplugin.zip",
-    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.1.8/pickthought.koplugin.zip"
+    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.2.0/pickthought.koplugin.zip",
+    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.2.0/pickthought.koplugin.zip",
+    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.2.0/pickthought.koplugin.zip",
+    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.2.0/pickthought.koplugin.zip"
   ],
-  "size": 107531,
-  "sha256": "3c5aa58f3ce3ac7aeaf1aa311bea15e705bef7a39913d9f7ee1b17821981ac77",
-  "notes": "- fix: fork 前释放同步内存\n- feat: 优先 Web 注释接口并增强限流恢复\n- fix: 大书同步分批与限流恢复"
+  "size": 120697,
+  "sha256": "f4745aaa962945b5f7284b9b6dc24c6e52b5d46f98712e9423f3353b8e522911",
+  "notes": "⚡ 大量性能优化：单遍映射章节、降低大书注入 GC\n- feat: 分批拉取边界、同步统计、询问式续批\n- fix: 休眠保持、干净备份保留、接口冷却、EPUB 结构位置触发"
 }
