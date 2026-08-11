@@ -61,9 +61,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: 打包插件
-        run: zip -r pickthought.koplugin.zip pickthought.koplugin
-
       - name: 从 tag 读取版本号
         id: ver
         run: |
@@ -90,6 +87,31 @@ jobs:
           notes=$(echo "$notes" | sed '/^$/N;/^\n$/D')
           if [ -z "$notes" ]; then notes="版本发布"; fi
           { echo "notes<<EOF"; echo "$notes"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      - name: 写入发布包版本并打包
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf release-package pickthought.koplugin.zip
+          mkdir -p release-package
+          cp -a pickthought.koplugin release-package/pickthought.koplugin
+          sed -i "s/version = \".*\"/version = \"$VER\"/" release-package/pickthought.koplugin/_meta.lua
+          sed -i "s/VERSION = \".*\"/VERSION = \"$VER\"/" release-package/pickthought.koplugin/pickthought/config.lua
+          (cd release-package && zip -qr ../pickthought.koplugin.zip pickthought.koplugin)
+          rm -rf release-package
+
+      - name: 校验发布包版本
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          meta_ver=$(unzip -p pickthought.koplugin.zip pickthought.koplugin/_meta.lua | sed -n 's/.*version = "\([^"]*\)".*/\1/p')
+          config_ver=$(unzip -p pickthought.koplugin.zip pickthought.koplugin/pickthought/config.lua | sed -n 's/.*VERSION = "\([^"]*\)".*/\1/p')
+          test "$meta_ver" = "$VER"
+          test "$config_ver" = "$VER"
+          echo "发布包版本校验通过：_meta.lua=$meta_ver config.lua=$config_ver"
 
       - name: 自动 bump 版本号到 main
         env:
