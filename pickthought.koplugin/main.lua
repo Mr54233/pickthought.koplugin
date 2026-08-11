@@ -1155,11 +1155,13 @@ function Plugin:_show_thought_href(href)
         local Font=require("ui/font")
         local Screen=require("device").screen
         local TextViewer=require("ui/widget/textviewer")
+        local FaceFactory=require("pickthought.thought_face_factory")
         UIManager:show(TextViewer:new{
             text=text,
             title=U.trim(abstract) or "想法",
             title_face=Font:getFace("cfont",18),
-            text_face=Font:getFace(self:_thought_font_name() or "cfont", self:_thought_font_pt(prefs.font)),
+            title_multilines=true,
+            text_face=FaceFactory:getFace(self:_thought_font_name() or "cfont", self:_thought_font_pt(prefs.font)),
             width=math.floor(Screen:getWidth()*(tonumber(prefs.width_ratio) or 0.91)),
             height=math.floor(Screen:getHeight()*(tonumber(prefs.height_ratio) or 0.60)),
             add_nav_bar=true,
