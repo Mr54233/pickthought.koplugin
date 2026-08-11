@@ -64,15 +64,23 @@ jobs:
       - name: 打包插件
         run: zip -r pickthought.koplugin.zip pickthought.koplugin
 
-      - name: 读取版本号
+      - name: 从 tag 读取版本号
         id: ver
         run: |
-          ver=$(grep 'version' pickthought.koplugin/_meta.lua | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
-          config_ver=$(grep 'VERSION' pickthought.koplugin/pickthought/config.lua | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
           tag_ver="${GITHUB_REF_NAME#v}"
-          test "$ver" = "$config_ver"
-          test "$ver" = "$tag_ver"
-          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "version=$tag_ver" >> "$GITHUB_OUTPUT"
+
+      - name: 自动 bump 版本号到 main
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          git checkout main
+          # 写入 _meta.lua 和 config.lua
+          sed -i "s/version = \".*\"/version = \"$VER\"/" pickthought.koplugin/_meta.lua
+          sed -i "s/VERSION = \".*\"/VERSION = \"$VER\"/" pickthought.koplugin/pickthought/config.lua
+          git add pickthought.koplugin/_meta.lua pickthought.koplugin/pickthought/config.lua
+          git commit -m "chore(release): bump 版本号到 v$VER" || echo "版本号已是最新"
+          git push origin main
 
       - name: 算校验值
         id: hash
@@ -82,14 +90,30 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "size=$size" >> "$GITHUB_OUTPUT"
 
-      - name: 摘抄本次更新
+      - name: 按类型分类生成更新摘要
         id: notes
         run: |
           prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
-          if [ -n "$prev" ]; then
-            notes=$(git log --pretty=format:"- %s" "$prev"..HEAD | grep -vE '^- chore\(release\)|^- chore:|^- docs:' || true)
+          if [ -z "$prev" ]; then prev="HEAD~20"; fi
+          # 按前缀分类，过滤掉 chore/docs/refactor/release 等内部提交
+          all_commits=$(git log --pretty=format:"%s" "$prev"..HEAD 2>/dev/null || echo "")
+          perf=$(echo "$all_commits" | grep -iE '^perf' | sed 's/^[^:]*: /- /' || true)
+          feat=$(echo "$all_commits" | grep -iE '^feat' | sed 's/^[^:]*: /- /' || true)
+          fix=$(echo "$all_commits" | grep -iE '^fix' | sed 's/^[^:]*: /- /' || true)
+          
+          notes=""
+          if [ -n "$perf" ]; then
+            notes="**⚡ 性能优化**"$'\n\n'"$perf"$'\n\n'
           fi
-          if [ -z "$notes" ]; then notes="- 版本发布"; fi
+          if [ -n "$feat" ]; then
+            notes="${notes}**新功能**"$'\n\n'"$feat"$'\n\n'
+          fi
+          if [ -n "$fix" ]; then
+            notes="${notes}**问题修复**"$'\n\n'"$fix"$'\n\n'
+          fi
+          # 去掉末尾多余换行
+          notes=$(echo "$notes" | sed '/^$/N;/^\n$/D')
+          if [ -z "$notes" ]; then notes="版本发布"; fi
           {
             echo "notes<<EOF"
             echo "$notes"
@@ -104,7 +128,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           NOTES: ${{ steps.notes.outputs.notes }}
         run: |
-          git checkout main
+          git pull --rebase origin main
           python3 - << PY
           import json, os
           base = "https://github.com/Mr54233/pickthought.koplugin/releases/download/$TAG/pickthought.koplugin.zip"
