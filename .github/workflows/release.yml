@@ -75,15 +75,15 @@ jobs:
           prev=$(git describe --tags --abbrev=0 "${current_tag}^" 2>/dev/null || true)
           if [ -z "$prev" ]; then prev="HEAD~20"; fi
           all_commits=$(git log --pretty=format:"%s" "${prev}..${current_tag}" 2>/dev/null || echo "")
-          perf=$(echo "$all_commits" | grep -iE '^perf' | sed 's/^[^:]*: /- /' || true)
-          feat=$(echo "$all_commits" | grep -iE '^feat' | sed 's/^[^:]*: /- /' || true)
-          fix=$(echo "$all_commits" | grep -iE '^fix' | sed 's/^[^:]*: /- /' || true)
-          style=$(echo "$all_commits" | grep -iE '^style' | sed 's/^[^:]*: /- /' || true)
+          perf=$(echo "$all_commits" | grep -iE '^perf' | sed 's/^[^:]*: //' || true)
+          feat=$(echo "$all_commits" | grep -iE '^feat' | sed 's/^[^:]*: //' || true)
+          fix=$(echo "$all_commits" | grep -iE '^fix' | sed 's/^[^:]*: //' || true)
+          style=$(echo "$all_commits" | grep -iE '^style' | sed 's/^[^:]*: //' || true)
           notes=""
-          if [ -n "$perf" ]; then notes="**⚡ 性能优化**"$'\n\n'"$perf"$'\n\n'; fi
-          if [ -n "$feat" ]; then notes="${notes}**新功能**"$'\n\n'"$feat"$'\n\n'; fi
-          if [ -n "$fix" ]; then notes="${notes}**问题修复**"$'\n\n'"$fix"$'\n\n'; fi
-          if [ -n "$style" ]; then notes="${notes}**样式优化**"$'\n\n'"$style"$'\n\n'; fi
+          if [ -n "$perf" ]; then notes="性能优化："$'\n'"$perf"$'\n\n'; fi
+          if [ -n "$feat" ]; then notes="${notes}新功能："$'\n'"$feat"$'\n\n'; fi
+          if [ -n "$fix" ]; then notes="${notes}问题修复："$'\n'"$fix"$'\n\n'; fi
+          if [ -n "$style" ]; then notes="${notes}样式优化："$'\n'"$style"$'\n\n'; fi
           notes=$(echo "$notes" | sed '/^$/N;/^\n$/D')
           if [ -z "$notes" ]; then notes="版本发布"; fi
           { echo "notes<<EOF"; echo "$notes"; echo "EOF"; } >> "$GITHUB_OUTPUT"
