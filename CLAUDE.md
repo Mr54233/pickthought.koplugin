@@ -11,7 +11,7 @@
 
 ## 关键约束
 
-- **KOReader ≥ v2025.08**(硬性):依赖内建 `ffi/archiver`(libarchive FFI,EPUB 解包/重打包)与 `lua-ljsqlite3`(想法存储)。更早版本直接不可用,不做 fallback。
+- **KOReader ≥ v2026.03**(硬性):依赖内建 `ffi/archiver`(libarchive FFI,EPUB 解包/重打包)与 `lua-ljsqlite3`(想法存储)。更早版本直接不可用,不做 fallback。
 - **AGPL-3.0**:移植了 weread.koplugin 的 SQLite 模块,按协议必须同协议开源。
 - 书必须是用户本地 EPUB;微信 range 对不上本地正文,必须走引文对齐,不能照搬数字偏移。
 

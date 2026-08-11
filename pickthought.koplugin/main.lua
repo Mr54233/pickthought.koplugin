@@ -1148,27 +1148,12 @@ function Plugin:_show_thought_href(href)
     local ok,unexpected=xpcall(function()
         local group,err=Thoughts.find(self.store,info.book_id,info.chapter_uid,info.range)
         if not group then self:info(tostring(err or "没有想法内容")); return end
-        local text=Thoughts.popup_text(group)
-        if text=="" then self:info("没有想法内容"); return end
-        local abstract=Thoughts.group_abstract(group)
+        local items=Thoughts.popup_items(group)
+        if #items==0 then self:info("没有想法内容"); return end
         local prefs=self.store:preferences().thoughts or {}
-        local Font=require("ui/font")
-        local Screen=require("device").screen
-        local TextViewer=require("ui/widget/textviewer")
-        local FaceFactory=require("pickthought.thought_face_factory")
-        UIManager:show(TextViewer:new{
-            text=text,
-            title=U.trim(abstract) or "想法",
-            title_face=Font:getFace("x_smalltfont",18),
-            title_multilines=true,
-            text_type="general",
-            alignment="left",
-            auto_para_direction=true,
-            text_face=FaceFactory:getFace(self:_thought_font_name() or "cfont", self:_thought_font_pt(prefs.font)),
-            width=Screen:getWidth()-Screen:scaleBySize(24),
-            height=math.floor(Screen:getHeight()*(tonumber(prefs.height_ratio) or 0.62)),
-            add_nav_bar=true,
-        })
+        local ThoughtPopup=require("pickthought.thought_popup")
+        ThoughtPopup.show{items=items,
+            height_ratio=tonumber(prefs.height_ratio) or 0.62}
         logger.info("[撷思][ThoughtPopup] opened",
             "book=",tostring(info.book_id),"chapter=",tostring(info.chapter_uid),
             "comments=",tostring(#(group.texts or {})),

@@ -1,5 +1,5 @@
 -- EPUB 元数据读取:ffi/archiver (libarchive) 之上解析 container.xml → OPF → spine。
--- 要求 KOReader >= v2025.08;详见 docs/task3-zip-feasibility.md。
+-- 要求 KOReader >= v2026.03;详见 docs/task3-zip-feasibility.md。
 -- 注意:真实 Archiver.Reader 的 seek/extractToMemory 只认迭代过程中建立的条目索引,
 -- 任何提取前必须先 iterate 经过目标条目。
 local E = {}
@@ -7,7 +7,7 @@ local E = {}
 local function get_archiver(archiver)
     if archiver then return archiver end
     local ok, mod = pcall(require, "ffi/archiver")
-    if not ok then return nil, "需要 KOReader v2025.08 或更新版本(缺少 ffi/archiver)" end
+    if not ok then return nil, "需要 KOReader v2026.03 或更新版本(缺少 ffi/archiver)" end
     return mod
 end
 

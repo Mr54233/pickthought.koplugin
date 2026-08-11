@@ -185,7 +185,7 @@ jobs:
 
             ## 环境要求
 
-            KOReader ≥ v2025.08(需要内建的 `ffi/archiver` 与 `lua-ljsqlite3`)。
+            KOReader ≥ v2026.03(需要内建的 `ffi/archiver` 与 `lua-ljsqlite3`)。
 
             ---
 

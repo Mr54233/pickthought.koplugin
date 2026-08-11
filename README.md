@@ -15,7 +15,7 @@
 
 ## 环境
 
-KOReader ≥ v2025.08(需要 `ffi/archiver` + `lua-ljsqlite3`)。
+KOReader ≥ v2026.03(需要 `ffi/archiver` + `lua-ljsqlite3`)。
 
 ## 安装
 

@@ -205,6 +205,30 @@ function Thoughts.group_abstract(group)
     return ""
 end
 
+-- 适配原生想法弹窗:保留 SQLite 顺序,并按 review_id 去重。
+function Thoughts.popup_items(group)
+    local items, seen = {}, {}
+    for _, item in ipairs((group and group.texts) or {}) do
+        local content = clean(item.content)
+        if content ~= "" then
+            local author = clean(item.author)
+            if author == "" then author = "微信读书用户" end
+            local review_id = tostring(item.review_id or "")
+            local key = review_id ~= "" and ("id:" .. review_id) or (author .. "\0" .. content)
+            if not seen[key] then
+                seen[key] = true
+                items[#items + 1] = {
+                    abstract = #items == 0 and clean(item.abstract) or "",
+                    author = author,
+                    content = content,
+                    likes_count = tonumber(item.likes or 0) or 0,
+                }
+            end
+        end
+    end
+    return items
+end
+
 -- 把想法格式化成 TextViewer 用的纯文本:每条「作者 · 赞 / 内容」,条目间空行分隔。
 function Thoughts.popup_text(group)
     local parts, seen = {}, {}

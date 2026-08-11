@@ -62,6 +62,19 @@ T.case("popup_text 按 review_id 去重", function()
     T.eq(count, 1, "相同 review_id 只出现一次")
 end)
 
+T.case("popup_items 对齐原生弹窗数据并去重", function()
+    local items = Thoughts.popup_items({ texts = {
+        { content = "第一条", author = "甲", likes = 5, review_id = "r1", abstract = "原文" },
+        { content = "第一条重复", author = "甲", likes = 6, review_id = "r1", abstract = "忽略" },
+        { content = "第二条", author = "", likes = 0, review_id = "" },
+    } })
+    T.eq(#items, 2, "相同 review_id 去重")
+    T.eq(items[1].abstract, "原文", "首条保留摘要")
+    T.eq(items[2].abstract, "", "后续条目不重复显示摘要")
+    T.eq(items[1].likes_count, 5, "点赞字段适配")
+    T.eq(items[2].author, "微信读书用户", "作者兜底")
+end)
+
 T.case("Thoughts.merge 合并到 SQLite(into 已存在)", function()
     SQ3._reset()
     local store = store_with("/t/merge1")

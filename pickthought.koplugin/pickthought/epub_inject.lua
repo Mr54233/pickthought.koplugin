@@ -206,7 +206,7 @@ end
 local function get_archiver(archiver)
     if archiver then return archiver end
     local ok, mod = pcall(require, "ffi/archiver")
-    if not ok then return nil, "需要 KOReader v2025.08 或更新版本(缺少 ffi/archiver)" end
+    if not ok then return nil, "需要 KOReader v2026.03 或更新版本(缺少 ffi/archiver)" end
     return mod
 end
 
