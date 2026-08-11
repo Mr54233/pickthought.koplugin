@@ -22,13 +22,6 @@ M.CSS = [[
     border-bottom: 2px dashed #ff6b35;
     padding-bottom: 2px;
 }
-.pickthought-star {
-    font-size: 0;
-    line-height: 0;
-    margin: 0;
-    padding: 0;
-    color: transparent;
-}
 /* MIUREAD_ANNOTATION_STYLE_V2_END */
 ]]
 
@@ -49,7 +42,6 @@ local TARGET_SELECTORS = {
     ".pickthought-inline-mark",
     ".pickthought-mark",
     ".pickthought-link",
-    ".pickthought-star",
     ".pickthought-has-thought",
 }
 
