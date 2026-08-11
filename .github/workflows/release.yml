@@ -70,6 +70,27 @@ jobs:
           tag_ver="${GITHUB_REF_NAME#v}"
           echo "version=$tag_ver" >> "$GITHUB_OUTPUT"
 
+      - name: 按类型分类生成更新摘要
+        id: notes
+        run: |
+          # 用 tag ref 定位区间，不依赖 HEAD（bump 步骤会 checkout main 导致 HEAD 漂移）
+          current_tag="${GITHUB_REF_NAME}"
+          prev=$(git describe --tags --abbrev=0 "${current_tag}^" 2>/dev/null || true)
+          if [ -z "$prev" ]; then prev="HEAD~20"; fi
+          all_commits=$(git log --pretty=format:"%s" "${prev}..${current_tag}" 2>/dev/null || echo "")
+          perf=$(echo "$all_commits" | grep -iE '^perf' | sed 's/^[^:]*: /- /' || true)
+          feat=$(echo "$all_commits" | grep -iE '^feat' | sed 's/^[^:]*: /- /' || true)
+          fix=$(echo "$all_commits" | grep -iE '^fix' | sed 's/^[^:]*: /- /' || true)
+          style=$(echo "$all_commits" | grep -iE '^style' | sed 's/^[^:]*: /- /' || true)
+          notes=""
+          if [ -n "$perf" ]; then notes="**⚡ 性能优化**"$'\n\n'"$perf"$'\n\n'; fi
+          if [ -n "$feat" ]; then notes="${notes}**新功能**"$'\n\n'"$feat"$'\n\n'; fi
+          if [ -n "$fix" ]; then notes="${notes}**问题修复**"$'\n\n'"$fix"$'\n\n'; fi
+          if [ -n "$style" ]; then notes="${notes}**样式优化**"$'\n\n'"$style"$'\n\n'; fi
+          notes=$(echo "$notes" | sed '/^$/N;/^\n$/D')
+          if [ -z "$notes" ]; then notes="版本发布"; fi
+          { echo "notes<<EOF"; echo "$notes"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
       - name: 自动 bump 版本号到 main
         env:
           VER: ${{ steps.ver.outputs.version }}
@@ -89,36 +110,6 @@ jobs:
           size=$(wc -c < pickthought.koplugin.zip)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "size=$size" >> "$GITHUB_OUTPUT"
-
-      - name: 按类型分类生成更新摘要
-        id: notes
-        run: |
-          prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
-          if [ -z "$prev" ]; then prev="HEAD~20"; fi
-          # 按前缀分类，过滤掉 chore/docs/refactor/release 等内部提交
-          all_commits=$(git log --pretty=format:"%s" "$prev"..HEAD 2>/dev/null || echo "")
-          perf=$(echo "$all_commits" | grep -iE '^perf' | sed 's/^[^:]*: /- /' || true)
-          feat=$(echo "$all_commits" | grep -iE '^feat' | sed 's/^[^:]*: /- /' || true)
-          fix=$(echo "$all_commits" | grep -iE '^fix' | sed 's/^[^:]*: /- /' || true)
-          
-          notes=""
-          if [ -n "$perf" ]; then
-            notes="**⚡ 性能优化**"$'\n\n'"$perf"$'\n\n'
-          fi
-          if [ -n "$feat" ]; then
-            notes="${notes}**新功能**"$'\n\n'"$feat"$'\n\n'
-          fi
-          if [ -n "$fix" ]; then
-            notes="${notes}**问题修复**"$'\n\n'"$fix"$'\n\n'
-          fi
-          # 去掉末尾多余换行
-          notes=$(echo "$notes" | sed '/^$/N;/^\n$/D')
-          if [ -z "$notes" ]; then notes="版本发布"; fi
-          {
-            echo "notes<<EOF"
-            echo "$notes"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
 
       - name: 生成 update.json 并提交 main
         env:
