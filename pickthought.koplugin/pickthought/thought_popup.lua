@@ -184,6 +184,11 @@ function NativeThoughtPopup:init(reinit)
     self.buttons_table = self:_build_buttons()
     self:_update_page()
     TextViewer.init(self, reinit)
+    -- 保留 KOReader 原生左右半屏点按翻屏:左侧上一屏,右侧下一屏。
+    local scroll = self:_text_widgets()
+    if scroll and scroll.setTapScrollEnabled then
+        scroll:setTapScrollEnabled(true)
+    end
     if not reinit and not self._pages_measured then
         self._pages_measured = true
         self:_measure_pages()
