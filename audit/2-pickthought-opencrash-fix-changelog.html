@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>撷思插件 · 开书崩溃修复（边框 span）专属更新日志</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --txt:#e6e9ef;
+    --muted:#9aa4b2; --accent:#ff6b35; --ok:#3fbf6f; --warn:#e0a93f; --bad:#e0524d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+    font-family:"Segoe UI",system-ui,"Microsoft YaHei",sans-serif;line-height:1.6;padding:28px}
+  .wrap{max-width:960px;margin:0 auto}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 20px}
+  .meta{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--muted);
+    background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin-bottom:22px}
+  .meta b{color:var(--txt)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:16px}
+  .card h2{font-size:15px;margin:0 0 10px;color:var(--accent)}
+  .tl{position:relative;border-left:2px solid var(--line);margin-left:6px;padding-left:20px}
+  .tl .it{position:relative;margin-bottom:18px}
+  .tl .it::before{content:"";position:absolute;left:-27px;top:4px;width:11px;height:11px;
+    border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px var(--bg)}
+  .tl .it .t{font-size:13px;color:var(--muted);margin-bottom:2px}
+  .tl .it .h{font-weight:600;font-size:14px;margin-bottom:4px}
+  code{background:#0b0d11;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:12px;color:#ffd9b0}
+  pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;font-size:12px;color:#cdd6e3}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#222732;color:var(--muted);font-weight:600}
+  .tag{display:inline-block;font-size:11px;padding:1px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  ul{margin:6px 0;padding-left:20px} li{margin:3px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>撷思插件 · 开书崩溃修复（边框 span）专属更新日志</h1>
+  <p class="sub">独立修改事件记录 · 与 PR #8 的 BUG 1（唯一 class）是两件事</p>
+
+  <div class="meta">
+    <div>插件：<b>pickthought.koplugin</b></div>
+    <div>日期：<b>2026-08-12</b></div>
+    <div>版本：<b>0.2.3（未变，发版权归原作者）</b></div>
+    <div>提交：<b>a1bdbd5</b>（分支 <code>pr/lowmem-fixes</code>）</div>
+    <div>PR：<b>#8</b> → Mr54233/pickthought.koplugin</div>
+  </div>
+
+  <div class="card">
+    <h2>一、动机（为什么会动这次刀）</h2>
+    <p>PR #8 初次提交并推送后，用户在 KPW3 上将本地《S.A.阿列克谢耶维奇作品集》EPUB 绑定多本微信读书书并注入，<b>打开这本书时 KOReader 直接 <code>Killed</code> 崩溃</b>。这道崩溃发生在<b>开书渲染期</b>，与 BUG 1（唯一 class 撑爆样式内存、注入期无关）表象相似却根因不同，必须单独修、单独记。</p>
+  </div>
+
+  <div class="card">
+    <h2>二、诊断时间线（含两次被证据推翻的误判）</h2>
+    <div class="tl">
+      <div class="it"><div class="t">22:18 初判</div><div class="h">误判 A：ExitOptimization 把缓存压到 10MB</div>
+        <p>以为我自己的 <code>2-exit-optimization.lua</code> 把 <code>cre_storage_size_factor</code> 从 40 降到 10，撑爆的是这颗被压小的缓存。<br>
+        <span class="bad">× 推翻</span>：crash.log 写明「用户已显式配置，尊重既有设置」，且崩溃上限 <code>10485760 = 40×262144</code> 正是默认 10MB——因子本就没被压低。</p></div>
+      <div class="it"><div class="t">22:30 再判</div><div class="h">误判 B：重复注入 / 累积放大</div>
+        <p>以为「已注 3 本 + 再绑 2 本」把标注叠成了 8 本。<br>
+        <span class="bad">× 推翻</span>：<code>sync.lua</code> 多书永远从干净 <code>.orig</code> 整体重建、每条划线仅 1 个 mark、重叠还去重；实测划线数与预期吻合，零放大。</p></div>
+      <div class="it"><div class="t">决定性取证</div><div class="h">解剖注入后 EPUB + 对照反例</div>
+        <p>直接数注入书内部样式元素：<code>pickthought-mark</code> span <b>7015</b> + <code>pickthought-link</code> 锚点 <b>7003</b> = <b>14,018</b> 个带样式元素，且每个 mark span 都带 <code>border-bottom:2px dashed</code> 虚线边框。<br>
+        对照《神秘复苏》注入了 <b>34,854</b> 个<b>无边框</b>链接元素却能正常打开——<span class="ok">证明是「边框元素贵」，不是「元素多」</span>。旧结论「元素过多」被这本反例彻底推翻。</p></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>三、具体改动点</h2>
+    <table>
+      <tr><th>文件</th><th>改动</th><th>影响</th></tr>
+      <tr><td><code>annotation_style.lua</code></td>
+        <td><code>.pickthought-mark</code> 由 <code>border-bottom:2px dashed</code>（盒子边框）改为 <code>text-decoration:underline; color:#ff6b35</code>；<code>xhtml_is_current</code>/<code>css_is_current</code> 判定串同步改为 <code>color:#ff6b35;</code></td>
+        <td>单价与纯链接一致；否则改完 CSS 每次开书都误判「样式过期」重写</td></tr>
+      <tr><td><code>annotations.lua</code></td>
+        <td>每条带想法划线由「<code>&lt;a&gt;</code> 套 <code>&lt;span&gt;</code>」两层折叠为单个 <code>&lt;a class="pickthought-link pickthought-mark"&gt;</code>；<code>data-pickthought-range</code> 移到 <code>&lt;a&gt;</code></td>
+        <td>带样式元素数约 −50%；注入校验（子串计数）与点击（走 href）均不受影响</td></tr>
+      <tr><td><code>tests/test_epub_inject.lua</code></td>
+        <td>断言改为查 <code>pickthought-mark</code> 类令牌（折叠后类落在 <code>&lt;a&gt;</code> 上）</td>
+        <td>测试跟上折叠结构，避免假阴性</td></tr>
+    </table>
+    <p class="sub" style="margin-top:10px">保留约定：本 HTML 与 <code>PR_NOTES_INTERNAL.md</code> 为内部审计文档，<b>不进 PR diff</b>；技术细节以 PR 的 commit message 与逐文件 diff 为准。</p>
+  </div>
+
+  <div class="card">
+    <h2>四、影响范围</h2>
+    <ul>
+      <li>高亮视觉：橙色<b>虚线边框</b> → 橙色<b>实线下划线</b>（预期变化，功能/数据不变）。</li>
+      <li>带样式元素：<b>14,018 → 7,033</b>（约 −50%），且全部为廉价的 <code>text-decoration</code>。</li>
+      <li>兼容性：未改任何文件结构或标识符；旧单绑定数据、<code>.orig</code> 备份、第三方 <code>pickthought.json</code> 解析不受影响。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>五、校验结果</h2>
+    <table>
+      <tr><th>核验项</th><th>方法</th><th>结论</th></tr>
+      <tr><td>LuaJIT 语法</td><td><code>loadfile</code> 校验两处 .lua + 测试</td><td class="ok">OK</td></tr>
+      <tr><td>设备部署落地</td><td>grep 设备插件目录</td><td class="ok">border-bottom=0、text-decoration 就位、折叠写法存在、无旧嵌套残留</td></tr>
+      <tr><td>重注后 EPUB 结构</td><td>解包注入书统计</td><td class="ok">border-bottom=0；text-decoration 已烘焙；折叠元素 7033（原 14018）</td></tr>
+      <tr><td>crash.log</td><td>重注段（22:57）检索</td><td class="ok">[EpubInject] completed、峰值堆 80MB、最低可用 125MB、无 CRE WARNING / Killed</td></tr>
+    </table>
+    <p class="sub" style="margin-top:10px">说明：用户已重注但尚未再次开书做最后一步肉眼验证；但结构性根因（虚线边框 span）已物理消除，且重注后 EPUB 与《神秘复苏》同为「廉价无边框元素」画像，崩溃条件已不存在。</p>
+  </div>
+
+  <div class="card">
+    <h2>六、上线记录</h2>
+    <p>追加 commit <code>a1bdbd5</code> 于分支 <code>pr/lowmem-fixes</code>，已 push 至 fork <code>ksaMask123/pickthought.koplugin</code>，PR #8 自动更新（现 2 commits / 16 files）。PR 正文新增「五、本 PR 追加的修复」节如实说明此为独立于 BUG 1 的开书崩溃。<span class="tag">本日志随代码同轮推送 fork 仓库</span></p>
+  </div>
+</div>
+</body>
+</html>
