@@ -3,6 +3,7 @@
 -- 并用自定义按钮替换查找/顶部/底部/关闭默认按钮。
 
 local Device = require("device")
+local BD = require("ui/bidi")
 local Font = require("ui/font")
 local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextViewer = require("ui/widget/textviewer")
@@ -184,10 +185,10 @@ function NativeThoughtPopup:init(reinit)
     self.buttons_table = self:_build_buttons()
     self:_update_page()
     TextViewer.init(self, reinit)
-    -- 保留 KOReader 原生左右半屏点按翻屏:左侧上一屏,右侧下一屏。
+    -- 点按由弹窗处理为上一条/下一条,正文上下滑动仍由 ScrollTextWidget 滚动。
     local scroll = self:_text_widgets()
     if scroll and scroll.setTapScrollEnabled then
-        scroll:setTapScrollEnabled(true)
+        scroll:setTapScrollEnabled(false)
     end
     if not reinit and not self._pages_measured then
         self._pages_measured = true
@@ -199,6 +200,42 @@ function NativeThoughtPopup:init(reinit)
         self:_replace_text()
         self:_sync_buttons()
     end
+end
+
+function NativeThoughtPopup:onTapClose(arg, ges)
+    if ges and ges.pos and self.textw
+            and ges.pos:intersectWith(self.textw.dimen) then
+        local previous = ges.pos.x < Screen:getWidth() / 2
+        if BD.flipIfMirroredUILayout then
+            previous = BD.flipIfMirroredUILayout(previous)
+        end
+        self:change_page(previous and -1 or 1)
+        return true
+    end
+    return TextViewer.onTapClose(self, arg, ges)
+end
+
+function NativeThoughtPopup:onSwipe(arg, ges)
+    if not (ges and ges.pos and self.textw
+            and ges.pos:intersectWith(self.textw.dimen)) then
+        return TextViewer.onSwipe(self, arg, ges)
+    end
+
+    local direction = BD.flipDirectionIfMirroredUILayout(ges.direction)
+    if direction == "west" then
+        self:change_page(1)
+        return true
+    elseif direction == "east" then
+        self:change_page(-1)
+        return true
+    elseif direction == "north" or direction == "south" then
+        local scroll = self:_text_widgets()
+        if scroll and scroll.scrollText then
+            scroll:scrollText(direction == "north" and 1 or -1)
+            return true
+        end
+    end
+    return false
 end
 
 function NativeThoughtPopup:change_page(delta)
