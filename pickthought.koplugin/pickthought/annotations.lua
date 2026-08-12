@@ -335,8 +335,11 @@ local function render_text_token(token, marks, data)
     local active, thought_link_open = nil, false
     local function close_active()
         if not active then return end
-        out[#out + 1] = "</span>"
-        if thought_link_open then out[#out + 1] = "</a>" end
+        if thought_link_open then
+            out[#out + 1] = "</a>"    -- 折叠:单 <a> 承载链接+标注,无内层 <span>
+        else
+            out[#out + 1] = "</span>" -- 仅 <span>(无想法 / 处于既有链接内)
+        end
         active = nil
         thought_link_open = false
     end
@@ -349,18 +352,23 @@ local function render_text_token(token, marks, data)
             if active then
                 -- HTML does not allow links inside links. When an underline overlaps
                 -- an existing footnote/noteref link, preserve the underline style but
-                -- leave the original link as the only clickable target.
+                -- leave the original link as the only clickable target(仍用独立 <span>)。
                 if active.thought and not token.inside_anchor then
+                    -- 折叠:把「链接 <a> + 标注 <span>」合并为单个 <a class="pickthought-link pickthought-mark">,
+                    -- 减半样式元素数量;配合 annotation_style 把 border-bottom 虚线改为 text-decoration,
+                    -- 规避 CRE 样式数据缓存被大量边框元素撑爆导致 KPW3 开书崩溃。
                     local href = Thoughts.href(data.book_id, data.chapter_uid, active.key)
-                    out[#out + 1] = '<a class="pickthought-link" href="' .. href .. '">'
+                    out[#out + 1] = '<a class="pickthought-link pickthought-mark" data-pickthought-range="'
+                        .. active.key .. '" href="' .. href .. '">'
                     thought_link_open = true
+                else
+                    local display_class = active.thought and "pickthought-mark" or "pickthought-inline-mark"
+                    -- 注意: 不追加 Thoughts.mark_class 生成的唯一 class(pickthought-mark-<hex>)。
+                    -- 该 class 仅被生成、从不被 CSS/代码读取,却会让 CRE 为每个标注各建一份
+                    -- 无法合并的样式,在多书合集(数千标注)下撑爆样式数据存储池导致 KPW3 段错误。
+                    -- 唯一标识已由 data-pickthought-range 与 href 承载,去掉它样式零变化、功能不受影响。
+                    out[#out + 1] = '<span class="' .. display_class .. '" data-pickthought-range="' .. active.key .. '">'
                 end
-                local display_class = active.thought and "pickthought-mark" or "pickthought-inline-mark"
-                -- 注意: 不追加 Thoughts.mark_class 生成的唯一 class(pickthought-mark-<hex>)。
-                -- 该 class 仅被生成、从不被 CSS/代码读取,却会让 CRE 为每个标注各建一份
-                -- 无法合并的样式,在多书合集(数千标注)下撑爆样式数据存储池导致 KPW3 段错误。
-                -- 唯一标识已由 data-pickthought-range 与 href 承载,去掉它样式零变化、功能不受影响。
-                out[#out + 1] = '<span class="' .. display_class .. '" data-pickthought-range="' .. active.key .. '">'
             end
         end
         out[#out + 1] = unit
