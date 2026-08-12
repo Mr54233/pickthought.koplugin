@@ -21,6 +21,7 @@ local SyncTask=require("pickthought.sync_task")
 local SyncProgress=require("pickthought.sync_progress")
 local SyncReport=require("pickthought.sync_report")
 local BatchSync=require("pickthought.batch_sync")
+local AnnotationCompat=require("pickthought.annotation_compat")
 local _=Text.tr
 local unpack_args=unpack or table.unpack
 local source=debug.getinfo(1,"S").source:gsub("^@",""); local ROOT=source:match("^(.*)/main%.lua$") or "."
@@ -38,6 +39,7 @@ local function sanitize_saved_auth(store)
 end
 
 function Plugin:init()
+    AnnotationCompat.install()
     math.randomseed(os.time()+math.floor(collectgarbage("count")))
     self.store=Store:new()
     logger.info("[撷思] initialized", "version=", tostring(Config.VERSION),
@@ -1185,6 +1187,8 @@ end
 function Plugin:onReadSettings() end
 
 function Plugin:onReaderReady()
+    -- 文件管理器阶段可能尚未加载 readerannotation,进入阅读器时重试一次。
+    AnnotationCompat.install()
     self:_teardown_thought_tap(); self:_setup_thought_tap()
 end
 
