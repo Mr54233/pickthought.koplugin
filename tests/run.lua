@@ -24,8 +24,9 @@ _G.STUBS = require("tests.stubs")
 local files = {
     "tests.test_smoke", "tests.test_epub_reader", "tests.test_epub_inject",
     "tests.test_binding", "tests.test_chapter_map", "tests.test_sync",
-    "tests.test_sync_report", "tests.test_batch_sync",
+    "tests.test_sync_report",     "tests.test_batch_sync",
     "tests.test_web_fetch", "tests.test_power_inhibit", "tests.test_sync_task",
+    "tests.test_spine_cache",
     "tests.test_thought_db", "tests.test_thoughts",
 }
 for _, name in ipairs(files) do

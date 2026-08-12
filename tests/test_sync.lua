@@ -314,7 +314,7 @@ T.case("分批预算:拉满即收工,缓存命中免费", function()
     for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local network_calls = 0
     local deps, calls = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function(_, _, uid)
                 local n = tonumber(uid)
@@ -361,7 +361,7 @@ T.case("章节批次预算限制缓存回放,不再一次性注入全书", funct
     for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local fetch_calls = 0
     local deps, calls = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function()
                 fetch_calls = fetch_calls + 1
@@ -388,7 +388,7 @@ T.case("已完成缓存续同步跳过旧章,只注入新章", function()
     local rows = {}
     for i = 1, 5 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local deps, calls = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function(_, _, uid)
                 if tonumber(uid) < 5 then
@@ -441,7 +441,7 @@ T.case("连续硬失败触发断网熔断", function()
     for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local fetch_count = 0
     local deps, calls = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function() fetch_count = fetch_count + 1; error("network request failed") end,
         },
@@ -458,7 +458,7 @@ T.case("断点缓存命中不复位熔断计数", function()
     for i = 1, 7 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local fetch_calls = 0
     local deps = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function(_, _, uid)
                 fetch_calls = fetch_calls + 1
@@ -483,7 +483,7 @@ T.case("末尾连续失败且成功章节无划线时报拉取失败而非无划
     local rows = {}
     for i = 1, 4 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local deps = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function(_, _, uid)
                 if tostring(uid) == "1" then
@@ -527,4 +527,66 @@ T.case("单章拉取失败不中断,计入 fetch_errors", function()
     T.ok(report, "应成功: " .. tostring(err))
     T.eq(report.fetch_errors, 1, "失败章节计数")
     T.eq(report.injected, 1, "成功章节照常注入")
+end)
+
+T.case("多书绑定:一次同步聚合多本微信读书书并合并注入", function()
+    -- 模拟「一本本地合集 EPUB 绑了 b001、b002 两本微信读书书」。
+    -- 两本各自有第一章(划线一致,都能映射到本地 c1);验证:两本都被拉取、
+    -- 注入的 mapped 合并了两本的章节(各自带 book_id)、inject 收到完整 book_ids。
+    local api_calls = {}
+    local fetch_calls = {}
+    local deps, calls = make_deps({
+        book_ids = {"b001", "b002"},
+        api = {
+            chapters = function(_, bid)
+                api_calls[#api_calls + 1] = tostring(bid)
+                local suffix = tostring(bid)
+                return {chapters = {
+                    {chapterUid = 1, title = "第一章(" .. suffix .. ")", chapterIdx = 1},
+                    {chapterUid = 2, title = "第二章(" .. suffix .. ")", chapterIdx = 2},
+                }}
+            end,
+        },
+        annotations = {
+            fetch_chapter = function(_, bid, uid)
+                fetch_calls[#fetch_calls + 1] = {book_id = tostring(bid), uid = tostring(uid)}
+                if tostring(uid) == "1" then
+                    return {
+                        underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                        review_map = {["0-7"] = {{content = "好句", author = "甲"}}},
+                        review_groups = {{range = "0-7", texts = {{content = "好句", author = "甲"}}}},
+                        underline_count = 1, thought_count = 1, thought_entry_count = 1, errors = {},
+                    }
+                end
+                return {underlines = {}, review_map = {}, review_groups = {},
+                    underline_count = 0, thought_count = 0, thought_entry_count = 0, errors = {}}
+            end,
+        },
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "多书聚合应成功: " .. tostring(err))
+
+    -- 两本书的章节列表都被请求过(逐本拉取聚合)。
+    T.eq(#api_calls, 2, "按 book_ids 逐本拉取章节列表")
+    T.ok(api_calls[1] == "b001" and api_calls[2] == "b002", "先拉 b001 再拉 b002")
+
+    -- 章节总数为两本之和;有划线的章节为两本各自的第一章。
+    T.eq(report.chapters_total, 4, "章节总数=两本之和")
+    T.eq(report.chapters_with_data, 2, "两本各有 1 章有划线")
+
+    -- 注入的 mapped 合并了两本书的章节,且每行都带正确的 book_id。
+    local books_in_mapped = {}
+    for _, row in ipairs(calls.injected.mapped) do
+        books_in_mapped[row.book_id] = true
+    end
+    T.eq(#calls.injected.mapped, 2, "合并注入两本各有 1 章")
+    T.ok(books_in_mapped["b001"] and books_in_mapped["b002"], "两本都在注入结果里")
+
+    -- inject 调用收到完整 book_ids(解决「换绑漏书」的根因:一次性合并重建)。
+    T.eq(type(calls.injected.options.book_ids), "table", "inject 选项携带 book_ids")
+    T.eq(calls.injected.options.book_ids[1], "b001", "book_ids 含 b001")
+    T.eq(calls.injected.options.book_ids[2], "b002", "book_ids 含 b002")
+
+    -- 多书强制干净重建(不走增量 append),从原书/备份读取而非当前注入版。
+    T.eq(calls.injected.options.append, false, "多书强制全量重建,不增量追加")
 end)

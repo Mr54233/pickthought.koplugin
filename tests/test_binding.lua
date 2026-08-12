@@ -1,5 +1,11 @@
 local Binding = require("pickthought.binding")
 
+local function count(t)
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n
+end
+
 T.case("normalize_search 容错三种形状", function()
     local nested = {books = {
         {bookInfo = {bookId = "b1", title = "春江花月夜", author = "张若虚"}},
@@ -73,6 +79,22 @@ T.case("normalize_chapters 容错与排序", function()
     T.eq(#Binding.normalize_chapters(nil), 0, "nil 安全")
 end)
 
+T.case("normalize_chapters 认真实 web 端点形状(顶层 chapters)", function()
+    -- 真机实测 /web/book/chapterInfos 返回 {bookId?, synckey?, chapters:[...]}
+    local real = {bookId = "22584111", synckey = 1119519248,
+        chapters = {
+            {chapterUid = 1, title = "封面", chapterIdx = 1},
+            {chapterUid = 3, title = "临讲", chapterIdx = 2},
+        }}
+    local rows = Binding.normalize_chapters(real, "22584111")
+    T.eq(#rows, 2, "顶层 chapters 直接识别")
+    T.eq(rows[1].uid, "1", "uid 提取")
+    T.eq(rows[2].uid, "3", "保留原 chapterUid(非连续)")
+    -- 无 bookId 字段的返回(仅 synckey)也应识别,这是 40638616 失败的形态
+    local no_book = {synckey = 1, chapters = {{chapterUid = 1, title = "x", chapterIdx = 1}}}
+    T.eq(#Binding.normalize_chapters(no_book), 1, "无 bookId 仍识别 chapters")
+end)
+
 T.case("绑定存取清", function()
     local kv = {}
     local store = {
@@ -99,4 +121,64 @@ T.case("normalize_search 标注版本类型(format)", function()
     T.eq(rows[1].title, "剑来 [网络]", "txt 标网络")
     T.eq(rows[2].title, "剑来精校 [出版]", "epub 标出版")
     T.eq(rows[3].title, "未知版", "无 format 不标注")
+end)
+
+T.case("绑定支持一本本地书绑多本微信读书书(1:N)", function()
+    local kv = {}
+    local store = {
+        get = function(_, k, d) return kv[k] ~= nil and kv[k] or d end,
+        set = function(_, k, v) kv[k] = v end,
+    }
+    local path = "/books/合集.epub"
+    Binding.save(store, path, {book_id = "b1", title = "甲", author = "作者A"})
+    Binding.save(store, path, {book_id = "b2", title = "乙", author = "作者B"})
+    local records = Binding.records(store, path)
+    T.eq(count(records), 2, "两本并存")
+    T.ok(records["b1"] and records["b2"], "按 book_id 建 map")
+    -- 同 book_id 覆盖,不新增
+    Binding.save(store, path, {book_id = "b1", title = "甲(修订)"})
+    T.eq(count(Binding.records(store, path)), 2, "同 id 覆盖不新增")
+    T.eq(Binding.get_record(store, path, "b1").title, "甲(修订)", "覆盖生效")
+    -- 移除一本,另一本仍在
+    Binding.remove(store, path, "b1")
+    T.eq(count(Binding.records(store, path)), 1, "移除后剩一本")
+    T.ok(Binding.get_record(store, path, "b2"), "另一本保留")
+    -- 移除最后一本质空(map 退化空表,键从 bindings 中清除)
+    Binding.remove(store, path, "b2")
+    T.eq(count(Binding.records(store, path)), 0, "全移除后键被清")
+end)
+
+T.case("绑定旧单键格式自动迁移为 1:N map", function()
+    local kv = {}
+    local store = {
+        get = function(_, k, d) return kv[k] ~= nil and kv[k] or d end,
+        set = function(_, k, v) kv[k] = v end,
+    }
+    local path = "/books/旧.epub"
+    -- 旧版:all[doc_path] 直接是单条记录
+    kv["bindings"] = {[path] = {book_id = "old1", title = "旧书", bound_at = 100}}
+    local rec = Binding.get(store, path)
+    T.eq(rec.book_id, "old1", "旧格式可读")
+    -- 读取即迁移并落盘
+    local migrated = kv["bindings"][path]
+    T.ok(type(migrated) == "table" and migrated["old1"], "已迁移为 map")
+    -- 迁移后仍能正常加第二本
+    Binding.save(store, path, {book_id = "old2", title = "新书"})
+    T.eq(count(Binding.records(store, path)), 2, "迁移后可继续 1:N")
+end)
+
+T.case("Binding.get 返回最近绑定的主书,list 按时间升序", function()
+    local kv = {}
+    local store = {
+        get = function(_, k, d) return kv[k] ~= nil and kv[k] or d end,
+        set = function(_, k, v) kv[k] = v end,
+    }
+    local path = "/books/p.epub"
+    Binding.save(store, path, {book_id = "first", bound_at = 10})
+    Binding.save(store, path, {book_id = "second", bound_at = 20})
+    T.eq(Binding.get(store, path).book_id, "second", "最近绑定为主")
+    local list = Binding.list(store, path)
+    T.eq(#list, 2, "list 两本")
+    T.eq(list[1].book_id, "first", "list 首为最早")
+    T.eq(list[2].book_id, "second", "list 末尾最近")
 end)

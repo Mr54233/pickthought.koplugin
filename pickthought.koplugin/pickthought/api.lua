@@ -196,8 +196,9 @@ function Api:web_chapter_reviews(id, uid)
 end
 function Api:book(id) return self:call("/book/info", {bookId=tostring(id)}) end
 
--- 章节列表走原版实测过的 web 端点(Cookie 鉴权,响应为书记录嵌套形状
--- {data=[{bookId, updated=[...]}]});网关的 /book/chapterinfo 无历史消费者,
+-- 章节列表走原版实测过的 web 端点(Cookie 鉴权,响应为
+-- {bookId?, synckey?, chapters:[{chapterUid,title,chapterIdx,...}]}
+-- 顶层 chapters 数组,注意不是 data);网关的 /book/chapterinfo 无历史消费者,
 -- 真机返回 HTTP 403,仅保留为兜底。
 function Api:web_chapters(id)
     id = tostring(id or "")

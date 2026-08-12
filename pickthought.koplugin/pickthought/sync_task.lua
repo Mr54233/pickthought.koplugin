@@ -491,6 +491,8 @@ function SyncTask:start(task, on_progress, on_done)
     local task_token = stamp .. "-" .. tostring(math.random(100000,999999))
     local doc_path = tostring(task.doc_path or "")
     local book_id = tostring(task.book_id or "")
+    -- 多书绑定:task.book_ids 为列表;未提供时回退到单个 book_id(旧调用/旧测试不变)。
+    local book_ids = (type(task.book_ids) == "table" and #task.book_ids > 0) and task.book_ids or {book_id}
     local doc_title = tostring(task.title or "")
     -- mode: "sync"=联网增量同步(复用缓存并按游标续传);"reinject"=纯离线,
     -- 只用上次拉取的数据重跑映射+注入,零网络。
@@ -550,18 +552,25 @@ function SyncTask:start(task, on_progress, on_done)
             -- 断点/复用缓存:每章拉取结果落盘。
             -- 成功的同步以 .completed 标记收尾并保留数据(供离线重注);
             -- 全新同步看到标记即清空重拉(同步=拿新的);无标记=中断残留,续传。
-            local cache_dir = store:book_dir(book_id) .. "/sync-cache"
-            UChild.mkdir(cache_dir)
-            local completed_marker = cache_dir .. "/.completed"
-            local state_path = cache_dir .. "/state.json"
+            -- 多书绑定:每本书有独立的 sync-cache 目录,缓存按 bid 命名空间隔离,
+            -- 避免合集里各子书的章节/映射缓存混在同一目录互相污染。
+            local function cache_for(bid)
+                local dir = store:book_dir(bid) .. "/sync-cache"
+                UChild.mkdir(dir)
+                return dir
+            end
+            local function cache_path_for(bid, uid)
+                return cache_for(bid) .. "/" .. UChild.id_name(uid) .. ".json"
+            end
+            local completed_marker = cache_for(book_id) .. "/.completed"
+            local state_path = cache_for(book_id) .. "/state.json"
             -- 不再清 .completed 缓存:已缓存的章节 resumed 跳过(免费),失败的(缓存
             -- 损坏/不存在)重拉。用户想全新重拉走「重置本书」。之前清缓存导致用户
             -- 点「同步」补齐失败章节时缓存全没(issue #2 评论)。
-            local function cache_path(uid) return cache_dir .. "/" .. UChild.id_name(uid) .. ".json" end
-            local chapters_cache_path = cache_dir .. "/chapters.json"
             -- 章节列表也入缓存,离线重注才能完全不碰网络。
             local api_for_sync = {
                 chapters = function(_, bid)
+                    local chapters_cache_path = cache_for(bid) .. "/chapters.json"
                     if mode == "reinject" then
                         local raw = UChild.read_file(chapters_cache_path, true)
                         if not raw then error("没有上次的同步数据,请先完整同步一次") end
@@ -611,7 +620,7 @@ function SyncTask:start(task, on_progress, on_done)
             end
             local cached_annotations = {
                 fetch_chapter = function(_, bid, uid)
-                    local raw = UChild.read_file(cache_path(uid), true)
+                    local raw = UChild.read_file(cache_path_for(bid, uid), true)
                     if raw then
                         local good, data = pcall(JsonChild.decode, raw)
                         if good and cache_valid(data) then
@@ -649,7 +658,7 @@ function SyncTask:start(task, on_progress, on_done)
                             errors = {}, underline_request_ok = true,
                         })
                         local enc_ok, encoded = pcall(JsonChild.encode, slim)
-                        if enc_ok then UChild.atomic_write(cache_path(uid), encoded, true) end
+                        if enc_ok then UChild.atomic_write(cache_path_for(bid, uid), encoded, true) end
                     end
                     -- 礼貌间隔:章与章之间随机停 200~400ms,请求速率贴近真人翻章。
                     FFIUtil.usleep((200 + math.random(0, 200)) * 1000)
@@ -670,8 +679,10 @@ function SyncTask:start(task, on_progress, on_done)
                     end
                 end
             end
-            for _, file in ipairs(UChild.list(cache_dir)) do
-                if file:match("%.tmp%-%d+%-%d+$") then os.remove(file) end
+            for _, bid in ipairs(book_ids) do
+                for _, file in ipairs(UChild.list(cache_for(bid))) do
+                    if file:match("%.tmp%-%d+%-%d+$") then os.remove(file) end
+                end
             end
 
             -- 注入前释放拉取阶段的网络缓存/JSON 对象,降内存水位(低内存设备防 OOM)
@@ -680,6 +691,7 @@ function SyncTask:start(task, on_progress, on_done)
             local report, sync_err = Sync.run{
                 doc_path = doc_path,
                 book_id = book_id,
+                book_ids = book_ids,
                 api = api_for_sync,
                 annotations = cached_annotations,
                 load_meta = function(p) return EpubReader.load(p) end,
@@ -712,7 +724,10 @@ function SyncTask:start(task, on_progress, on_done)
                 chapter_start = mode ~= "reinject" and chapter_start or 1,
                 skip_resumed = incremental and completed,
                 append = incremental and (completed or chapter_start > 1),
-                map_cache_path = cache_dir .. "/map.json",
+                -- 多书:每本书独立 map 缓存文件(按 bid 命名空间);单书退化为原文件。
+                map_cache_path = function(bid) return store:book_dir(bid) .. "/sync-cache/map.json" end,
+                -- B:开启 spine 正文持久化缓存,分批同步第 2 批起不再解压原 EPUB。
+                spine_cache = true,
                 progress = function(phase, i, n, text)
                     if cancelled() then return false end
                     local percent
@@ -734,17 +749,22 @@ function SyncTask:start(task, on_progress, on_done)
             -- 的真实批次状态抹掉(真机翻车:重注后续拉菜单消失)。
             if mode ~= "reinject" then
                 local pending = tonumber(report.chapters_pending) or 0
-                local state_ok, state_json = pcall(JsonChild.encode, {
+                local state_data = {
                     total = report.chapters_total, pending = pending,
                     next_index = tonumber(report.next_index) or (report.chapters_total + 1),
                     retry_after = report.rate_limit_wait and (os.time() + report.rate_limit_wait) or nil,
                     updated_at = os.time(),
-                })
-                if state_ok then UChild.atomic_write(cache_dir .. "/state.json", state_json, true) end
-                -- 全部章节拉完才算「完成」:打标记保留缓存供离线重注,
-                -- 下次全新同步看到标记会清空重拉;分批未完/取消/失败不打标记=续传。
-                if pending == 0 then
-                    UChild.atomic_write(completed_marker, tostring(os.time()), true)
+                }
+                -- 每本书独立写状态/完成标记(各自保留离线重注缓存);
+                -- 多书时 state 数值是聚合值,续拉菜单以主绑定为准,仅作提示。
+                for _, bid in ipairs(book_ids) do
+                    local state_ok, state_json = pcall(JsonChild.encode, state_data)
+                    if state_ok then UChild.atomic_write(cache_for(bid) .. "/state.json", state_json, true) end
+                    -- 全部章节拉完才算「完成」:打标记保留缓存供离线重注,
+                    -- 下次全新同步看到标记会清空重拉;分批未完/取消/失败不打标记=续传。
+                    if pending == 0 then
+                        UChild.atomic_write(cache_for(bid) .. "/.completed", tostring(os.time()), true)
+                    end
                 end
             end
             return {report = report, auth = store:auth()}

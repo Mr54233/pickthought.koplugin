@@ -319,7 +319,8 @@ local function intervals(data, visible_count, index)
             local survivor = clean[#clean]
             if it.thought and survivor then
                 survivor.thought = true
-                merged[#merged + 1] = {from = it.key, into = survivor.key}
+                -- 带 book_id:多书合并注入时,from→into 的想法并进需定位到正确的书。
+                merged[#merged + 1] = {from = it.key, into = survivor.key, book_id = data.book_id}
             end
         end
     end
@@ -354,9 +355,12 @@ local function render_text_token(token, marks, data)
                     out[#out + 1] = '<a class="pickthought-link" href="' .. href .. '">'
                     thought_link_open = true
                 end
-                local mark_class = Thoughts.mark_class(active.key)
                 local display_class = active.thought and "pickthought-mark" or "pickthought-inline-mark"
-                out[#out + 1] = '<span class="' .. display_class .. ' ' .. mark_class .. '" data-pickthought-range="' .. active.key .. '">'
+                -- 注意: 不追加 Thoughts.mark_class 生成的唯一 class(pickthought-mark-<hex>)。
+                -- 该 class 仅被生成、从不被 CSS/代码读取,却会让 CRE 为每个标注各建一份
+                -- 无法合并的样式,在多书合集(数千标注)下撑爆样式数据存储池导致 KPW3 段错误。
+                -- 唯一标识已由 data-pickthought-range 与 href 承载,去掉它样式零变化、功能不受影响。
+                out[#out + 1] = '<span class="' .. display_class .. '" data-pickthought-range="' .. active.key .. '">'
             end
         end
         out[#out + 1] = unit

@@ -13,8 +13,28 @@ local lfs = require("libs/libkoreader-lfs")
 local Thoughts = {}
 
 -- per-book SQLite 句柄缓存:点击锚点时避免反复 open/close。
+-- KPW3 红线:句柄不得无上限累积——纯阅读期跨多本注入书点锚点会 slowly 涨内存
+-- (每个句柄连带 SQLite + WAL 文件)。加 LRU 上限,超出关最久未用,释放文件句柄。
 local db_cache = {}
+local db_cache_order = {}   -- LRU 顺序:表头最久未用,表尾最近使用
+local DB_CACHE_MAX = 4
 local migrated = {}  -- book_dir → 已检查旧 JSON 迁移(进程内不重复扫)
+
+local function db_cache_touch(book_dir)
+    for i, v in ipairs(db_cache_order) do
+        if v == book_dir then table.remove(db_cache_order, i); break end
+    end
+    db_cache_order[#db_cache_order + 1] = book_dir
+end
+
+local function db_cache_evict()
+    while #db_cache_order > DB_CACHE_MAX do
+        local old = table.remove(db_cache_order, 1)
+        local db = db_cache[old]
+        if db then pcall(ThoughtDB.close, db) end
+        db_cache[old] = nil
+    end
+end
 
 local function hex_encode(value)
     return (tostring(value or ""):gsub(".", function(ch)
@@ -94,10 +114,15 @@ end
 local function open_db(store, book_id)
     local book_dir = store:book_dir(book_id)
     local db = db_cache[book_dir]
-    if db then return db end
+    if db then
+        db_cache_touch(book_dir)
+        return db
+    end
     db = ThoughtDB.open(book_dir)
     if not db then return nil end
     db_cache[book_dir] = db
+    db_cache_touch(book_dir)
+    db_cache_evict()
     if not migrated[book_dir] then
         migrated[book_dir] = true
         local ok_mig = pcall(migrate_legacy, book_id, book_dir, db)
@@ -252,9 +277,24 @@ function Thoughts.popup_text(group)
 end
 
 function Thoughts.clear_memory_cache()
-    for _, db in pairs(db_cache) do ThoughtDB.close(db) end
+    for _, db in pairs(db_cache) do pcall(ThoughtDB.close, db) end
     db_cache = {}
+    db_cache_order = {}
     -- migrated 不清:进程内已迁移的 book 不重复扫(目录已空,下次也跳过)。
+end
+
+-- 关闭单本书句柄(阅读端关闭文档时调用),释放 SQLite + WAL 文件。
+-- 之后若再点该书的锚点,open_db 会重新打开,无害。
+function Thoughts.close_book(store, book_id)
+    local book_dir = store:book_dir(book_id)
+    local db = db_cache[book_dir]
+    if db then
+        pcall(ThoughtDB.close, db)
+        db_cache[book_dir] = nil
+        for i, v in ipairs(db_cache_order) do
+            if v == book_dir then table.remove(db_cache_order, i); break end
+        end
+    end
 end
 
 return Thoughts
