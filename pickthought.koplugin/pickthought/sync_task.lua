@@ -713,6 +713,7 @@ function SyncTask:start(task, on_progress, on_done)
                 skip_resumed = incremental and completed,
                 append = incremental and (completed or chapter_start > 1),
                 map_cache_path = cache_dir .. "/map.json",
+                spine_cache = true,
                 progress = function(phase, i, n, text)
                     if cancelled() then return false end
                     local percent

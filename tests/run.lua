@@ -30,6 +30,7 @@ local files = {
     "tests.test_thought_db", "tests.test_thoughts",
     "tests.test_annotation_compat",
     "tests.test_thoughts_lru",
+    "tests.test_spine_cache",
 }
 for _, name in ipairs(files) do
     local ok, err = pcall(require, name)

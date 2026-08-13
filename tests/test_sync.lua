@@ -309,6 +309,102 @@ T.case("映射缓存:续批只匹配新章节", function()
     os.remove(cache_file)
 end)
 
+T.case("正文 spine 缓存:冷读落盘,续批暖读不再解压", function()
+    local U = require("pickthought.util")
+    local SpineCache = require("pickthought.spine_cache")
+    local saved = {}
+    for _, key in ipairs({"mkdir", "read_file", "file_exists", "atomic_write", "remove_tree", "list"}) do
+        saved[key] = U[key]
+    end
+    local fs = {}
+    U.mkdir = function(path) fs[tostring(path)] = fs[tostring(path)] or true; return true end
+    U.file_exists = function(path) return fs[tostring(path)] ~= nil end
+    U.read_file = function(path)
+        local value = fs[tostring(path)]
+        return value == true and nil or value
+    end
+    U.atomic_write = function(path, data) fs[tostring(path)] = data; return true end
+    U.remove_tree = function(path)
+        local prefix = tostring(path)
+        for key in pairs(fs) do
+            if key == prefix or key:sub(1, #prefix + 1) == prefix .. "/" then fs[key] = nil end
+        end
+        return true
+    end
+    U.list = function(path)
+        local out, prefix = {}, tostring(path) .. "/"
+        for key in pairs(fs) do
+            if key:sub(1, #prefix) == prefix then out[#out + 1] = key end
+        end
+        return out
+    end
+
+    local function finish(ok, err)
+        for key, value in pairs(saved) do U[key] = value end
+        if not ok then error(err, 0) end
+    end
+    local cache_file = "tests/.tmp_sync_spine_map.json"
+    local signature = "0@" .. tostring(require("pickthought.chapter_map").ALGO_VERSION)
+    local spine_dir = SpineCache.dir_for(cache_file, signature)
+    U.remove_tree(spine_dir)
+
+    local function rows(count)
+        local out = {}
+        for i = 1, count do
+            out[i] = {chapterUid = i, title = "第一章", chapterIdx = i}
+        end
+        return out
+    end
+    local function chapter_data(_, _, uid)
+        local text = tostring(uid) == "1" and "春江潮水连海平" or "滟滟随波千万里"
+        return {
+            underlines = {{range = "0-7", markText = text}}, review_map = {}, review_groups = {},
+            underline_count = 1, thought_count = 0, thought_entry_count = 0, errors = {},
+        }
+    end
+
+    local cold_scans = 0
+    local deps1, calls1 = make_deps({
+        api = {chapters = function() return {data = rows(1)} end},
+        annotations = {fetch_chapter = chapter_data},
+        map_cache_path = cache_file,
+        spine_cache = true,
+        read_spine = function(meta, callback)
+            cold_scans = cold_scans + 1
+            for index, item in ipairs(meta.spine) do
+                local html = item.href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+                callback(item, html, nil, index)
+            end
+            return true
+        end,
+    })
+    local ok, err = xpcall(function()
+        local report1, err1 = Sync.run(deps1)
+        T.ok(report1, "冷缓存首批同步成功: " .. tostring(err1))
+        T.eq(cold_scans, 1, "首批只扫描一次真实 spine")
+        T.ok(U.file_exists(spine_dir .. "/manifest.json"), "首批落盘 spine manifest")
+        T.ok(calls1.injected and #calls1.injected.mapped == 1, "首批注入一章")
+
+        local warm_scans = 0
+        local deps2, calls2 = make_deps({
+            api = {chapters = function() return {data = rows(2)} end},
+            annotations = {fetch_chapter = chapter_data},
+            map_cache_path = cache_file,
+            spine_cache = true,
+            read_spine = function()
+                warm_scans = warm_scans + 1
+                error("暖缓存命中时不应重新解压 spine")
+            end,
+        })
+        local report2, err2 = Sync.run(deps2)
+        T.ok(report2, "暖缓存续批同步成功: " .. tostring(err2))
+        T.eq(warm_scans, 0, "新增章节匹配直接读取暖缓存")
+        T.ok(calls2.injected and #calls2.injected.mapped == 2, "续批包含旧章和新章的注入数据")
+    end, debug.traceback)
+
+    finish(ok, err)
+end)
+
 T.case("分批预算:拉满即收工,缓存命中免费", function()
     local rows = {}
     for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
