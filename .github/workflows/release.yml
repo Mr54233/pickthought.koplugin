@@ -1,0 +1,198 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_label:
+        description: Optional package label; defaults to the first 8 characters of the commit ID
+        required: false
+        type: string
+  workflow_run:
+    workflows:
+      - KOReader integration
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package-and-release:
+    name: Package plugin
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Read plugin version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_LABEL: ${{ inputs.package_label }}
+          TARGET_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          read_version() {
+            sed -nE 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+              | head -n 1
+          }
+
+          current="$(read_version < _meta.lua)"
+          if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: _meta.lua version must use X.Y.Z format (got: ${current:-missing})" >&2
+            exit 1
+          fi
+
+          automatic_release=false
+          tag="v$current"
+          package_label="$tag"
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            if ! git rev-parse --verify --quiet "refs/tags/$tag"; then
+              automatic_release=true
+            fi
+          else
+            package_label="${MANUAL_LABEL:-${TARGET_SHA:0:8}}"
+            if [[ ! "$package_label" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$ ]]; then
+              echo "error: package_label must be 1-40 letters, numbers, dots, underscores, or hyphens" >&2
+              exit 1
+            fi
+          fi
+
+          echo "current=$current"
+          echo "automatic_release=$automatic_release"
+          echo "version=$current" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=weread.koplugin-$package_label" >> "$GITHUB_OUTPUT"
+          echo "archive=dist/weread.koplugin-$package_label.zip" >> "$GITHUB_OUTPUT"
+          echo "automatic_release=$automatic_release" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Explain existing release
+        if: github.event_name == 'workflow_run' && steps.version.outputs.automatic_release != 'true'
+        run: echo "Tag ${{ steps.version.outputs.tag }} already exists; no package was published."
+
+      - name: Verify basic CI passed
+        if: steps.version.outputs.automatic_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ steps.version.outputs.target_sha }}
+        run: |
+          conclusion="$(
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow ci.yml \
+              --commit "$TARGET_SHA" \
+              --event push \
+              --limit 1 \
+              --json conclusion \
+              --jq '.[0].conclusion // ""'
+          )"
+          if [[ "$conclusion" != "success" ]]; then
+            echo "error: CI for $TARGET_SHA did not succeed (conclusion: ${conclusion:-missing})" >&2
+            exit 1
+          fi
+
+      - name: Build plugin package
+        if: github.event_name == 'workflow_dispatch' || steps.version.outputs.automatic_release == 'true'
+        run: bash scripts/package_release.sh "${{ steps.version.outputs.archive }}"
+
+      - name: Generate checksum
+        if: github.event_name == 'workflow_dispatch' || steps.version.outputs.automatic_release == 'true'
+        run: |
+          archive="${{ steps.version.outputs.archive }}"
+          (
+            cd "$(dirname "$archive")"
+            sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256"
+          )
+          cat "${{ steps.version.outputs.archive }}.sha256"
+
+      - name: Verify package contents
+        if: github.event_name == 'workflow_dispatch' || steps.version.outputs.automatic_release == 'true'
+        run: |
+          unzip -l "${{ steps.version.outputs.archive }}"
+          test "$(unzip -Z1 "${{ steps.version.outputs.archive }}" | head -n 1)" \
+            = "weread.koplugin/"
+          unzip -Z1 "${{ steps.version.outputs.archive }}" \
+            | grep -qx "weread.koplugin/main.lua"
+          unzip -Z1 "${{ steps.version.outputs.archive }}" \
+            | grep -qx "weread.koplugin/_meta.lua"
+          unzip -Z1 "${{ steps.version.outputs.archive }}" \
+            | grep -qx "weread.koplugin/icons/weread-w-book.svg"
+          unzip -Z1 "${{ steps.version.outputs.archive }}" \
+            | grep -qx "weread.koplugin/integrations/init.lua"
+          unzip -Z1 "${{ steps.version.outputs.archive }}" \
+            | grep -qx "weread.koplugin/integrations/zenui.lua"
+          if unzip -Z1 "${{ steps.version.outputs.archive }}" \
+            | grep -Eq '^weread\.koplugin/(spec|scripts|docs|\.github)/'; then
+            echo "error: development-only files were included in the release package" >&2
+            exit 1
+          fi
+
+      - name: Upload plugin package artifact
+        if: github.event_name == 'workflow_dispatch' || steps.version.outputs.automatic_release == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.version.outputs.artifact_name }}
+          path: ${{ steps.version.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload checksum artifact
+        if: github.event_name == 'workflow_dispatch' || steps.version.outputs.automatic_release == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.version.outputs.artifact_name }}-checksum
+          path: ${{ steps.version.outputs.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Ensure release tag is new
+        if: steps.version.outputs.automatic_release == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse --verify --quiet "refs/tags/$TAG"; then
+            echo "error: tag $TAG already exists; bump _meta.lua to a new version" >&2
+            exit 1
+          fi
+
+      - name: Build release notes preface
+        if: steps.version.outputs.automatic_release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bash scripts/extract_release_notes.sh \
+            "$VERSION" \
+            dist/release-preface.md
+          cat dist/release-preface.md
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.automatic_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          ARCHIVE: ${{ steps.version.outputs.archive }}
+          TARGET_SHA: ${{ steps.version.outputs.target_sha }}
+        run: |
+          release_preface="$(cat dist/release-preface.md)"
+          gh release create "$TAG" \
+            "$ARCHIVE" \
+            "$ARCHIVE.sha256" \
+            --target "$TARGET_SHA" \
+            --title "Version $VERSION" \
+            --notes "$release_preface" \
+            --generate-notes
