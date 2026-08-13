@@ -1193,6 +1193,11 @@ function Plugin:onReaderReady()
 end
 
 function Plugin:onCloseDocument()
+    local path = self:current_doc_path()
+    local binding = path and Binding.get(self.store, path)
+    if binding and binding.book_id then
+        Thoughts.close_book(self.store, binding.book_id)
+    end
     self:_teardown_thought_tap()
 end
 
