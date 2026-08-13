@@ -28,6 +28,7 @@ local files = {
     "tests.test_web_fetch", "tests.test_power_inhibit", "tests.test_sync_task",
     "tests.test_thought_db", "tests.test_thoughts",
     "tests.test_annotation_compat",
+    "tests.test_thought_popup",
 }
 for _, name in ipairs(files) do
     local ok, err = pcall(require, name)

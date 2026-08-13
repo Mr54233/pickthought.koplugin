@@ -168,6 +168,25 @@ function NativeThoughtPopup:_replace_text()
     return true
 end
 
+-- TextViewer normally uses the physical page keys to scroll its text area.
+-- This popup has its own measured thought pages, so route the same keys to the
+-- previous/next thought actions instead of letting them scroll the reader.
+function NativeThoughtPopup:_bind_key_navigation()
+    if not Device:hasKeys() then return end
+    local input_group = Device.input and Device.input.group
+    if not input_group then return end
+    if input_group.PgBack then
+        self.key_events.ScrollOrPrev = {
+            { input_group.PgBack }, event = "PreviousThought",
+        }
+    end
+    if input_group.PgFwd then
+        self.key_events.ScrollOrNext = {
+            { input_group.PgFwd }, event = "NextThought",
+        }
+    end
+end
+
 function NativeThoughtPopup:init(reinit)
     self.items = self.items or {}
     self.display_pages = self.display_pages or build_pages(self.items, function() return false end)
@@ -185,6 +204,7 @@ function NativeThoughtPopup:init(reinit)
     self.buttons_table = self:_build_buttons()
     self:_update_page()
     TextViewer.init(self, reinit)
+    self:_bind_key_navigation()
     -- 点按由弹窗处理为上一条/下一条,正文上下滑动仍由 ScrollTextWidget 滚动。
     local scroll = self:_text_widgets()
     if scroll and scroll.setTapScrollEnabled then
@@ -200,6 +220,16 @@ function NativeThoughtPopup:init(reinit)
         self:_replace_text()
         self:_sync_buttons()
     end
+end
+
+function NativeThoughtPopup:onPreviousThought()
+    self:change_page(-1)
+    return true
+end
+
+function NativeThoughtPopup:onNextThought()
+    self:change_page(1)
+    return true
 end
 
 function NativeThoughtPopup:onTapClose(arg, ges)
