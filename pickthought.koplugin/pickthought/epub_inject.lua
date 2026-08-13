@@ -219,20 +219,23 @@ end
 -- 注意 addPath 恒按 entry_root/rel 拼 zip 路径,顶层无斜杠条目(如 mimetype,已单独处理)
 -- 无法用其正确表示,故 first 缺失时直接回退。
 local function copy_entry_via_disk(reader, writer, entry, mtime, disk_tmp_base)
-    local first, rest = tostring(entry.path):match("^([^/]+)/(.*)$")
-    if not first or rest == "" then return false end
+    local _, rest = tostring(entry.path):match("^([^/]+)/(.*)$")
+    if not rest or rest == "" then return false end
     local sub = disk_tmp_base .. "-e" .. tostring(entry.index)
     U.mkdir(sub)
-    local ok_ext = reader:extractToPath(entry.path, sub .. "/" .. rest)
+    local source_path = sub .. "/" .. rest
+    local parent = source_path:match("^(.*)/[^/]+$")
+    if parent then U.mkdir(parent) end
+    local ok_ext = reader:extractToPath(entry.path, source_path)
     if not ok_ext then
         pcall(U.remove_tree, sub)
         return false
     end
-    -- addPath(源文件全路径, zip 内目标路径):源是刚抽出的临时文件 sub/rest,
-    -- zip 内仍用原始 entry.path,保证顶层目录(OEBPS/ 等)不丢。
-    local ok_add = writer:addPath(sub .. "/" .. rest, entry.path, true, mtime)
+    -- KOReader 的 addPath(entry_root, root, recursive, mtime):第一个参数是
+    -- ZIP 内目标路径,第二个才是刚抽出的本地源文件。
+    local ok_add = writer:addPath(entry.path, source_path, true, mtime)
     pcall(U.remove_tree, sub)
-    if not ok_add then return false end
+    if not ok_add then return nil, "addPath" end
     return true
 end
 
@@ -381,10 +384,13 @@ function M.inject_copy(src, book_id, chapters, opts)
                 end
                 -- 非目标且较大(图/字库/媒体)的条目走磁盘拷贝,不进 Lua 堆,灭 OOM 尖峰;
                 -- 目标条目(需改内容)与较小条目走内存快路径。磁盘路径失败一律回退内存。
-                local via_disk
+                local via_disk, disk_err
                 if not rows and entry.size and entry.size >= DISK_PATH_THRESHOLD
                    and entry.path:find("/", 1, true) then
-                    via_disk = copy_entry_via_disk(reader, writer, entry, mtime, disk_tmp)
+                    via_disk, disk_err = copy_entry_via_disk(reader, writer, entry, mtime, disk_tmp)
+                end
+                if disk_err then
+                    return fail("磁盘中转写入失败:" .. entry.path)
                 end
                 if not via_disk then
                     local content = reader:extractToMemory(entry.path)

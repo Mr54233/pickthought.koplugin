@@ -443,6 +443,9 @@ T.case("大媒体走磁盘中转,逐字节原样", function()
     T.ok(big_entry, "大图条目写入副本")
     T.eq(big_entry.content, big, "大图内容逐字节原样(磁盘中转不走样)")
     T.eq(big_entry.compression, "store", "已压缩大图原样 store")
+    T.eq(Arc._disk_add_args[1].entry_path, "OEBPS/Images/big.png", "addPath 首参是 ZIP 内路径")
+    T.ok(Arc._disk_add_args[1].source_path:find("Images/big.png", 1, true),
+        "addPath 次参是临时源路径")
 end)
 
 T.case("大字体/媒体(woff2/mp3)同样走磁盘中转", function()
@@ -475,4 +478,20 @@ T.case("磁盘中转失败回退内存路径,内容仍逐字节", function()
     local by_path = {}
     for _, e in ipairs(STUBS.written(Arc._last_writer)) do by_path[e.path] = e end
     T.eq(by_path["OEBPS/Images/big.png"].content, big, "回退内存路径仍逐字节原样")
+end)
+
+T.case("磁盘写入失败直接终止,不回退也不 rename", function()
+    local big = string.rep("W", 600 * 1024)
+    local files = book_files()
+    files[#files + 1] = {path = "OEBPS/Images/big.png", content = big}
+    local stats, err, Arc, renames = run_inject(files, CHAPTERS,
+        {fail_write_path = "OEBPS/Images/big.png"}, {
+        read_memory_available_kb = function() return 300 * 1024 end,
+    })
+    T.ok(stats == nil, "磁盘写入失败不得继续生成副本")
+    T.ok(tostring(err):find("磁盘中转写入失败", 1, true), "报磁盘中转写入错误: " .. tostring(err))
+    T.eq(#renames, 0, "磁盘写入失败不得 rename")
+    for _, entry in ipairs(STUBS.written(Arc._last_writer)) do
+        T.ok(entry.path ~= "OEBPS/Images/big.png", "失败条目不得被内存路径重复写入")
+    end
 end)

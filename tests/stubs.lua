@@ -227,8 +227,9 @@ function M.archiver_mock(files, mock_opts)
         }
         return true
     end
-    -- 磁盘中转桩:模拟 addPath 从“磁盘”(内存表)读回内容,追加到压缩条目。
-    function Writer:addPath(src_path, entry_path, method, mtime)
+    -- 磁盘中转桩:保持 KOReader addPath(entry_root, root, recursive, mtime)
+    -- 的真实参数顺序,从“磁盘”(内存表)读回内容并追加到压缩条目。
+    function Writer:addPath(entry_path, src_path, recursive, mtime)
         self.err = nil
         if mock_opts.fail_write_path == entry_path then
             self.err = "mock 写入失败"
@@ -241,6 +242,10 @@ function M.archiver_mock(files, mock_opts)
         end
         self.entries[#self.entries + 1] = {
             path = entry_path, content = content, mtime = mtime, compression = self.compression,
+        }
+        mod._disk_add_args = mod._disk_add_args or {}
+        mod._disk_add_args[#mod._disk_add_args + 1] = {
+            entry_path = entry_path, source_path = src_path, recursive = recursive,
         }
         mod._disk_add_calls = (mod._disk_add_calls or 0) + 1
         return true
