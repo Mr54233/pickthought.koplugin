@@ -22,10 +22,19 @@ local SyncProgress=require("pickthought.sync_progress")
 local SyncReport=require("pickthought.sync_report")
 local BatchSync=require("pickthought.batch_sync")
 local AnnotationCompat=require("pickthought.annotation_compat")
+local AnnotationStyle=require("pickthought.annotation_style")
+local Event=require("ui/event")
 local _=Text.tr
 local unpack_args=unpack or table.unpack
 local source=debug.getinfo(1,"S").source:gsub("^@",""); local ROOT=source:match("^(.*)/main%.lua$") or "."
 local Plugin=WidgetContainer:extend{name="pickthought",is_doc_only=false,version=Config.VERSION}
+
+local ANNOTATION_STYLE_LABELS={
+    default="默认样式",
+    thin_solid="细实线",
+    thin_dashed="细虚线",
+    hidden="隐藏划线",
+}
 
 local function sanitize_saved_auth(store)
     local auth=store:auth()
@@ -119,6 +128,8 @@ function Plugin:reader_menu()
     local doc_path=self:current_doc_path()
     local doc_bound=doc_path and Binding.get(self.store,doc_path)
     if doc_bound then
+        items[#items+1]={text="划线样式（"..self:annotation_style_label().."）",
+            sub_item_table_func=function() return self:annotation_style_menu() end}
         local state=self:_sync_state(doc_bound.book_id)
         if state and (tonumber(state.pending) or 0)>0 then
             items[#items+1]={text=string.format("继续拉取后续章节(还剩 %d 章)",state.pending),
@@ -297,6 +308,7 @@ end
 
 function Plugin:settings_menu()
     return {
+        {text="划线样式",sub_item_table_func=function() return self:annotation_style_menu() end},
         {text="想法弹窗字体",sub_item_table_func=function() return self:thought_font_menu() end},
         {text="阅读时自动分批拉取后续章节",checked_func=function()
             return BatchSync.auto_enabled(self.store:preferences())
@@ -316,6 +328,81 @@ function Plugin:settings_menu()
             if self.sync_task then self.sync_task:set_keep_awake(enabled) end
         end},
     }
+end
+
+function Plugin:annotation_style_label()
+    local key=AnnotationStyle.normalize_runtime_style(
+        self.store:preferences().annotation_style)
+    return ANNOTATION_STYLE_LABELS[key] or ANNOTATION_STYLE_LABELS.default
+end
+
+function Plugin:annotation_style_menu()
+    local choices={
+        {"default",ANNOTATION_STYLE_LABELS.default},
+        {"thin_solid",ANNOTATION_STYLE_LABELS.thin_solid},
+        {"thin_dashed",ANNOTATION_STYLE_LABELS.thin_dashed},
+        {"hidden",ANNOTATION_STYLE_LABELS.hidden},
+    }
+    local rows={}
+    for _,choice in ipairs(choices) do
+        local key,label=choice[1],choice[2]
+        rows[#rows+1]={text=label,radio=true,checked_func=function()
+            return AnnotationStyle.normalize_runtime_style(
+                self.store:preferences().annotation_style) == key
+        end,callback=function()
+            local p=self.store:preferences()
+            p.annotation_style=key
+            self.store:save_preferences(p)
+            local ok,err=self:apply_annotation_style()
+            if ok then
+                self:toast("划线样式已切换为："..label)
+            elseif self.ui and self.ui.document then
+                self:info("划线样式已保存,但当前页面未刷新：\n"..tostring(err or "未知错误"))
+            else
+                self:toast("划线样式已保存,下次打开书籍时生效")
+            end
+        end}
+    end
+    return rows
+end
+
+function Plugin:_annotation_stylesheet()
+    local typeset=self.ui and self.ui.typeset
+    if not typeset or type(typeset.css)~="string" or typeset.css=="" then
+        return nil, "阅读器样式表不可用"
+    end
+    local tweaks=""
+    local styletweak=self.ui.styletweak
+    if styletweak and type(styletweak.getCssText)=="function" then
+        tweaks=styletweak:getCssText() or ""
+    end
+    local style=AnnotationStyle.normalize_runtime_style(
+        self.store:preferences().annotation_style)
+    return typeset.css,tweaks.."\n"..AnnotationStyle.runtime_css(style),style
+end
+
+-- Reapply a saved style to the currently open bound EPUB. This follows the
+-- upstream runtime stylesheet approach: the EPUB and its .orig backup stay
+-- untouched, while the current document is reflowed in place.
+function Plugin:apply_annotation_style()
+    if not self.ui or not self.ui.document then
+        return false, "当前没有打开的书"
+    end
+    local path=self:current_doc_path()
+    if not path or not Binding.get(self.store,path) then
+        return false, "当前书籍未绑定"
+    end
+    local base,stylesheet,style=self:_annotation_stylesheet()
+    if not base then return false,stylesheet end
+    local ok,err=pcall(function()
+        self.ui.document:setStyleSheet(base,stylesheet)
+        self.ui:handleEvent(Event:new("UpdatePos"))
+    end)
+    if not ok then
+        return false,err
+    end
+    logger.info("[撷思][AnnotationStyle] applied", "style=",style)
+    return true
 end
 
 function Plugin:thought_font_menu()
@@ -1184,7 +1271,23 @@ function Plugin:_setup_thought_tap()
 end
 
 -- ===== 事件 =====
-function Plugin:onReadSettings() end
+function Plugin:onReadSettings()
+    -- KOReader calls this before the document is rendered. Do not emit
+    -- UpdatePos here: applying a stylesheet at onReaderReady can start a
+    -- seamless reload loop on rolling documents.
+    if not self.ui or not self.ui.document then return end
+    local path=self:current_doc_path()
+    if not path or not Binding.get(self.store,path) then return end
+    local base,stylesheet,style=self:_annotation_stylesheet()
+    if not base then return end
+    local ok,err=pcall(function()
+        self.ui.document:setStyleSheet(base,stylesheet)
+    end)
+    if not ok then
+        logger.warn("[撷思][AnnotationStyle] initial apply failed",
+            "style=",tostring(style),tostring(err))
+    end
+end
 
 function Plugin:onReaderReady()
     -- 文件管理器阶段可能尚未加载 readerannotation,进入阅读器时重试一次。
