@@ -426,3 +426,53 @@ T.case("注入复用已加载 meta", function()
     T.ok(stats, "应成功: " .. tostring(err))
     T.eq(Arc._reader_new_count - before, 2, "只打开 mimetype 与写包 Reader,不重复 load")
 end)
+
+T.case("大媒体走磁盘中转,逐字节原样", function()
+    -- 构造一个 >= DISK_PATH_THRESHOLD(512KB)的伪造大图;mock 的 entry.size 取自 #content。
+    local big = string.rep("X", 600 * 1024)
+    local files = book_files()
+    files[#files + 1] = {path = "OEBPS/Images/big.png", content = big}
+    local stats, err, Arc = run_inject(files, CHAPTERS, nil, {
+        read_memory_available_kb = function() return 300 * 1024 end,
+    })
+    T.ok(stats, "大媒体注入应成功: " .. tostring(err))
+    T.ok(Arc._disk_add_calls >= 1, "至少 1 个条目走了磁盘中转(addPath 被调用)")
+    local by_path = {}
+    for _, e in ipairs(STUBS.written(Arc._last_writer)) do by_path[e.path] = e end
+    local big_entry = by_path["OEBPS/Images/big.png"]
+    T.ok(big_entry, "大图条目写入副本")
+    T.eq(big_entry.content, big, "大图内容逐字节原样(磁盘中转不走样)")
+    T.eq(big_entry.compression, "store", "已压缩大图原样 store")
+end)
+
+T.case("大字体/媒体(woff2/mp3)同样走磁盘中转", function()
+    local blob = string.rep("Y", 700 * 1024)
+    local files = book_files()
+    files[#files + 1] = {path = "OEBPS/Fonts/big.woff2", content = blob}
+    files[#files + 1] = {path = "OEBPS/Audio/clip.mp3", content = blob}
+    local stats, err, Arc = run_inject(files, CHAPTERS, nil, {
+        read_memory_available_kb = function() return 300 * 1024 end,
+    })
+    T.ok(stats, "含大字体/媒体的书注入应成功: " .. tostring(err))
+    T.eq(Arc._disk_add_calls, 2, "大字体与大媒体各走 1 次磁盘中转")
+    local by_path = {}
+    for _, e in ipairs(STUBS.written(Arc._last_writer)) do by_path[e.path] = e end
+    T.eq(by_path["OEBPS/Fonts/big.woff2"].content, blob, "大字体逐字节原样")
+    T.eq(by_path["OEBPS/Audio/clip.mp3"].content, blob, "大媒体逐字节原样")
+end)
+
+T.case("磁盘中转失败回退内存路径,内容仍逐字节", function()
+    local big = string.rep("Z", 600 * 1024)
+    local files = book_files()
+    files[#files + 1] = {path = "OEBPS/Images/big.png", content = big}
+    -- 让 extractToPath 对大图失败:验证回退到内存快路径,行为与无磁盘中转一致。
+    local stats, err, Arc = run_inject(files, CHAPTERS,
+        {fail_extract_path = "OEBPS/Images/big.png"}, {
+        read_memory_available_kb = function() return 300 * 1024 end,
+    })
+    T.ok(stats, "磁盘失败后回退内存应成功: " .. tostring(err))
+    T.eq(Arc._disk_add_calls, 0, "磁盘失败时不计磁盘中转")
+    local by_path = {}
+    for _, e in ipairs(STUBS.written(Arc._last_writer)) do by_path[e.path] = e end
+    T.eq(by_path["OEBPS/Images/big.png"].content, big, "回退内存路径仍逐字节原样")
+end)
