@@ -321,6 +321,14 @@ package.preload["lua-ljsqlite3/init"] = function()
                 if not r then return nil end
                 -- SELECT 顺序:abstract, author, content, likes, review_id
                 return { r.abstract, r.author, r.content, r.likes, r.review_id }
+            elseif sql:find("PRAGMA") then
+                if sql:find("integrity_check") then
+                    if stmt._ic_done then return nil end
+                    stmt._ic_done = true
+                    return { "ok" }
+                end
+                if sql:find("user_version") then return { store.user_version or 0 } end
+                return nil
             end
             return nil
         end
@@ -336,6 +344,8 @@ package.preload["lua-ljsqlite3/init"] = function()
             sql = tostring(sql or "")
             if sql:find("CREATE TABLE") then store.schema = true
             elseif sql:find("DROP TABLE") then store.schema = false; store.rows = {}
+            elseif sql:find("user_version=") then
+                store.user_version = tonumber(sql:match("user_version=(%d+)")) or 0
             end
             -- PRAGMA / BEGIN / COMMIT / ROLLBACK:无操作语义,放行。
             return true

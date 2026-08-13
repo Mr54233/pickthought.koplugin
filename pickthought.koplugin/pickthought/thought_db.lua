@@ -12,6 +12,9 @@ local U = require("pickthought.util")
 
 local ThoughtDB = {}
 
+-- schema 版本:随结构性迁移递增;open 时已落后版本号的库在此升级(user_version 追踪)。
+local SCHEMA_VERSION = 1
+
 local function get_sq3()
     local ok, SQ3 = pcall(require, "lua-ljsqlite3/init")
     if ok and SQ3 then return SQ3 end
@@ -33,17 +36,22 @@ function ThoughtDB.remove_db(book_dir)
     end
 end
 
-function ThoughtDB.open(book_dir)
-    if type(book_dir) ~= "string" or book_dir == "" then return nil end
-    local SQ3 = get_sq3()
-    if not SQ3 then return nil end
-    U.mkdir(book_dir)
-    local path = ThoughtDB.db_path(book_dir)
-    local ok, db = pcall(SQ3.open, path)
-    if not ok or not db then return nil end
-    pcall(function() db:exec("PRAGMA journal_mode=WAL") end)
-    pcall(function() db:exec("PRAGMA synchronous=NORMAL") end)
-    local schema_ok = pcall(function()
+-- 读取/写入 schema 版本(用 SQLite 的 user_version PRAGMA 持久化,免额外表)。
+local function get_user_version(db)
+    local ok, stmt = pcall(function() return db:prepare("PRAGMA user_version") end)
+    if not ok or not stmt then return 0 end
+    local _ok, row = pcall(function() return stmt:step() end)
+    pcall(function() stmt:close() end)
+    return (row and tonumber(row[1])) or 0
+end
+
+local function set_user_version(db, v)
+    pcall(function() db:exec("PRAGMA user_version=" .. tostring(v)) end)
+end
+
+-- 创建表 + 迁移追踪:user_version 低于当前则在此升级(目前 v1 无结构性迁移,仅补版本号)。
+local function ensure_schema(db)
+    local ok = pcall(function()
         db:exec([[CREATE TABLE IF NOT EXISTS review_items (
             chapter_uid TEXT    NOT NULL,
             range       TEXT    NOT NULL,
@@ -56,15 +64,79 @@ function ThoughtDB.open(book_dir)
             PRIMARY KEY (chapter_uid, range, item_index)
         ) WITHOUT ROWID]])
     end)
-    if not schema_ok then
+    if not ok then return false end
+    local ver = get_user_version(db)
+    if ver < SCHEMA_VERSION then
+        set_user_version(db, SCHEMA_VERSION)
+    end
+    return true
+end
+
+-- 打开单个库(不含完整性核验与重建),供 open 复用。
+local function do_open(path)
+    local SQ3 = get_sq3()
+    if not SQ3 then return nil end
+    local ok, db = pcall(SQ3.open, path)
+    if not ok or not db then return nil end
+    pcall(function() db:exec("PRAGMA journal_mode=WAL") end)
+    pcall(function() db:exec("PRAGMA synchronous=NORMAL") end)
+    if not ensure_schema(db) then
         pcall(function() db:close() end)
         return nil
     end
     return db
 end
 
+-- 完整性核验:PRAGMA integrity_check 返回 "ok" 即健康,否则收集损坏描述。
+-- FAT32/SD 卡易损,KPW3 上收益最大。
+function ThoughtDB.integrity_check(db)
+    if not db then return false, "no db" end
+    local ok, stmt = pcall(function() return db:prepare("PRAGMA integrity_check") end)
+    if not ok or not stmt then return false, "prepare failed" end
+    local bad, step_ok, row = {}, pcall(function() return stmt:step() end)
+    while step_ok and row do
+        if tostring(row[1] or "") ~= "ok" then bad[#bad + 1] = tostring(row[1]) end
+        step_ok, row = pcall(function() return stmt:step() end)
+    end
+    pcall(function() stmt:close() end)
+    if not step_ok then return false, "step failed" end
+    if #bad == 0 then return true end
+    return false, table.concat(bad, "; ")
+end
+
+-- WAL 检查点:把 WAL 折叠进主库并截断,减小断电损坏面、回收 -wal/-shm 文件。
+function ThoughtDB.checkpoint(db)
+    if not db then return false end
+    return pcall(function() db:exec("PRAGMA wal_checkpoint(TRUNCATE)") end)
+end
+
+function ThoughtDB.open(book_dir, _attempt)
+    if type(book_dir) ~= "string" or book_dir == "" then return nil end
+    local SQ3 = get_sq3()
+    if not SQ3 then return nil end
+    U.mkdir(book_dir)
+    local path = ThoughtDB.db_path(book_dir)
+    local db = do_open(path)
+    if not db then return nil end
+    -- 打开即核验完整性;损坏则丢弃本地缓存(想法可由注入源重建),重建干净库,仅重试一次防递归。
+    local ic_ok, healthy, msg = pcall(ThoughtDB.integrity_check, db)
+    if not ic_ok or healthy ~= true then
+        logger.warn("[撷思][ThoughtDB] integrity_check 异常,重建", path, tostring(msg or healthy))
+        pcall(ThoughtDB.close, db)
+        if not _attempt then
+            ThoughtDB.remove_db(book_dir)
+            return ThoughtDB.open(book_dir, true)
+        end
+        return nil
+    end
+    return db
+end
+
 function ThoughtDB.close(db)
-    if db then pcall(function() db:close() end) end
+    if db then
+        pcall(ThoughtDB.checkpoint, db)
+        pcall(function() db:close() end)
+    end
 end
 
 local function insert_rows(db, chapter_uid, groups)
