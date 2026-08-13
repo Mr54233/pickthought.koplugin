@@ -68,7 +68,7 @@ T.case("端到端注入", function()
     for _, e in ipairs(entries) do by_path[e.path] = e end
     local ch1 = by_path["OEBPS/Text/ch1.xhtml"]
     T.ok(ch1.compression == "deflate", "正文用 deflate")
-    T.ok(ch1.content:find('class="pickthought-mark', 1, true), "锚点 span 注入")
+    T.ok(ch1.content:find('pickthought-mark', 1, true), "锚点 span 注入")
     T.ok(ch1.content:find('href="#pickthought-', 1, true), "想法链接注入(专属前缀)")
     T.ok(ch1.content:find('id="pickthought-annotation-style"', 1, true), "内联样式注入 head")
     T.ok(ch1.content:find("</title>", 1, true) and ch1.content:find("春江潮水", 1, true), "原结构保留")

@@ -15,12 +15,9 @@ M.CSS = [[
     text-decoration: none;
     color: inherit;
 }
-.pickthought-link .pickthought-mark {
-    color: inherit;
-}
 .pickthought-mark {
-    border-bottom: 2px dashed #ff6b35;
-    padding-bottom: 2px;
+    text-decoration: underline;
+    color: #ff6b35;
 }
 /* MIUREAD_ANNOTATION_STYLE_V2_END */
 ]]
@@ -198,14 +195,14 @@ function M.xhtml_is_current(html)
     if not html:find("data-pickthought-book=", 1, true) then return true end
     return html:find('id="' .. M.INLINE_STYLE_ID .. '"', 1, true) ~= nil
         and html:find(M.MARKER_BEGIN, 1, true) ~= nil
-        and html:find("border-bottom: 2px dashed #ff6b35;", 1, true) ~= nil
+        and html:find("color: #ff6b35;", 1, true) ~= nil
 end
 
 function M.css_is_current(css)
     css = tostring(css or "")
     return css:find(M.MARKER_BEGIN, 1, true) ~= nil
         and css:find(".pickthought-mark", 1, true) ~= nil
-        and css:find("border-bottom: 2px dashed #ff6b35;", 1, true) ~= nil
+        and css:find("color: #ff6b35;", 1, true) ~= nil
         and css:find(".pickthought-inline-mark.pickthought-has-thought", 1, true) == nil
         and css:find(".pickthought-link .pickthought-inline-mark", 1, true) == nil
 end
