@@ -65,7 +65,7 @@ T.case("SpineCache: 冷捕→暖服 内容一致且指纹作废", function()
 end)
 
 T.case("SpineCache: 缓存缺失 get 返回 nil", function()
-    with_memfs(function()
+    with_memfs(function(fs)
         local dir = "tests/.tmp_spine/spine-miss_7"
         local sig = "12345@7"
         local cold = SpineCache.open(dir, sig)
@@ -76,25 +76,57 @@ T.case("SpineCache: 缓存缺失 get 返回 nil", function()
         T.eq(warm:get("nonexistent"), nil, "完全未知 href get 返回 nil")
         -- 暖模式但请求未在 entries 的 href:covers 必为 false(迫使回退真实读取)
         T.ok(not warm:covers({{href = "OEBPS/c2.xhtml"}}), "含未缓存 href 的 spine 不 covers")
+        -- manifest 有记录但实体文件被删时,也必须退出暖路径。
+        fs[dir .. "/e1"] = nil
+        T.ok(not warm:covers({{href = "OEBPS/c1.xhtml"}}), "缓存文件被删后不应误判 covers")
     end)
 end)
 
-T.case("SpineCache: 写盘失败不崩溃,get 优雅返回 nil", function()
-    -- 原子写失败时(模拟磁盘满抛错),put/close 必须不抛出,且 get 应优雅
+T.case("SpineCache: 原子写返回失败不登记映射", function()
+    -- 原子写失败时(模拟磁盘满返回 nil),put/close 必须不抛出,且 get 应优雅
     -- 回退 nil(走真实读取补写),绝不污染后续匹配结果。
-    with_memfs(function()
+    with_memfs(function(fs)
         local dir = "tests/.tmp_spine/spine-fail_7"
         local sig = "111@7"
         local sc = SpineCache.open(dir, sig)
         T.ok(sc and not sc:warm(), "冷模式开启(写盘失败路径)")
         local saved_atomic = U.atomic_write
-        U.atomic_write = function() error("disk full") end
+        U.atomic_write = function() return nil, "disk full" end
         local ok_put, err_put = pcall(function() sc:put("OEBPS/c1.xhtml", CH1) end)
         U.atomic_write = saved_atomic
         T.ok(ok_put, "put 在写盘失败时仍不抛错: " .. tostring(err_put))
         T.eq(sc:get("OEBPS/c1.xhtml"), nil, "get 写盘失败内容返回 nil(回退真实读取)")
         local ok_close = pcall(sc.close, sc)
         T.ok(ok_close, "close 在写盘失败时仍不抛错")
+        T.ok(not fs[dir .. "/manifest.json"], "写盘失败不得生成 manifest")
+    end)
+end)
+
+T.case("SpineCache: 暖模式缺文件可修复并更新 manifest", function()
+    with_memfs(function(fs)
+        local dir = "tests/.tmp_spine/spine-repair_7"
+        local sig = "12345@7"
+        local cold = SpineCache.open(dir, sig)
+        cold:put("OEBPS/c1.xhtml", CH1)
+        cold:put("OEBPS/c2.xhtml", CH2)
+        cold:close()
+        fs[dir .. "/e1"] = nil
+
+        local warm = SpineCache.open(dir, sig)
+        T.ok(warm and warm:warm(), "manifest 存在时仍进入暖模式")
+        T.ok(not warm:covers({{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}),
+            "缺文件触发回源路径")
+        T.ok(warm:put("OEBPS/c1.xhtml", CH1), "缺失文件可回源补写")
+        T.ok(warm:put("OEBPS/c3.xhtml", "第三章"), "暖模式可追加新文件")
+        T.ok(warm:close(), "修复后的 manifest 写入成功")
+
+        local repaired = SpineCache.open(dir, sig)
+        T.ok(repaired:warm(), "修复后仍可暖启动")
+        T.ok(repaired:covers({
+            {href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}, {href = "OEBPS/c3.xhtml"},
+        }), "修复后的三条缓存均有效")
+        T.eq(repaired:get("OEBPS/c1.xhtml"), CH1, "c1 修复内容一致")
+        T.eq(repaired:get("OEBPS/c3.xhtml"), "第三章", "新增 c3 内容一致")
     end)
 end)
 

@@ -15,9 +15,17 @@
 -- 算法版本),换书或升算法自动整体作废。
 local U = require("pickthought.util")
 local Json = require("pickthought.json")
-local logger = require("logger")
 
 local SpineCache = {}
+
+local function next_entry_seq(entries)
+    local max_seq = 0
+    for _, fname in pairs(entries or {}) do
+        local seq = tostring(fname):match("^e(%d+)$")
+        if seq then max_seq = math.max(max_seq, tonumber(seq) or 0) end
+    end
+    return max_seq + 1
+end
 
 -- 指纹形如 "123456@7",目录名里 "@" 换成 "_" 以免歧义。
 local function sig_to_dir(signature)
@@ -70,6 +78,7 @@ function SpineCache.open(dir, signature)
                 and tostring(decoded.signature) == tostring(signature)
                 and type(decoded.entries) == "table" then
                 self.entries = decoded.entries
+                self._seq = next_entry_seq(self.entries)
                 self.mode = "warm"
             end
         end
@@ -91,7 +100,8 @@ function SpineCache:covers(spine)
     if self.mode ~= "warm" then return false end
     for _, item in ipairs(spine or {}) do
         local href = type(item) == "table" and item.href or tostring(item)
-        if not self.entries[tostring(href)] then return false end
+        local fname = self.entries[tostring(href)]
+        if not fname or not U.file_exists(self.dir .. "/" .. tostring(fname)) then return false end
     end
     return true
 end
@@ -109,32 +119,46 @@ end
 -- 写入一个 spine 文件的原始 HTML。content 为 nil 时忽略(读取失败不缓存)。
 -- 文件名用单调序号 e1/e2/...,href 与文件名的映射记在 entries 里,永不撞名。
 function SpineCache:put(href, content)
-    if content == nil then return end
+    if content == nil then return false end
     href = tostring(href)
     local fname = self.entries[href]
+    local new_entry = false
     if not fname then
-        if self.mode == "cold" and not self.dir_ready then
-            U.mkdir(self.dir)
-            self.dir_ready = true
-        end
         fname = "e" .. tostring(self._seq)
         self._seq = self._seq + 1
-        self.entries[href] = fname
+        new_entry = true
     end
-    local ok = pcall(U.atomic_write, self.dir .. "/" .. fname, content, true)
-    if ok then self.dirty = true end
+    if not self.dir_ready then
+        local dir_ok = U.mkdir(self.dir)
+        if not dir_ok and not U.file_exists(self.dir) then return false end
+        self.dir_ready = true
+    end
+    local ok, wrote = pcall(U.atomic_write, self.dir .. "/" .. fname, content, true)
+    if ok and wrote == true then
+        if new_entry then self.entries[href] = fname end
+        self.dirty = true
+        return true
+    end
+    return false
 end
 
--- 关闭:仅 cold 模式且确有写入时落盘 manifest,供后续批次 warm 命中。
--- warm 模式 manifest 已完整,无需重写。
+-- 写入 manifest,供后续批次暖启动。暖模式发现缓存文件缺失时,回源补写后
+-- 也必须把修复后的映射落盘。
+function SpineCache:_write_manifest()
+    if not self.dirty or not self.dir_ready then return false end
+    local count = 0
+    for _ in pairs(self.entries) do count = count + 1 end
+    local manifest = { signature = self.signature, count = count, entries = self.entries }
+    local ok, encoded = pcall(Json.encode, manifest)
+    if not ok then return false end
+    local wrote_ok, wrote = pcall(U.atomic_write, self.dir .. "/manifest.json", encoded, true)
+    if not (wrote_ok and wrote == true) then return false end
+    self.dirty = false
+    return true
+end
+
 function SpineCache:close()
-    if self.mode == "cold" and self.dirty and self.dir_ready then
-        local count = 0
-        for _ in pairs(self.entries) do count = count + 1 end
-        local manifest = { signature = self.signature, count = count, entries = self.entries }
-        local ok, encoded = pcall(Json.encode, manifest)
-        if ok then pcall(U.atomic_write, self.dir .. "/manifest.json", encoded, true) end
-    end
+    return self:_write_manifest()
 end
 
 return SpineCache
