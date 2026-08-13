@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>撷思 pickthought.koplugin — 低内存 HTML/CSS 注入优化 更新日志</title>
+<style>
+  :root{--bg:#1e1e1e;--card:#262626;--fg:#e0e0e0;--muted:#9a9a9a;--accent:#4ea1ff;--green:#5fd38a;--red:#ff7b72;--border:#3a3a3a;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.65;padding:24px;}
+  .wrap{max-width:900px;margin:0 auto;}
+  h1{font-size:22px;border-left:4px solid var(--accent);padding-left:12px;margin:0 0 6px;}
+  .meta{color:var(--muted);font-size:13px;margin-bottom:20px;}
+  .meta a{color:var(--accent);text-decoration:none;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;}
+  .card h2{font-size:16px;margin:0 0 10px;color:var(--accent);}
+  code{background:#1a1a1a;border-radius:5px;padding:1px 6px;font-size:12.5px;color:var(--green);}
+  pre{background:#1a1a1a;border:1px solid var(--border);border-radius:6px;padding:12px;overflow:auto;font-size:12.5px;}
+  ul{margin:6px 0;padding-left:20px;}li{margin:5px 0;}
+  .ok{color:var(--green);} .bad{color:var(--red);}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px;}
+  td,th{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top;}
+  th{background:#2e2e2e;color:var(--fg);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>低内存 HTML/CSS 注入优化 — 更新日志</h1>
+  <div class="meta">
+    插件 <b>pickthought.koplugin</b> (KOReader, AGPL-3.0) ·
+    PR <a href="https://github.com/ksaMask123/pickthought.koplugin/pull/1" target="_blank">#1</a> ·
+    分支 <code>pr/html-css-inject</code> ·
+    修改日期 2026-08-13
+  </div>
+
+  <div class="card">
+    <h2>动机</h2>
+    <ul>
+      <li>CRE 渲染引擎按「带样式元素<span class="ok">单价 × 数量</span>」计费;基线 <code>cre_storage_size_factor=40</code> 仅约 <b>10MB</b> 预算。</li>
+      <li>大量「每标注<span class="bad">唯一 class</span> + 虚线 <code>border-bottom</code> 盒子」会撑爆样式数据缓存,导致 KPW3 开书段错误崩溃(见此前崩溃日志;《神秘复苏》7015 个虚线边框 span 即崩)。</li>
+      <li>目标:把所有注入元素压到最便宜的样式(文本级),在预算内承载更大注入量。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>具体改动点</h2>
+    <table>
+      <tr><th>文件</th><th>改动</th></tr>
+      <tr>
+        <td><code>annotations.lua</code></td>
+        <td>
+          去掉每标注唯一 class <code>pickthought-mark-&lt;hex&gt;</code>(含其 <code>Thoughts.mark_class</code> 调用);碰撞锚点改用
+          <code>&lt;a class="pickthought-link pickthought-mark" data-pickthought-range href&gt;</code>;折叠 2 个样式元素为 1。
+        </td>
+      </tr>
+      <tr>
+        <td><code>annotation_style.lua</code></td>
+        <td><code>border-bottom</code> 虚线 → <code>text-decoration</code>(文本级样式,单价≈0)。</td>
+      </tr>
+      <tr>
+        <td><code>tests/test_epub_inject.lua</code></td>
+        <td>断言跟进:折叠后类落到 <code>&lt;a&gt;</code> 上(原断言 <code>class="pickthought-mark</code> 改为锚点 <code>&lt;a&gt;</code>)。</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>影响范围</h2>
+    <ul>
+      <li>仅注入期 HTML 生成与 CSS;锚点弹出 / 跳转功能<span class="ok">不变</span>。</li>
+      <li>唯一标识由 <code>data-pickthought-range</code> 与 <code>href</code> 承载,去掉唯一 class 后样式零变化、功能不受影响。</li>
+      <li>未引入多书(D)逻辑。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>校验结果</h2>
+    <ul>
+      <li class="ok">LuaJIT 语法校验:通过。</li>
+      <li class="ok">单元测试: <b>123 passed / 0 failed</b>(基线 120 + 本 PR 3 项 EPUB 注入断言更新)。</li>
+      <li class="ok">多书(D)残留扫描: <b>0</b>(annotations.lua / annotation_style.lua 均无 book_ids / multi_book / ch.book_id / merge.book_id)。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

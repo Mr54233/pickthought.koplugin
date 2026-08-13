@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>撷思 pickthought.koplugin — EPUB 大文件磁盘中转 更新日志</title>
+<style>
+  :root{--bg:#1e1e1e;--card:#262626;--fg:#e0e0e0;--muted:#9a9a9a;--accent:#4ea1ff;--green:#5fd38a;--red:#ff7b72;--border:#3a3a3a;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.65;padding:24px;}
+  .wrap{max-width:900px;margin:0 auto;}
+  h1{font-size:22px;border-left:4px solid var(--accent);padding-left:12px;margin:0 0 6px;}
+  .meta{color:var(--muted);font-size:13px;margin-bottom:20px;}
+  .meta a{color:var(--accent);text-decoration:none;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;}
+  .card h2{font-size:16px;margin:0 0 10px;color:var(--accent);}
+  code{background:#1a1a1a;border-radius:5px;padding:1px 6px;font-size:12.5px;color:var(--green);}
+  pre{background:#1a1a1a;border:1px solid var(--border);border-radius:6px;padding:12px;overflow:auto;font-size:12.5px;}
+  ul{margin:6px 0;padding-left:20px;}li{margin:5px 0;}
+  .ok{color:var(--green);} .bad{color:var(--red);}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px;}
+  td,th{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top;}
+  th{background:#2e2e2e;color:var(--fg);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>EPUB 大文件磁盘中转 — 更新日志</h1>
+  <div class="meta">
+    插件 <b>pickthought.koplugin</b> (KOReader, AGPL-3.0) ·
+    PR <a href="https://github.com/ksaMask123/pickthought.koplugin/pull/2" target="_blank">#2</a> ·
+    分支 <code>pr/epub-disk-staging</code> ·
+    修改日期 2026-08-13
+  </div>
+
+  <div class="card">
+    <h2>动机</h2>
+    <ul>
+      <li>注入时整包在 Lua 堆里读→写,大图 / 字库 / 媒体(数 MB)造成<span class="bad">内存尖峰</span>,低内存设备 OOM 崩溃。</li>
+      <li>目标:非目标大条目走磁盘中转,不进 Lua 堆,灭 OOM 尖峰;失败一律回退内存路径(行为不变)。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>具体改动点</h2>
+    <table>
+      <tr><th>文件</th><th>改动</th></tr>
+      <tr>
+        <td><code>epub_inject.lua</code></td>
+        <td>
+          新增 <code>DISK_PATH_THRESHOLD = 512*1024</code>;非目标大条目(图 / 字库 / 媒体 ≥512KB 且路径含 <code>/</code>)
+          走 <code>extractToPath → 临时文件 → addPath</code> 磁盘中转,不进 Lua 堆;失败回退内存路径。
+        </td>
+      </tr>
+      <tr>
+        <td><code>epub_inject.lua</code></td>
+        <td class="ok">修复 bug1:<code>addPath</code> 参数写反(源 / zip 名错位)→ 源=刚抽出的临时文件、zip 名=原始 <code>entry.path</code>(否则顶层目录如 OEBPS/ 丢失)。</td>
+      </tr>
+      <tr>
+        <td><code>epub_inject.lua</code></td>
+        <td class="ok">修复 bug2:<code>disk_tmp</code> 被 <code>local</code> 遮蔽成 nil → 单点定义(否则传 nil 给中转直接报错,任何带大媒体书必崩)。</td>
+      </tr>
+      <tr>
+        <td><code>tests/stubs.lua</code></td>
+        <td>加 <code>extractToPath</code> / <code>addPath</code> 磁盘中转桩 + <code>_disk_add_calls</code> 计数器。</td>
+      </tr>
+      <tr>
+        <td><code>tests/test_epub_inject.lua</code></td>
+        <td>3 用例:大图走盘 / 大字体走盘 / 磁盘失败回退内存(逐字节原样)。</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>影响范围</h2>
+    <ul>
+      <li>EPUB 写包路径;单书态,<span class="ok">未引入多书</span>。</li>
+      <li>仅影响「非目标大条目」的拷贝通道;目标条目与样式注入不变。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>校验结果</h2>
+    <ul>
+      <li class="ok">LuaJIT 语法校验:通过。</li>
+      <li class="ok">单元测试: <b>126 passed / 0 failed</b>(含本 PR 3 项磁盘中转用例)。</li>
+      <li class="ok">多书(D)残留扫描: <b>0</b>。</li>
+      <li class="ok"><code>addPath</code> 修复 + <code>disk_tmp</code> 修复:均被测试覆盖。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

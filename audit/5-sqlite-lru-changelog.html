@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>撷思 pickthought.koplugin — SQLite 连接 LRU 更新日志</title>
+<style>
+  :root{--bg:#1e1e1e;--card:#262626;--fg:#e0e0e0;--muted:#9a9a9a;--accent:#4ea1ff;--green:#5fd38a;--red:#ff7b72;--border:#3a3a3a;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.65;padding:24px;}
+  .wrap{max-width:900px;margin:0 auto;}
+  h1{font-size:22px;border-left:4px solid var(--accent);padding-left:12px;margin:0 0 6px;}
+  .meta{color:var(--muted);font-size:13px;margin-bottom:20px;}
+  .meta a{color:var(--accent);text-decoration:none;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;}
+  .card h2{font-size:16px;margin:0 0 10px;color:var(--accent);}
+  code{background:#1a1a1a;border-radius:5px;padding:1px 6px;font-size:12.5px;color:var(--green);}
+  pre{background:#1a1a1a;border:1px solid var(--border);border-radius:6px;padding:12px;overflow:auto;font-size:12.5px;}
+  ul{margin:6px 0;padding-left:20px;}li{margin:5px 0;}
+  .ok{color:var(--green);} .bad{color:var(--red);}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px;}
+  td,th{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top;}
+  th{background:#2e2e2e;color:var(--fg);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SQLite 连接 LRU — 更新日志</h1>
+  <div class="meta">
+    插件 <b>pickthought.koplugin</b> (KOReader, AGPL-3.0) ·
+    PR <a href="https://github.com/ksaMask123/pickthought.koplugin/pull/3" target="_blank">#3</a> ·
+    分支 <code>pr/sqlite-lru</code>(基于 <code>pr/html-css-inject</code>) ·
+    修改日期 2026-08-13
+  </div>
+
+  <div class="card">
+    <h2>动机</h2>
+    <ul>
+      <li>每本开书都 <code>open</code> 一个 SQLite 句柄且<span class="bad">不释放</span>;多书 / 反复点锚点累积句柄 → 句柄 / 内存泄漏。</li>
+      <li>目标:per-book 句柄 LRU 上限,超量淘汰最久未用;关书释放单本句柄。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>具体改动点</h2>
+    <table>
+      <tr><th>文件</th><th>改动</th></tr>
+      <tr>
+        <td><code>thoughts.lua</code></td>
+        <td>per-book SQLite 句柄 LRU(<code>DB_CACHE_MAX=4</code>),<code>open_db</code> 超上限淘汰最久未用;<code>close_book</code> 释放单本句柄;<code>clear_memory_cache</code> 全清。</td>
+      </tr>
+      <tr>
+        <td><code>thoughts.lua</code></td>
+        <td class="ok">清理死代码:移除不再被调用的 <code>Thoughts.mark_class</code>(唯一 class 已由 PR① 去除)。</td>
+      </tr>
+      <tr>
+        <td><code>tests/test_thoughts_lru.lua</code></td>
+        <td>新:对真实 <code>thought_db.open/close</code> 做 spy,断言 LRU 淘汰 / close_book / 压力下不丢数据(用真实句柄,不破坏 save 写入路径)。</td>
+      </tr>
+      <tr>
+        <td><code>tests/run.lua</code></td>
+        <td>注册 <code>test_thoughts_lru</code>。</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>依赖</h2>
+    <ul>
+      <li>本 PR 基于 <code>pr/html-css-inject</code>(PR① 已删除 <code>mark_class</code> 调用,本 PR 删除其定义)。<span class="ok">请先合 PR①。</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>影响范围</h2>
+    <ul>
+      <li>SQLite 句柄生命周期(打开 / 淘汰 / 关闭);数据持久化不变(淘汰只关句柄、不删数据,重开仍可检索)。</li>
+      <li>未引入多书(D)逻辑。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>校验结果</h2>
+    <ul>
+      <li class="ok">LuaJIT 语法校验:通过。</li>
+      <li class="ok">单元测试: <b>126 passed / 0 failed</b>(含本 PR LRU 3 用例)。</li>
+      <li class="ok">多书(D)残留扫描: <b>0</b>。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>
