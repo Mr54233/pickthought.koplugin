@@ -19,6 +19,7 @@ local Binding = require("pickthought.binding")
 local ChapterMap = require("pickthought.chapter_map")
 local EpubInject = require("pickthought.epub_inject")
 local Json = require("pickthought.json")
+local SpineCache = require("pickthought.spine_cache")
 local U = require("pickthought.util")
 local logger = require("logger")
 
@@ -280,11 +281,69 @@ function Sync.run(deps)
     local map_count = 0
     local spine_total = #(map_meta.spine or {})
     local mapped_new, unmatched_new = {}, {}
+
+    -- B:spine 正文(原始 HTML)持久化缓存。仅当调用方显式开启 deps.spine_cache 且存在
+    -- map 缓存、且本批确有新章节要匹配(todo>0)时启用;测试不开启,行为完全不变。
+    -- 第 2 批起直接读缓存文本,不再从 EPUB 解压每个 spine 文件、不再重复 normalize。
+    -- 单书场景 map_cache_path 为字符串路径;缓存目录取 map.json 同目录下的 spine-<指纹>。
+    local spine_cache
+    if deps.spine_cache and deps.map_cache_path and #todo > 0 then
+        local sc_dir = SpineCache.dir_for(deps.map_cache_path, map_signature)
+        if sc_dir then
+            spine_cache = SpineCache.open(sc_dir, map_signature)
+            logger.info("[撷思][SpineCache]", spine_cache and (spine_cache:warm() and "warm" or "cold") or "disabled",
+                "spine=", tostring(spine_total))
+        end
+    end
+    local real_read_text = deps.read_text
+    local real_read_spine = deps.read_spine
+    local function cached_read_text(m, href)
+        if spine_cache then
+            local cached = spine_cache:get(href)
+            if cached ~= nil then return cached end
+        end
+        local html = real_read_text and real_read_text(m, href)
+        if spine_cache then spine_cache:put(href, html) end
+        return html
+    end
+    local function cached_read_spine(m, callback)
+        if spine_cache then
+            if spine_cache:warm() and spine_cache:covers(m.spine) then
+                -- 暖模式:直接从缓存流式喂,完全不碰 EPUB。
+                for index, item in ipairs(m.spine or {}) do
+                    local html = spine_cache:get(item.href)
+                    callback(item, html, html == nil and "缓存缺失" or nil, index)
+                end
+                return true
+            end
+            if real_read_spine then
+                -- 冷模式:真实读取并捕获进缓存。
+                return real_read_spine(m, function(item, content, err, index)
+                    spine_cache:put(item.href, content)
+                    return callback(item, content, err, index)
+                end)
+            end
+            -- 无真实 read_spine:走 read_text 路径(仍经缓存)。
+            for index, item in ipairs(m.spine or {}) do
+                callback(item, cached_read_text(m, item.href), nil, index)
+            end
+            return true
+        end
+        -- 缓存未启用:完全等价于原行为,绝不会误调 read_text。
+        if real_read_spine then
+            return real_read_spine(m, callback)
+        end
+        for index, item in ipairs(m.spine or {}) do
+            callback(item, real_read_text and real_read_text(m, item.href), nil, index)
+        end
+        return true
+    end
+
     if #todo > 0 then
         local map_started_at = os.time()
         if deps.read_spine then
             mapped_new, unmatched_new = ChapterMap.build_stream(map_meta.spine, function(visit)
-                return deps.read_spine(map_meta, function(item, content, err, index)
+                return cached_read_spine(map_meta, function(item, content, err, index)
                     map_count = map_count + 1
                     step("map", map_count, spine_total, item and item.href)
                     visit(item, content, err, index)
@@ -294,12 +353,14 @@ function Sync.run(deps)
             mapped_new, unmatched_new = ChapterMap.build(map_meta.spine, function(href)
                 map_count = map_count + 1
                 step("map", map_count, spine_total, href)
-                return deps.read_text(map_meta, href)
+                return cached_read_text(map_meta, href)
             end, todo)
         end
+        if spine_cache then spine_cache:close() end
         logger.info("[撷思][ChapterMap] completed",
             "spine=", tostring(spine_total), "chapters=", tostring(#todo),
             "streamed=", tostring(deps.read_spine ~= nil),
+            "spine_cache=", spine_cache and (spine_cache:warm() and "warm" or "cold") or "off",
             "elapsed_s=", tostring(math.max(0, os.time() - map_started_at)))
     end
 
