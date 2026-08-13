@@ -25,6 +25,72 @@ M.CSS = [[
 
 M.INLINE_STYLE_ID = "pickthought-annotation-style"
 
+-- Runtime choices only override the shared annotation classes in the open
+-- document. The EPUB keeps M.CSS as the stable fallback for offline reading.
+M.DEFAULT_RUNTIME_STYLE = "default"
+M.RUNTIME_STYLE_CHOICES = {
+    "default",
+    "thin_solid",
+    "thin_dashed",
+    "hidden",
+}
+
+local RUNTIME_CSS = {
+    thin_solid = [[
+/* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_BEGIN */
+.pickthought-inline-mark,
+.pickthought-mark {
+    text-decoration: none !important;
+    padding-bottom: 0 !important;
+}
+.pickthought-inline-mark {
+    border-bottom: 1px solid currentColor !important;
+}
+.pickthought-mark {
+    border-bottom: 1px solid #ff6b35 !important;
+}
+/* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_END */
+]],
+    thin_dashed = [[
+/* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_BEGIN */
+.pickthought-inline-mark,
+.pickthought-mark {
+    text-decoration: none !important;
+    padding-bottom: 0 !important;
+}
+.pickthought-inline-mark {
+    border-bottom: 1px dashed currentColor !important;
+}
+.pickthought-mark {
+    border-bottom: 1px dashed #ff6b35 !important;
+}
+/* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_END */
+]],
+    hidden = [[
+/* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_BEGIN */
+.pickthought-inline-mark,
+.pickthought-mark {
+    text-decoration: none !important;
+    border-bottom: 0 !important;
+    padding-bottom: 0 !important;
+}
+/* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_END */
+]],
+}
+
+function M.normalize_runtime_style(value)
+    value = tostring(value or M.DEFAULT_RUNTIME_STYLE)
+    for _, key in ipairs(M.RUNTIME_STYLE_CHOICES) do
+        if value == key then return key end
+    end
+    return M.DEFAULT_RUNTIME_STYLE
+end
+
+function M.runtime_css(value)
+    local key = M.normalize_runtime_style(value)
+    return RUNTIME_CSS[key] or ""
+end
+
 function M.inline_style_tag()
     return '<style id="' .. M.INLINE_STYLE_ID .. '" type="text/css">\n'
         .. M.CSS
