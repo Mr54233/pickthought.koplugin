@@ -142,6 +142,8 @@ end
 function M.archiver_mock(files, mock_opts)
     local mod = {}
     mock_opts = mock_opts or {}
+    mod._disk = {}          -- 模拟“磁盘”:路径 → 内容,供 extractToPath/addPath 流转
+    mod._disk_add_calls = 0 -- 统计走磁盘中转(addPath)的条目数,验证大条目确实走盘
 
     local Reader = {}
     Reader.__index = Reader
@@ -186,6 +188,14 @@ function M.archiver_mock(files, mock_opts)
         self.index = self.index + 0.1
         return files[entry.index].content
     end
+    -- 磁盘中转桩:模拟 extractToPath 把条目内容写到“磁盘”(内存表),供 addPath 读回。
+    function Reader:extractToPath(key, dest_path)
+        if mock_opts.fail_extract_path == key then return end
+        local entry = self.entries[key]
+        if not entry then return end
+        mod._disk[dest_path] = files[entry.index].content
+        return true
+    end
     function Reader:close(keep_info)
         self.index = nil
         if not keep_info then self.entries = {}; self.size = 0 end
@@ -215,6 +225,24 @@ function M.archiver_mock(files, mock_opts)
         self.entries[#self.entries + 1] = {
             path = entry_path, content = content, mtime = mtime, compression = self.compression,
         }
+        return true
+    end
+    -- 磁盘中转桩:模拟 addPath 从“磁盘”(内存表)读回内容,追加到压缩条目。
+    function Writer:addPath(src_path, entry_path, method, mtime)
+        self.err = nil
+        if mock_opts.fail_write_path == entry_path then
+            self.err = "mock 写入失败"
+            return
+        end
+        local content = mod._disk[src_path]
+        if content == nil then
+            self.err = "mock 读盘失败:" .. tostring(src_path)
+            return
+        end
+        self.entries[#self.entries + 1] = {
+            path = entry_path, content = content, mtime = mtime, compression = self.compression,
+        }
+        mod._disk_add_calls = (mod._disk_add_calls or 0) + 1
         return true
     end
     function Writer:close()
