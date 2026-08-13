@@ -68,8 +68,10 @@ T.case("端到端注入", function()
     for _, e in ipairs(entries) do by_path[e.path] = e end
     local ch1 = by_path["OEBPS/Text/ch1.xhtml"]
     T.ok(ch1.compression == "deflate", "正文用 deflate")
-    T.ok(ch1.content:find('pickthought-mark', 1, true), "锚点 span 注入")
+    T.ok(ch1.content:find('pickthought-mark', 1, true), "锚点标记注入")
     T.ok(ch1.content:find('href="#pickthought-', 1, true), "想法链接注入(专属前缀)")
+    T.ok(not ch1.content:find('\n    color: #ff6b35;', 1, true), "想法正文不被染成橙色")
+    T.ok(ch1.content:find('text-decoration-color: #ff6b35;', 1, true), "橙色只用于下划线")
     T.ok(ch1.content:find('id="pickthought-annotation-style"', 1, true), "内联样式注入 head")
     T.ok(ch1.content:find("</title>", 1, true) and ch1.content:find("春江潮水", 1, true), "原结构保留")
     T.eq(by_path["OEBPS/Text/ch2.xhtml"].content, CH2, "未涉及章节逐字节原样")
@@ -340,6 +342,22 @@ T.case("重叠划线带想法时并入存活锚点", function()
     end
     T.ok(ch1.content:find("pickthought-mark", 1, true), "存活锚点升级为想法虚线")
     T.ok(ch1.content:find('href="#pickthought-', 1, true), "存活锚点带想法链接")
+end)
+
+T.case("想法链接不嵌套已有脚注链接", function()
+    local files = book_files()
+    files[4] = {path = "OEBPS/Text/ch1.xhtml", content = [[<html><head></head><body>
+<p><a class="noteref" href="#fn1">春江潮水连海平</a>,海上明月共潮生。</p>
+<aside id="fn1">脚注</aside></body></html>]]}
+    local stats, err, Arc = run_inject(files, CHAPTERS)
+    T.ok(stats, "已有脚注链接内也应成功注入: " .. tostring(err))
+    local ch1
+    for _, e in ipairs(STUBS.written(Arc._last_writer)) do
+        if e.path == "OEBPS/Text/ch1.xhtml" then ch1 = e.content end
+    end
+    T.ok(ch1:find('<a class="noteref"', 1, true), "原脚注链接保留")
+    T.ok(ch1:find('<span class="pickthought-mark"', 1, true), "脚注链接内使用独立标注")
+    T.ok(not ch1:find('<a class="pickthought-link', 1, true), "脚注链接内不再嵌套想法链接")
 end)
 
 T.case("rename 目标已存在时重试", function()
