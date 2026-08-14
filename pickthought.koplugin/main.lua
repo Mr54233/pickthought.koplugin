@@ -102,6 +102,11 @@ function Plugin:_sync_status_item()
     return {text="同步进行中…(点按查看进度)",callback=self:safe("sync_status",function() self:_show_active_sync_dialog() end)}
 end
 
+function Plugin:annotation_style_item()
+    return {text="划线样式（"..self:annotation_style_label().."）",
+        sub_item_table_func=function() return self:annotation_style_menu() end}
+end
+
 function Plugin:home_menu()
     local items={}
     items[#items+1]=self:_sync_status_item()
@@ -114,6 +119,7 @@ function Plugin:home_menu()
     items[#items+1]={text="选择书籍更多操作(重注 / 续拉 / 还原)",callback=self:safe("fm_actions",function()
         self:pick_book("选择 EPUB(长按文件名选中)",function(path) self:book_actions(path) end)
     end)}
+    items[#items+1]=self:annotation_style_item()
     items[#items+1]={text="账户",sub_item_table_func=function() return self:account_menu() end}
     items[#items+1]={text="设置",sub_item_table_func=function() return self:settings_menu() end}
     items[#items+1]={text="更新与关于",sub_item_table_func=function() return self:update_about_menu() end}
@@ -128,8 +134,7 @@ function Plugin:reader_menu()
     local doc_path=self:current_doc_path()
     local doc_bound=doc_path and Binding.get(self.store,doc_path)
     if doc_bound then
-        items[#items+1]={text="划线样式（"..self:annotation_style_label().."）",
-            sub_item_table_func=function() return self:annotation_style_menu() end}
+        items[#items+1]=self:annotation_style_item()
         local state=self:_sync_state(doc_bound.book_id)
         if state and (tonumber(state.pending) or 0)>0 then
             items[#items+1]={text=string.format("继续拉取后续章节(还剩 %d 章)",state.pending),
@@ -189,14 +194,17 @@ function Plugin:book_actions(path)
     local dialog
     local function act(fn) return function() UIManager:close(dialog); fn() end end
     local rows={}
+    rows[#rows+1]={{text=bound and "重新绑定微信读书" or "绑定微信读书",
+        callback=act(function() self:bind_book(path) end)}}
     rows[#rows+1]={{text="同步划线与想法",callback=act(function() self:sync_entry(path) end)}}
     if bound then
+        rows[#rows+1]={{text="划线样式（"..self:annotation_style_label().."）",
+            callback=act(function() self:list("划线样式",self:annotation_style_menu()) end)}}
         local state=self:_sync_state(bound.book_id)
         if state and (tonumber(state.pending) or 0)>0 then
             rows[#rows+1]={{text=string.format("继续拉取后续章节(还剩 %d 章)",state.pending),
                 callback=act(function() self:sync_entry(path,"sync") end)}}
         end
-        rows[#rows+1]={{text="清理本书数据",callback=act(function() self:reset_book_data(path) end)}}
     end
     if self:_has_reinject_cache(path) then
         rows[#rows+1]={{text="重新注入(用上次数据,离线)",callback=act(function() self:sync_entry(path,"reinject") end)}}
@@ -204,8 +212,6 @@ function Plugin:book_actions(path)
     if bound or U.file_exists(path..".orig") then
         rows[#rows+1]={{text="重置本书(清数据+还原原版)",callback=act(function() self:reset_book_data(path) end)}}
     end
-    rows[#rows+1]={{text=bound and "重新绑定微信读书" or "绑定微信读书",
-        callback=act(function() self:bind_book(path) end)}}
     rows[#rows+1]={{text="取消",callback=function() UIManager:close(dialog) end}}
     local title=self:doc_title_guess(path)
     if bound then title=title.."\n已绑定:"..tostring(bound.title or bound.book_id) end
