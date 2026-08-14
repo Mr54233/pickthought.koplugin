@@ -500,22 +500,46 @@ function Sync.run(deps)
         end
         backed_up = true
     elseif clean_source and src == clean_source and not append then
-        -- 从外部干净源全量重建:当前 doc_path(可能脏注入版)被注入版顶替;
-        -- 同时把干净源固化为 .orig 备份,保证后续增量重注有干净基准(不破坏用户原文件)。
-        -- 复制失败不致命:注入版已生成,仅 .orig 未刷新,提示用户后续重注需再次指定。
-        if not copy_file(clean_source, backup) then
-            logger.warn("[撷思][Sync] 干净源固化到 .orig 失败,注入版已生成但 .orig 未刷新;" ..
-                "后续重注需再次指定干净源", tostring(clean_source))
+        -- 从外部干净源全量重建:脏 doc_path(当前注入版)先暂存为 .old 以便失败回滚,
+        -- 再把干净源固化为 .orig 备份,保证后续增量重注有干净基准(不破坏用户原文件)。
+        local old_path = doc_path .. ".old"
+        if file_exists(old_path) then
+            local ok_rm, rm_err = remove(old_path)
+            if not ok_rm then
+                remove(temp_dest)
+                return nil, "无法清理旧的暂存文件,请重试"
+            end
         end
+        if not rename(doc_path, old_path) then
+            remove(temp_dest)
+            return nil, "无法暂存原注入版(请先关闭本书或确认未被占用)"
+        end
+        if not copy_file(clean_source, backup) then
+            -- 固化失败:恢复原注入版,保住用户当前书,不丢失数据。
+            rename(old_path, doc_path)
+            remove(temp_dest)
+            return nil, "干净源固化到 .orig 失败,已恢复原注入版;后续重注需再次指定干净源"
+        end
+        backed_up = true
     end
     local ok_swap, swap_err = rename(temp_dest, doc_path)
     if not ok_swap then
         remove(temp_dest)
-        -- 首次注入已经让原书离位时才需要回滚。增量失败时旧注入版仍在原路径，
+        -- 首次注入/干净源重建已让原书离位时才需要回滚。增量失败时旧注入版仍在原路径，
         -- 绝不能删除它或移动干净 .orig；上一代只在原子替换成功时由系统丢弃。
-        if backed_up and not file_exists(doc_path) then rename(backup, doc_path) end
+        if backed_up and not file_exists(doc_path) then
+            local old_path = doc_path .. ".old"
+            if file_exists(old_path) then
+                rename(old_path, doc_path)
+            else
+                rename(backup, doc_path)
+            end
+        end
         return nil, "无法替换原书:" .. tostring(swap_err or "重命名失败")
     end
+    -- 干净源重建成功:清理暂存的脏 .old(已无回滚需要,且避免占用空间)。
+    local old_path = doc_path .. ".old"
+    if file_exists(old_path) then pcall(remove, old_path) end
 
     local underlines_injected = math.min(total_underlines,
         math.max(0, tonumber(stats.underlines_resolved) or 0))
