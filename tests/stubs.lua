@@ -137,7 +137,8 @@ end
 --   对未迭代到的条目返回 nil(真实实现如此,曾掩盖过一个真机必炸的 bug)。
 -- - Writer 的 open/setZipCompression/addFileFromMemory 成功返回 true,失败返回 nil 并置 self.err。
 -- files: 有序数组 {{path=..., content=...}, ...} 模拟 zip 条目顺序。
--- mock_opts(可选):{fail_write_path = "..."} 让 Writer 写到该条目时失败。
+-- mock_opts(可选):{fail_write_path = "...", eof_write_path = "..."} 模拟写入失败或
+-- 写入完成后以 ARCHIVE_EOF 返回 false。
 -- mod._last_writer 记录最后创建的 Writer 供测试断言。
 function M.archiver_mock(files, mock_opts)
     local mod = {}
@@ -248,6 +249,7 @@ function M.archiver_mock(files, mock_opts)
             entry_path = entry_path, source_path = src_path, recursive = recursive,
         }
         mod._disk_add_calls = (mod._disk_add_calls or 0) + 1
+        if mock_opts.eof_write_path == entry_path then return false end
         return true
     end
     function Writer:close()

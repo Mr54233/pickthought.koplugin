@@ -464,6 +464,23 @@ T.case("大字体/媒体(woff2/mp3)同样走磁盘中转", function()
     T.eq(by_path["OEBPS/Audio/clip.mp3"].content, blob, "大媒体逐字节原样")
 end)
 
+T.case("磁盘中转写入完成但返回 EOF false,不重复写入", function()
+    local big = string.rep("E", 600 * 1024)
+    local files = book_files()
+    files[#files + 1] = {path = "OEBPS/Images/big.png", content = big}
+    local stats, err, Arc = run_inject(files, CHAPTERS,
+        {eof_write_path = "OEBPS/Images/big.png"}, {
+        read_memory_available_kb = function() return 300 * 1024 end,
+    })
+    T.ok(stats, "正常 EOF 返回 false 不应导致同步失败: " .. tostring(err))
+    T.eq(Arc._disk_add_calls, 1, "EOF 返回 false 后不应回退并重复 addPath")
+    local count = 0
+    for _, entry in ipairs(STUBS.written(Arc._last_writer)) do
+        if entry.path == "OEBPS/Images/big.png" then count = count + 1 end
+    end
+    T.eq(count, 1, "大媒体在副本中只出现一次")
+end)
+
 T.case("磁盘中转失败回退内存路径,内容仍逐字节", function()
     local big = string.rep("Z", 600 * 1024)
     local files = book_files()

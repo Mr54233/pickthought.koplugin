@@ -215,7 +215,8 @@ local function get_archiver(archiver)
 end
 
 -- 非目标大条目走磁盘拷贝:extractToPath 抽到临时文件 → addPath 写回,全程不进 Lua 堆,
--- 灭大图/字库/媒体造成的 OOM 尖峰。失败返回 false,调用方回退内存路径(行为不变)。
+-- 灭大图/字库/媒体造成的 OOM 尖峰。抽取失败返回 false,调用方回退内存路径;
+-- addPath 正常读到 EOF 时可能返回 false 但不设置 err,此时不能重复写入。
 -- 注意 addPath 恒按 entry_root/rel 拼 zip 路径,顶层无斜杠条目(如 mimetype,已单独处理)
 -- 无法用其正确表示,故 first 缺失时直接回退。
 local function copy_entry_via_disk(reader, writer, entry, mtime, disk_tmp_base)
@@ -234,8 +235,9 @@ local function copy_entry_via_disk(reader, writer, entry, mtime, disk_tmp_base)
     -- KOReader 的 addPath(entry_root, root, recursive, mtime):第一个参数是
     -- ZIP 内目标路径,第二个才是刚抽出的本地源文件。
     local ok_add = writer:addPath(entry.path, source_path, true, mtime)
+    local add_err = writer.err
     pcall(U.remove_tree, sub)
-    if not ok_add then return nil, "addPath" end
+    if not ok_add and add_err then return nil, "addPath" end
     return true
 end
 
