@@ -148,7 +148,7 @@ function Plugin:reader_menu()
         end
     end
     if doc_path and self:_has_reinject_cache(doc_path) then
-        items[#items+1]={text="重新注入(用上次数据,离线)",callback=self:safe("reinject",function() self:sync_entry(doc_path,"reinject") end)}
+        items[#items+1]={text="重新注入(用上次数据,离线)",callback=self:safe("reinject",function() self:reinject_with_clean(doc_path) end)}
     end
     if doc_bound or (doc_path and U.file_exists(doc_path..".orig")) then
         items[#items+1]={text="重置本书(清数据+还原原版)",callback=self:safe("reset",function() self:reset_book_data(doc_path) end)}
@@ -215,7 +215,7 @@ function Plugin:book_actions(path)
         end
     end
     if self:_has_reinject_cache(path) then
-        rows[#rows+1]={{text="重新注入(用上次数据,离线)",callback=act(function() self:sync_entry(path,"reinject") end)}}
+        rows[#rows+1]={{text="重新注入(用上次数据,离线)",callback=act(function() self:reinject_with_clean(path) end)}}
     end
     if bound or U.file_exists(path..".orig") then
         rows[#rows+1]={{text="重置本书(清数据+还原原版)",callback=act(function() self:reset_book_data(path) end)}}
@@ -757,6 +757,28 @@ function Plugin:_has_reinject_cache(path)
     return U.file_exists(self.store:book_cache_path(bound.book_id).."/sync-cache/chapters.json")
 end
 
+-- 离线重注入口:先让用户决定是否提供一份干净原书作为注入源。
+-- 当 .orig 备份被污染(本身是撷思版)时,必须选一份干净原书才能重注(clean_source 逃生舱);
+-- 选「直接重注」则走旧逻辑(依赖 .orig,脏备份会报错提示恢复原书)。
+function Plugin:reinject_with_clean(path)
+    local ConfirmBox=require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text="离线重注需要一份干净的原始 EPUB 作为注入源。\n\n"..
+            "· 若原书备份(.orig)完好,可直接重注;\n"..
+            "· 若 .orig 已被污染(本身已是撷思版),必须选一份干净原书才能重注。",
+        ok_text="选择干净原书",
+        ok_callback=function()
+            self:pick_book("选择干净的原始 EPUB（未注入的）",function(clean)
+                self:sync_entry(path,"reinject",{clean_source=clean})
+            end)
+        end,
+        cancel_text="直接重注(用现有备份)",
+        cancel_callback=function()
+            self:sync_entry(path,"reinject")
+        end,
+    })
+end
+
 -- 读同步进度状态(child 写的 state.json);60s 内存缓存,翻页检查零成本。
 function Plugin:_sync_state(book_id)
     local now=os.time()
@@ -804,7 +826,7 @@ function Plugin:_start_sync_task(path,bound,mode,opts)
     if title=="" then title=self:doc_title_guess(path) end
     local runtime={doc_path=path,book_id=bound.book_id,title=title,mode=mode,started_at=os.time(),dialog=nil,background=false}
     local ok,err=self.sync_task:start({doc_path=path,book_id=bound.book_id,title=title,mode=mode,
-            allow_memory_retry=opts.background ~= true},
+            clean_source=opts.clean_source,allow_memory_retry=opts.background ~= true},
         function(state) self:_on_sync_progress(runtime,state) end,
         function(result) self:_finish_sync(runtime,result) end)
     if not ok then
