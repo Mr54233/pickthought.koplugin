@@ -49,7 +49,24 @@ local function set_user_version(db, v)
     pcall(function() db:exec("PRAGMA user_version=" .. tostring(v)) end)
 end
 
--- 创建表 + 迁移追踪:user_version 低于当前则在此升级(目前 v1 无结构性迁移,仅补版本号)。
+-- 迁移分发点:目前仅 SCHEMA_VERSION=1,无结构性迁移。未来升级时按 user_version
+-- 顺序在此执行,例如:for v = from+1, SCHEMA_VERSION do MIGRATIONS[v](db) end
+-- 注意:本插件无线上账号/云同步,想法可由本地注入源(离线缓存)重建,故 open 内
+-- 不做"数据迁移式重建";损坏库交由 isolate_corrupt 隔离,由用户/同步重新注入。
+local MIGRATIONS = {}  -- 预留:MIGRATIONS[2] = function(db) ... end
+
+local function migrate(db, from_version)
+    for v = (from_version or 0) + 1, SCHEMA_VERSION do
+        if MIGRATIONS[v] then
+            local ok, err = pcall(MIGRATIONS[v], db)
+            if not ok then
+                logger.warn("[撷思][ThoughtDB] 迁移 v" .. tostring(v) .. " 失败", tostring(err))
+            end
+        end
+    end
+end
+
+-- 创建表 + 迁移追踪:user_version 低于当前则在此升级(目前 v1 仅补版本号,无结构性迁移)。
 local function ensure_schema(db)
     local ok = pcall(function()
         db:exec([[CREATE TABLE IF NOT EXISTS review_items (
@@ -67,6 +84,7 @@ local function ensure_schema(db)
     if not ok then return false end
     local ver = get_user_version(db)
     if ver < SCHEMA_VERSION then
+        migrate(db, ver)
         set_user_version(db, SCHEMA_VERSION)
     end
     return true
@@ -89,28 +107,66 @@ end
 
 -- 完整性核验:PRAGMA integrity_check 返回 "ok" 即健康,否则收集损坏描述。
 -- FAT32/SD 卡易损,KPW3 上收益最大。
+-- 返回约定(与 open 的契约):
+--   true                  → 健康(detail 为 nil)
+--   false, detail         → 确认损坏(detail 为损坏描述,非异常)
+--   抛错                  → 核验过程本身失败(prepare/step 异常、I/O、busy/locked、
+--                          格式异常等)。open 必须按"过程失败"处理,绝不删库。
+--   (db 为 nil 时返回 false,"no db",属调用方契约错误,不抛错。)
 function ThoughtDB.integrity_check(db)
     if not db then return false, "no db" end
-    local ok, stmt = pcall(function() return db:prepare("PRAGMA integrity_check") end)
-    if not ok or not stmt then return false, "prepare failed" end
-    local bad, step_ok, row = {}, pcall(function() return stmt:step() end)
-    while step_ok and row do
+    local stmt = db:prepare("PRAGMA integrity_check")
+    if not stmt then error("integrity_check prepare 失败") end
+    local bad = {}
+    local row = stmt:step()
+    while row do
         if tostring(row[1] or "") ~= "ok" then bad[#bad + 1] = tostring(row[1]) end
-        step_ok, row = pcall(function() return stmt:step() end)
+        row = stmt:step()
     end
-    pcall(function() stmt:close() end)
-    if not step_ok then return false, "step failed" end
+    stmt:close()
     if #bad == 0 then return true end
     return false, table.concat(bad, "; ")
 end
 
--- WAL 检查点:把 WAL 折叠进主库并截断,减小断电损坏面、回收 -wal/-shm 文件。
-function ThoughtDB.checkpoint(db)
-    if not db then return false end
-    return pcall(function() db:exec("PRAGMA wal_checkpoint(TRUNCATE)") end)
+-- 损坏隔离:把 .db/-wal/-shm 重命名为 .corrupt-<ts>,保留证据供诊断/人工恢复。
+-- 用 os.rename(而非 os.remove)以保证想法数据可恢复,绝不静默丢弃。
+function ThoughtDB.isolate_corrupt(book_dir)
+    local base = ThoughtDB.db_path(book_dir)
+    local ts = os.time()
+    local target = base .. ".corrupt-" .. tostring(ts)
+    if not os.rename(base, target) then return nil end
+    -- 一并隔离 WAL/SHM(若存在);失败不阻断主隔离。
+    os.rename(base .. "-wal", target .. "-wal")
+    os.rename(base .. "-shm", target .. "-shm")
+    return target
 end
 
-function ThoughtDB.open(book_dir, _attempt)
+-- WAL 检查点:把 WAL 折叠进主库并截断,减小断电损坏面、回收 -wal/-shm 文件。
+-- 读取 PRAGMA 真实返回 (total_frames, ckpt_frames, status);status=0 才算成功,
+-- busy/失败不再被当作"成功"。
+function ThoughtDB.checkpoint(db)
+    if not db then return false, "no db" end
+    local stmt = db:prepare("PRAGMA wal_checkpoint(TRUNCATE)")
+    if not stmt then
+        logger.warn("[撷思][ThoughtDB] checkpoint prepare 失败")
+        return false, "prepare failed"
+    end
+    local ok, row = pcall(function() return stmt:step() end)
+    pcall(function() stmt:close() end)
+    if not ok or not row then
+        logger.warn("[撷思][ThoughtDB] checkpoint step 失败")
+        return false, "step failed"
+    end
+    -- 列序:total_frames, ckpt_frames, status
+    local status = tonumber(row[3]) or -1
+    if status ~= 0 then
+        logger.warn("[撷思][ThoughtDB] checkpoint 未完成, status=", status)
+        return false, "checkpoint busy/status=" .. tostring(status)
+    end
+    return true
+end
+
+function ThoughtDB.open(book_dir)
     if type(book_dir) ~= "string" or book_dir == "" then return nil end
     local SQ3 = get_sq3()
     if not SQ3 then return nil end
@@ -118,16 +174,22 @@ function ThoughtDB.open(book_dir, _attempt)
     local path = ThoughtDB.db_path(book_dir)
     local db = do_open(path)
     if not db then return nil end
-    -- 打开即核验完整性;损坏则丢弃本地缓存(想法可由注入源重建),重建干净库,仅重试一次防递归。
-    local ic_ok, healthy, msg = pcall(ThoughtDB.integrity_check, db)
-    if not ic_ok or healthy ~= true then
-        logger.warn("[撷思][ThoughtDB] integrity_check 异常,重建", path, tostring(msg or healthy))
+    -- 打开即核验完整性。必须区分两类失败(作者评审意见 #4):
+    -- (1) 过程失败(prepare/step 抛错、I/O、busy/locked):不是损坏,保留原库,绝不删。
+    -- (2) 确认损坏:隔离(重命名)而非删除,绝不静默重建空库。
+    local ic_ok, healthy, detail = pcall(ThoughtDB.integrity_check, db)
+    if not ic_ok then
+        logger.warn("[撷思][ThoughtDB] integrity_check 过程失败,保留原库", path, tostring(healthy))
         pcall(ThoughtDB.close, db)
-        if not _attempt then
-            ThoughtDB.remove_db(book_dir)
-            return ThoughtDB.open(book_dir, true)
+        return nil, "integrity_check 过程失败: " .. tostring(healthy)
+    elseif healthy ~= true then
+        logger.warn("[撷思][ThoughtDB] integrity_check 检出损坏,隔离而非删除", path, tostring(detail))
+        pcall(ThoughtDB.close, db)
+        local iso = ThoughtDB.isolate_corrupt(book_dir)
+        if iso then
+            return nil, "已隔离损坏库至 " .. iso .. ";想法可由本地注入源(离线缓存)重建"
         end
-        return nil
+        return nil, "损坏库隔离失败(无法重命名);请手动检查 " .. path
     end
     return db
 end

@@ -327,6 +327,9 @@ package.preload["lua-ljsqlite3/init"] = function()
                     stmt._ic_done = true
                     return { "ok" }
                 end
+                if sql:find("wal_checkpoint") then
+                    return { 0, 0, 0 }  -- total_frames, ckpt_frames, status(0=成功)
+                end
                 if sql:find("user_version") then return { store.user_version or 0 } end
                 return nil
             end
