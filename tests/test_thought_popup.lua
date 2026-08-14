@@ -38,11 +38,13 @@ package.preload["ui/widget/textboxwidget"] = function()
 end
 
 package.preload["ui/uimanager"] = function()
-    local UIManager = {}
+    local UIManager = {dirty = {}}
     function UIManager:show(widget) self.active = widget end
     function UIManager:close(widget) if self.active == widget then self.active = nil end end
     function UIManager:isWidgetShown(widget) return self.active == widget end
-    function UIManager:setDirty() end
+    function UIManager:setDirty(widget, mode, region)
+        self.dirty[#self.dirty + 1] = {widget = widget, mode = mode, region = region}
+    end
     return UIManager
 end
 
@@ -77,9 +79,13 @@ package.preload["ui/widget/textviewer"] = function()
             resetScroll = function() end,
             scrollText = function() end,
         }
-        self.textw = {dimen = {}}
-        self.frame = {dimen = {}}
-        self.titlebar = {setTitle = function() end}
+        self.textw = {dimen = {id = "text"}}
+        self.frame = {dimen = {id = "frame"}}
+        self.titlebar = {
+            setTitle = function(widget)
+                widget.set_title_calls = (widget.set_title_calls or 0) + 1
+            end,
+        }
         self.button_table = nil
     end
 
@@ -113,6 +119,7 @@ for _, module_name in ipairs({
 end
 
 local Popup = require("pickthought.thought_popup")
+local UIManager = require("ui/uimanager")
 
 T.case("想法弹窗绑定实体翻页键", function()
     local popup = Popup.show{items = {
@@ -130,8 +137,15 @@ T.case("想法弹窗绑定实体翻页键", function()
         "PgFwd 应绑定下一条想法")
 
     T.eq(popup.page_index, 1, "弹窗从第一条开始")
+    T.eq(popup.titlebar.set_title_calls, 1, "顶部摘录只在初始化时设置")
+    UIManager.dirty = {}
     T.ok(popup:onKeyPress("PgFwd"), "PgFwd 事件应被消费")
     T.eq(popup.page_index, 2, "PgFwd 切换到下一条")
+    T.eq(popup.titlebar.set_title_calls, 1, "按键切换不重新设置顶部摘录")
+    local dirty = UIManager.dirty[#UIManager.dirty]
+    T.eq(dirty.widget, popup, "正文刷新仍标记弹窗")
+    T.eq(dirty.region, popup.textw.dimen, "正文刷新区域使用 textw")
+    T.ok(dirty.region ~= popup.frame.dimen, "正文刷新不使用整个弹窗区域")
     T.ok(popup:onKeyPress("PgBack"), "PgBack 事件应被消费")
     T.eq(popup.page_index, 1, "PgBack 切换到上一条")
 
