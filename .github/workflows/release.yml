@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: read
 
 concurrency:
   group: pickthought-release
@@ -67,26 +68,179 @@ jobs:
           tag_ver="${GITHUB_REF_NAME#v}"
           echo "version=$tag_ver" >> "$GITHUB_OUTPUT"
 
-      - name: 按类型分类生成更新摘要
+      - name: 按主线提交生成去重更新摘要
         id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # 用 tag ref 定位区间，不依赖 HEAD（bump 步骤会 checkout main 导致 HEAD 漂移）
+          # 只读取主线第一父提交，避免合并分支的同一改动重复进入摘要。
           current_tag="${GITHUB_REF_NAME}"
           prev=$(git describe --tags --abbrev=0 "${current_tag}^" 2>/dev/null || true)
           if [ -z "$prev" ]; then prev="HEAD~20"; fi
-          all_commits=$(git log --pretty=format:"%s" "${prev}..${current_tag}" 2>/dev/null || echo "")
-          perf=$(echo "$all_commits" | grep -iE '^perf' | sed 's/^[^:]*: //' || true)
-          feat=$(echo "$all_commits" | grep -iE '^feat' | sed 's/^[^:]*: //' || true)
-          fix=$(echo "$all_commits" | grep -iE '^fix' | sed 's/^[^:]*: //' || true)
-          style=$(echo "$all_commits" | grep -iE '^style' | sed 's/^[^:]*: //' || true)
-          notes=""
-          if [ -n "$perf" ]; then notes="性能优化："$'\n'"$perf"$'\n\n'; fi
-          if [ -n "$feat" ]; then notes="${notes}新功能："$'\n'"$feat"$'\n\n'; fi
-          if [ -n "$fix" ]; then notes="${notes}问题修复："$'\n'"$fix"$'\n\n'; fi
-          if [ -n "$style" ]; then notes="${notes}样式优化："$'\n'"$style"$'\n\n'; fi
-          notes=$(echo "$notes" | sed '/^$/N;/^\n$/D')
-          if [ -z "$notes" ]; then notes="版本发布"; fi
-          { echo "notes<<EOF"; echo "$notes"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          python3 - "$prev" "$current_tag" <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import unicodedata
+
+          prev, current = sys.argv[1:3]
+          repository = os.environ["GITHUB_REPOSITORY"]
+          output_path = os.environ["GITHUB_OUTPUT"]
+
+          raw = subprocess.check_output([
+              "git", "log", "--first-parent", "--format=%H%x09%s",
+              f"{prev}..{current}",
+          ], text=True, encoding="utf-8")
+
+          # 历史提交已经进入主线，保留中文显示；之后的新提交应直接使用中文描述。
+          translations = {
+              "fix(epub): use correct addPath semantics": "修正 addPath 调用语义",
+              "fix(inject): preserve thought text color": "保留想法正文颜色",
+              "feat(ui): add runtime annotation style switching": "增加运行时划线样式切换",
+              "fix(ui): restore thought popup key pagination": "恢复想法弹窗按键翻页",
+              "fix(sync): validate spine cache files and writes": "校验正文缓存文件与写入结果",
+              "合并:恢复想法弹窗按键翻页": "恢复想法弹窗按键翻页",
+              "合并:运行时划线样式切换": "增加运行时划线样式切换",
+          }
+
+          # 不能从 Git 提交关系推断 Issue 的直接关联时，用已确认的项目上下文补齐。
+          manual_refs = {
+              "合并:恢复想法弹窗按键翻页": {"issues": {16}},
+              "合并:运行时划线样式切换": {"issues": {14}},
+              "feat(ui): 增加运行时划线样式切换": {"issues": {14}},
+              "fix(ui): 限制想法弹窗切换重绘范围": {"issues": {16}},
+              "fix: 修复大文件磁盘中转误报失败": {"prs": {10}},
+              "fix(epub): use correct addPath semantics": {"prs": {10}},
+              "perf(epub): EPUB 大文件磁盘中转": {"prs": {10}},
+              "fix(inject): preserve thought text color": {"prs": {9}},
+              "fix(inject): 低内存 HTML/CSS 注入优化": {"prs": {9}},
+              "perf(thoughts): SQLite 句柄 LRU 与关书释放": {"prs": {11, 18}},
+              "perf(sync): 持久化正文 spine 缓存": {"prs": {12, 19}},
+          }
+
+          def gh_json(path):
+              return json.loads(subprocess.check_output(
+                  ["gh", "api", path], text=True, encoding="utf-8"))
+
+          def clean(text):
+              return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text)).strip()
+
+          manual_refs = {clean(subject): refs for subject, refs in manual_refs.items()}
+
+          description_refs = {
+              "恢复想法弹窗按键翻页": {"issues": {16}},
+              "增加运行时划线样式切换": {"issues": {14}},
+              "限制想法弹窗切换重绘范围": {"issues": {16}},
+              "修复大文件磁盘中转误报失败": {"prs": {10}},
+              "修正 addPath 调用语义": {"prs": {10}},
+              "EPUB 大文件磁盘中转": {"prs": {10}},
+              "保留想法正文颜色": {"prs": {9}},
+              "低内存 HTML/CSS 注入优化": {"prs": {9}},
+              "SQLite 句柄 LRU 与关书释放": {"prs": {11, 18}},
+              "持久化正文 spine 缓存": {"prs": {12, 19}},
+          }
+
+          def dedupe_key(text):
+              # 合并标题“运行时划线样式”和功能标题“增加运行时划线样式”视为同一项。
+              return re.sub(r"^(增加|新增)\s*", "", clean(text)).casefold()
+
+          def parse_subject(subject):
+              subject = clean(subject)
+              match = re.match(r"^(perf|feat|fix|style)(?:\([^)]*\))?:\s*(.*)$", subject, re.I)
+              if match:
+                  kind = match.group(1).lower()
+                  description = translations.get(subject, clean(match.group(2)))
+                  return kind, description
+              if subject.startswith("合并:"):
+                  description = translations.get(subject, clean(subject.split(":", 1)[1]))
+                  return "feat", description
+              return None, None
+
+          categories = {
+              "perf": "性能优化：",
+              "feat": "新功能：",
+              "fix": "问题修复：",
+              "style": "样式优化：",
+          }
+          entries = {kind: [] for kind in categories}
+          seen = set()
+          contributors = set()
+
+          for row in raw.splitlines():
+              if "\t" not in row:
+                  continue
+              sha, subject = row.split("\t", 1)
+              kind, description = parse_subject(subject)
+              if not kind:
+                  continue
+
+              # 发版摘要不得出现未翻译的纯英语条目，避免漏网提交再次污染 Release。
+              if not re.search(r"[\u3400-\u9fff]", description):
+                  raise SystemExit(f"发现未翻译的发布提交，请先改为中文：{subject}")
+
+              key = (kind, dedupe_key(description))
+              if key in seen:
+                  continue
+              seen.add(key)
+
+              manual = {
+                  "prs": set(manual_refs.get(subject, {}).get("prs", set())),
+                  "issues": set(manual_refs.get(subject, {}).get("issues", set())),
+              }
+              for ref_kind in ("prs", "issues"):
+                  manual[ref_kind].update(description_refs.get(description, {}).get(ref_kind, set()))
+              prs = set(manual["prs"])
+              issues = set(manual["issues"])
+              commit_data = gh_json(f"repos/{repository}/commits/{sha}")
+              commit_author = (commit_data.get("author") or {}).get("login")
+              if commit_author:
+                  contributors.add(commit_author)
+
+              for pr in gh_json(f"repos/{repository}/commits/{sha}/pulls"):
+                  number = int(pr["number"])
+                  # 手工确认过的关联优先，避免 GitHub 把同一提交在旧 PR 中的出现也算进来。
+                  if not manual.get("prs"):
+                      prs.add(number)
+                  login = (pr.get("user") or {}).get("login")
+                  if login:
+                      contributors.add(login)
+                  body = pr.get("body") or ""
+                  if not manual.get("prs"):
+                      for ref in re.findall(r"(?i)\bPR\s*#?(\d+)", body):
+                          prs.add(int(ref))
+                  for ref in re.findall(
+                      r"(?i)\b(?:issue|issues|fixes|fixed|closes|closed|resolves|resolved)\s*#(\d+)",
+                      body,
+                  ):
+                      issues.add(int(ref))
+
+              refs = []
+              if issues:
+                  refs.append("Issue " + "/".join(f"#{n}" for n in sorted(issues)))
+              if prs:
+                  refs.append("PR " + "/".join(f"#{n}" for n in sorted(prs)))
+              if refs:
+                  description += "（" + " / ".join(refs) + "）"
+              entries[kind].append(description)
+
+          sections = [
+              f"{categories[kind]}\n" + "\n".join(entries[kind])
+              for kind in categories
+              if entries[kind]
+          ]
+          notes = "\n\n".join(sections) or "版本发布"
+          contributor_lines = "\n".join(f"- @{login}" for login in sorted(contributors))
+          contributor_lines = contributor_lines or "- 暂无可识别贡献者"
+
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write("notes<<EOF\n" + notes + "\nEOF\n")
+              output.write("contributors<<EOF\n" + contributor_lines + "\nEOF\n")
+          print(notes)
+          print("Contributors:")
+          print(contributor_lines)
+          PY
 
       - name: 写入发布包版本并打包
         env:
@@ -173,6 +327,12 @@ jobs:
             ## 本次更新
 
             ${{ steps.notes.outputs.notes }}
+
+            ---
+
+            ## Contributors（本次更新的贡献者）
+
+            ${{ steps.notes.outputs.contributors }}
 
             ---
 
