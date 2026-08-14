@@ -11,5 +11,5 @@
   ],
   "size": 132942,
   "sha256": "293678f8439b42e53995cb5ed88f528f9cad65c13980e64b2fe0b3dbfe778513",
-  "notes": "性能优化：\n持久化正文 spine 缓存\n正文 spine 缓存(落盘 + 暖模式直读,避免每批重解压 EPUB)\nSQLite 句柄 LRU 与关书释放\nper-book SQLite 句柄 LRU 上限,关书释放\nEPUB 大文件磁盘中转\n大文件走磁盘中转,灭 OOM 尖峰\n\n新功能：\n统一文件管理器与阅读器菜单\n增加运行时划线样式切换\nadd runtime annotation style switching\n\n问题修复：\n修复大文件磁盘中转误报失败\n限制想法弹窗切换重绘范围\n限制想法弹窗切换重绘范围\nrestore thought popup key pagination\nvalidate spine cache files and writes\nuse correct addPath semantics\npreserve thought text color\n低内存 HTML/CSS 注入优化\n去唯一 class + 合并元素 + 移除虚线边框"
+  "notes": "性能优化：\n持久化正文 spine 缓存（PR #12/#19）\nSQLite 句柄 LRU 与关书释放（PR #11/#18）\nEPUB 大文件磁盘中转（PR #10）\n\n新功能：\n统一文件管理器与阅读器菜单\n恢复想法弹窗按键翻页（Issue #16）\n增加运行时划线样式切换（Issue #14）\n\n问题修复：\n修复大文件磁盘中转误报失败（PR #10）\n限制想法弹窗切换重绘范围（Issue #16）\n修正 addPath 调用语义（PR #10）\n保留想法正文颜色（PR #9）\n低内存 HTML/CSS 注入优化（PR #9）\n\nContributors（本次更新的贡献者）：\n@Mr54233\n@ksaMask123"
 }
