@@ -31,7 +31,8 @@ end
 
 function ThoughtDB.remove_db(book_dir)
     local path = ThoughtDB.db_path(book_dir)
-    for _, p in ipairs({ path, path .. "-wal", path .. "-shm" }) do
+    -- 同时清理隔离标记:用户主动清缓存后允许下次 open 正常重建(作者意见 #2)。
+    for _, p in ipairs({ path, path .. "-wal", path .. "-shm", path .. ".isolated" }) do
         os.remove(p)
     end
 end
@@ -90,18 +91,14 @@ local function ensure_schema(db)
     return true
 end
 
--- 打开单个库(不含完整性核验与重建),供 open 复用。
+-- 仅打开连接(不做任何 schema 写入),供 open 复用。
+-- 关键:不在打开时执行 CREATE TABLE / user_version 写入,保证随后
+-- 的 integrity_check 是“无写入的只读核验”(作者意见 #5:发现损坏前绝不修改原库)。
 local function do_open(path)
     local SQ3 = get_sq3()
     if not SQ3 then return nil end
     local ok, db = pcall(SQ3.open, path)
     if not ok or not db then return nil end
-    pcall(function() db:exec("PRAGMA journal_mode=WAL") end)
-    pcall(function() db:exec("PRAGMA synchronous=NORMAL") end)
-    if not ensure_schema(db) then
-        pcall(function() db:close() end)
-        return nil
-    end
     return db
 end
 
@@ -130,20 +127,38 @@ end
 
 -- 损坏隔离:把 .db/-wal/-shm 重命名为 .corrupt-<ts>,保留证据供诊断/人工恢复。
 -- 用 os.rename(而非 os.remove)以保证想法数据可恢复,绝不静默丢弃。
+-- 返回约定:成功返回 target 路径;主库重命名失败 / sidecar(源存在却)重命名失败
+-- 均返回 nil,err(作者意见 #3:sidecar 隔离失败不得被吞掉当成成功)。
 function ThoughtDB.isolate_corrupt(book_dir)
     local base = ThoughtDB.db_path(book_dir)
     local ts = os.time()
     local target = base .. ".corrupt-" .. tostring(ts)
-    if not os.rename(base, target) then return nil end
-    -- 一并隔离 WAL/SHM(若存在);失败不阻断主隔离。
-    os.rename(base .. "-wal", target .. "-wal")
-    os.rename(base .. "-shm", target .. "-shm")
+    -- 主库必须先重命名成功,否则无隔离可言。
+    if not os.rename(base, target) then return nil, "主库重命名失败" end
+    -- 一并隔离 WAL/SHM:仅当源文件确实存在时才重命名;源不存在(无 WAL)属正常,
+    -- 不算失败。源存在却重命名失败 → 归档不完整,返回错误(作者意见 #3)。
+    for _, ext in ipairs({ "-wal", "-shm" }) do
+        local src = base .. ext
+        local probe = io.open(src, "r")
+        if probe then
+            probe:close()
+            if not os.rename(src, target .. ext) then
+                return nil, "sidecar 隔离失败: " .. src
+            end
+        end
+    end
+    -- 写入隔离标记:阻止 open() 在下次自动重建空库(作者意见 #2)。
+    -- 旧想法不会因自动建空库而静默不可见;须显式恢复/重同步后才允许重建。
+    local mk = io.open(base .. ".isolated", "w")
+    if mk then mk:close() end
     return target
 end
 
 -- WAL 检查点:把 WAL 折叠进主库并截断,减小断电损坏面、回收 -wal/-shm 文件。
--- 读取 PRAGMA 真实返回 (total_frames, ckpt_frames, status);status=0 才算成功,
--- busy/失败不再被当作"成功"。
+-- wal_checkpoint 返回三列 (busy, log_frames, checkpointed_frames):
+--   busy=1 表示因其他连接忙而未完成;log!=checkpointed 表示未全部折叠。
+-- 旧实现误用 row[3](checkpointed_frames)当状态,会把成功折叠非空 WAL 误判失败、
+-- 把 busy 误判成功(作者意见 #4)。此处以 row[1](busy) 为准。
 function ThoughtDB.checkpoint(db)
     if not db then return false, "no db" end
     local stmt = db:prepare("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -157,13 +172,33 @@ function ThoughtDB.checkpoint(db)
         logger.warn("[撷思][ThoughtDB] checkpoint step 失败")
         return false, "step failed"
     end
-    -- 列序:total_frames, ckpt_frames, status
-    local status = tonumber(row[3]) or -1
-    if status ~= 0 then
-        logger.warn("[撷思][ThoughtDB] checkpoint 未完成, status=", status)
-        return false, "checkpoint busy/status=" .. tostring(status)
+    -- 列序:busy, log_frames, checkpointed_frames
+    local busy = tonumber(row[1]) or 1
+    if busy ~= 0 then
+        logger.warn("[撷思][ThoughtDB] checkpoint busy=", busy)
+        return false, "checkpoint busy"
+    end
+    local log = tonumber(row[2]) or 0
+    local ckpt = tonumber(row[3]) or 0
+    if log ~= ckpt then
+        logger.warn("[撷思][ThoughtDB] checkpoint 不完整 log=", log, " ckpt=", ckpt)
+        return false, "checkpoint 不完整"
     end
     return true
+end
+
+-- 隔离态判定:主库已被重命名为 .corrupt-*,且写入了 .isolated 标记。
+-- 此时禁止 open() 自动重建空库(作者意见 #2):否则旧想法会静默变成不可见,
+-- 须显式恢复或重新同步后才允许重建。
+local function is_isolated(book_dir)
+    local base = ThoughtDB.db_path(book_dir)
+    -- 主库仍存在 → 未隔离(健康或首次打开)。
+    local probe = io.open(base, "r")
+    if probe then probe:close(); return false end
+    -- 主库缺失但存在隔离标记 → 已隔离。
+    local mk = io.open(base .. ".isolated", "r")
+    if mk then mk:close(); return true end
+    return false
 end
 
 function ThoughtDB.open(book_dir)
@@ -171,26 +206,42 @@ function ThoughtDB.open(book_dir)
     local SQ3 = get_sq3()
     if not SQ3 then return nil end
     U.mkdir(book_dir)
+    -- 隔离态:主库已重命名为 .corrupt-*,禁止自动重建空库(作者意见 #2)。
+    if is_isolated(book_dir) then
+        return nil, "数据库已被隔离(损坏),禁止自动重建;请恢复或重新同步"
+    end
     local path = ThoughtDB.db_path(book_dir)
     local db = do_open(path)
     if not db then return nil end
-    -- 打开即核验完整性。必须区分两类失败(作者评审意见 #4):
-    -- (1) 过程失败(prepare/step 抛错、I/O、busy/locked):不是损坏,保留原库,绝不删。
-    -- (2) 确认损坏:隔离(重命名)而非删除,绝不静默重建空库。
+    -- 打开即核验完整性:先做一次无写入的只读核验(作者意见 #5),
+    -- 确认健康后再做连接级 PRAGMA + schema 初始化 / user_version 写入,绝不先改原库。
     local ic_ok, healthy, detail = pcall(ThoughtDB.integrity_check, db)
     if not ic_ok then
         logger.warn("[撷思][ThoughtDB] integrity_check 过程失败,保留原库", path, tostring(healthy))
-        pcall(ThoughtDB.close, db)
+        ThoughtDB.close_no_checkpoint(db)  -- 隔离前不 checkpoint(作者意见 #1)
         return nil, "integrity_check 过程失败: " .. tostring(healthy)
     elseif healthy ~= true then
         logger.warn("[撷思][ThoughtDB] integrity_check 检出损坏,隔离而非删除", path, tostring(detail))
-        pcall(ThoughtDB.close, db)
-        local iso = ThoughtDB.isolate_corrupt(book_dir)
+        ThoughtDB.close_no_checkpoint(db)  -- 隔离前不 checkpoint(作者意见 #1)
+        local iso, iso_err = ThoughtDB.isolate_corrupt(book_dir)
         if iso then
             return nil, "已隔离损坏库至 " .. iso .. ";想法可由本地注入源(离线缓存)重建"
         end
-        return nil, "损坏库隔离失败(无法重命名);请手动检查 " .. path
+        return nil, "损坏库隔离失败(" .. tostring(iso_err or "无法重命名") .. ");请手动检查 " .. path
     end
+    -- 健康:此时才设置连接级 PRAGMA + schema 初始化 / user_version 写入。
+    pcall(function() db:exec("PRAGMA journal_mode=WAL") end)
+    pcall(function() db:exec("PRAGMA synchronous=NORMAL") end)
+    if not ensure_schema(db) then
+        ThoughtDB.close_no_checkpoint(db)
+        return nil, "schema 初始化失败"
+    end
+    -- 健康库建立成功:清理可能残留的隔离标记(作者意见 #2)。
+    -- 仅当标记确实存在时才删除,避免对不存在文件做无效 os.remove。
+    pcall(function()
+        local mk = io.open(path .. ".isolated", "r")
+        if mk then mk:close(); os.remove(path .. ".isolated") end
+    end)
     return db
 end
 
@@ -199,6 +250,12 @@ function ThoughtDB.close(db)
         pcall(ThoughtDB.checkpoint, db)
         pcall(function() db:close() end)
     end
+end
+
+-- 仅关闭句柄,不做 WAL checkpoint。用于损坏 / 过程失败路径,避免在隔离前
+-- 修改或截断主库 / WAL,保证 .corrupt-* 是原始损坏证据(作者意见 #1)。
+function ThoughtDB.close_no_checkpoint(db)
+    if db then pcall(function() db:close() end) end
 end
 
 local function insert_rows(db, chapter_uid, groups)
