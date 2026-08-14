@@ -27,6 +27,7 @@ local files = {
     "tests.test_epub_inject",
     "tests.test_binding", "tests.test_chapter_map", "tests.test_sync",
     "tests.test_sync_state",
+    "tests.test_sync_clean_source",
     "tests.test_sync_report", "tests.test_batch_sync",
     "tests.test_web_fetch", "tests.test_power_inhibit", "tests.test_sync_task",
     "tests.test_sync_gate",

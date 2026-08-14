@@ -15,6 +15,8 @@
 --   inject(src, book_id, mapped_chapters, dest) → stats, err(epub_inject.inject_copy)
 --   progress(phase, i, n, text) → 返回 false 表示取消(可选)
 --   file_exists/rename/remove(可选,默认真实文件系统)
+--   clean_source    可选:外部干净 .epub 路径,作为注入源绕开脏/缺失的 .orig
+--   copy_file       可选:(src,dst)->ok 复制文件,默认 U.copy_file(固化 .orig 用)
 local Binding = require("pickthought.binding")
 local ChapterMap = require("pickthought.chapter_map")
 local EpubInject = require("pickthought.epub_inject")
@@ -37,6 +39,7 @@ function Sync.run(deps)
     local file_exists = deps.file_exists or U.file_exists
     local rename = deps.rename or os.rename
     local remove = deps.remove or os.remove
+    local copy_file = deps.copy_file or U.copy_file
 
     -- 已有注入版时,增量同步直接以当前书为源;首次/全量重建才从 .orig 读取。
     local doc_path = tostring(deps.doc_path)
@@ -44,9 +47,35 @@ function Sync.run(deps)
     local current_meta = deps.load_meta(doc_path)
     local append = deps.append == true and current_meta and current_meta.has
         and current_meta.has[EpubInject.MARKER] == true
-    local src = append and doc_path or (file_exists(backup) and backup or doc_path)
 
-    local meta, meta_err = deps.load_meta(src)
+    -- ① 干净源逃生口:允许指定外部干净 .epub 作注入源,绕开脏/缺失的 .orig。
+    -- 仅当该源存在且不含注入标记时才采用;与 doc_path/.orig 相同则按既有逻辑走。
+    local clean_source = deps.clean_source and tostring(deps.clean_source) or nil
+    local clean_meta, clean_err
+    if clean_source and clean_source ~= doc_path and clean_source ~= backup then
+        if not file_exists(clean_source) then
+            return nil, "指定的干净源不存在:" .. clean_source
+        end
+        clean_meta, clean_err = deps.load_meta(clean_source)
+        if not clean_meta then
+            return nil, "指定的干净源无法读取:" .. tostring(clean_err)
+        end
+        if clean_meta.has and clean_meta.has[EpubInject.MARKER] then
+            return nil, "指定的干净源本身已是注入版,不能作为干净源;请换一份原书"
+        end
+    else
+        clean_source = nil
+    end
+
+    local src = append and doc_path
+        or (clean_source or (file_exists(backup) and backup or doc_path))
+
+    local meta, meta_err
+    if src == clean_source and clean_meta then
+        meta = clean_meta
+    else
+        meta, meta_err = deps.load_meta(src)
+    end
     if not meta then return nil, meta_err end
     if meta.has and meta.has[EpubInject.MARKER] and not append then
         if src == doc_path then
@@ -470,6 +499,14 @@ function Sync.run(deps)
             return nil, "无法备份原书:" .. tostring(backup_err or "重命名失败")
         end
         backed_up = true
+    elseif clean_source and src == clean_source and not append then
+        -- 从外部干净源全量重建:当前 doc_path(可能脏注入版)被注入版顶替;
+        -- 同时把干净源固化为 .orig 备份,保证后续增量重注有干净基准(不破坏用户原文件)。
+        -- 复制失败不致命:注入版已生成,仅 .orig 未刷新,提示用户后续重注需再次指定。
+        if not copy_file(clean_source, backup) then
+            logger.warn("[撷思][Sync] 干净源固化到 .orig 失败,注入版已生成但 .orig 未刷新;" ..
+                "后续重注需再次指定干净源", tostring(clean_source))
+        end
     end
     local ok_swap, swap_err = rename(temp_dest, doc_path)
     if not ok_swap then
@@ -487,6 +524,7 @@ function Sync.run(deps)
     return with_batch_fields{
         dest = doc_path,
         backup = backup,
+        clean_source = clean_source,
         injected = stats.injected,
         marks = stats.marks,
         quote_aligned = stats.quote_aligned,
