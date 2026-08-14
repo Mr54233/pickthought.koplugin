@@ -23,6 +23,7 @@ local SyncGate=require("pickthought.sync_gate")
 local SyncProgress=require("pickthought.sync_progress")
 local UpdateProgress=require("pickthought.update_progress")
 local SyncReport=require("pickthought.sync_report")
+local Sync=require("pickthought.sync")
 local BatchSync=require("pickthought.batch_sync")
 local AnnotationCompat=require("pickthought.annotation_compat")
 local AnnotationStyle=require("pickthought.annotation_style")
@@ -753,7 +754,10 @@ end
 function Plugin:_has_reinject_cache(path)
     local bound=path and Binding.get(self.store,path)
     if not bound then return false end
-    -- 有 chapters.json 就说明至少完成过一批,离线重注即可用(分批未完也算)。
+    -- 有 chapters.json 说明至少完成过一批;但首次注入中途失败会留下干净原书+缓存,
+    -- 此时并非注入版,不应提供"重新注入"(否则 clean_source 流程会误删当前干净原书,P1#3)。
+    -- 必须同时确认存在 .orig 干净备份(注入过才有),未注入/首次失败的原书不提供重注。
+    if not U.file_exists(Sync.backup_path(path)) then return false end
     return U.file_exists(self.store:book_cache_path(bound.book_id).."/sync-cache/chapters.json")
 end
 

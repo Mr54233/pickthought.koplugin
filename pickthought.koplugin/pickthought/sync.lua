@@ -39,7 +39,18 @@ function Sync.run(deps)
     local file_exists = deps.file_exists or U.file_exists
     local rename = deps.rename or os.rename
     local remove = deps.remove or os.remove
-    local copy_file = deps.copy_file or U.copy_file
+    -- 统一恢复封装:检查 rename 返回值,失败返回明确错误(避免"已恢复"与实际不符,P1#2)。
+    local function try_recover(from, to)
+        local ok, e = rename(from, to)
+        if not ok then return nil, "恢复动作失败(" .. tostring(e or "rename 失败") .. ")" end
+        return true
+    end
+    -- 默认用流式复制(分块读写 + 进度心跳),避免大书一次性读入内存触发 OOM(P1#1)。
+    local copy_file = deps.copy_file or function(a, b)
+        return U.copy_file_stream(a, b, function(done, total)
+            step("copy", done, total, "固化干净源")
+        end)
+    end
 
     -- 已有注入版时,增量同步直接以当前书为源;首次/全量重建才从 .orig 读取。
     local doc_path = tostring(deps.doc_path)
@@ -268,8 +279,15 @@ function Sync.run(deps)
     local map_meta = backup_meta or meta
     if deps.map_cache_path then
         -- 指纹 = 源书大小 + 匹配算法版本:换书或改算法都让旧映射作废重建。
-        local map_source = file_exists(backup) and backup or doc_path
-        map_signature = tostring(U.file_size(map_source) or 0) .. "@" .. tostring(ChapterMap.ALGO_VERSION)
+        -- 指定 clean_source 重建时,映射必须基于干净源本身(而非可能版本不同的 .orig/当前书),
+        -- 故把 clean_source 的规范化路径也纳入签名,避免不同 EPUB 同体积时复用旧 spine 缓存(P2)。
+        local use_clean = (src == clean_source and clean_source) or nil
+        local map_source = use_clean or (file_exists(backup) and backup) or doc_path
+        -- 仅在指定 clean_source 时扩展签名(追加干净源路径),无 clean_source 时保持原格式
+        -- "大小@算法版本",向后兼容既有 spine/map 缓存。
+        local src_sig = use_clean and ("@" .. tostring(use_clean)) or ""
+        map_signature = tostring(U.file_size(map_source) or 0) .. "@"
+            .. tostring(ChapterMap.ALGO_VERSION) .. src_sig
         local raw = U.read_file(deps.map_cache_path, true)
         if raw then
             local ok_decode, decoded = pcall(Json.decode, raw)
@@ -500,27 +518,58 @@ function Sync.run(deps)
         end
         backed_up = true
     elseif clean_source and src == clean_source and not append then
-        -- 从外部干净源全量重建:脏 doc_path(当前注入版)先暂存为 .old 以便失败回滚,
-        -- 再把干净源固化为 .orig 备份,保证后续增量重注有干净基准(不破坏用户原文件)。
-        local old_path = doc_path .. ".old"
-        if file_exists(old_path) then
-            local ok_rm, rm_err = remove(old_path)
-            if not ok_rm then
-                remove(temp_dest)
-                return nil, "无法清理旧的暂存文件,请重试"
+        -- 从外部干净源全量重建。
+        -- 安全前置(P1#3):确认当前 doc_path 确实是注入版;若当前仍是干净原书
+        -- (如首次注入中途失败),不能把它当"旧注入版"丢进 .old 销毁——否则不同版本的
+        -- 原书会被永久丢弃。此时应保留为 .orig 备份(与首次注入一致),干净源仅作注入来源。
+        local is_current_injected = current_meta and current_meta.has
+            and current_meta.has[EpubInject.MARKER] == true
+        if is_current_injected then
+            -- 脏注入版先暂存为 .old 以便失败回滚,再把干净源固化为 .orig 备份。
+            local old_path = doc_path .. ".old"
+            if file_exists(old_path) then
+                local ok_rm, rm_err = remove(old_path)
+                if not ok_rm then
+                    remove(temp_dest)
+                    return nil, "无法清理旧的暂存文件,请重试"
+                end
             end
+            if not rename(doc_path, old_path) then
+                remove(temp_dest)
+                return nil, "无法暂存原注入版(请先关闭本书或确认未被占用)"
+            end
+            local ok_copy, copy_err = copy_file(clean_source, backup)
+            if not ok_copy then
+                -- 固化失败:尽量回滚 .old → doc_path,恢复结果必须检查(P1#2)。
+                remove(temp_dest)
+                local ok_restore, restore_err = try_recover(old_path, doc_path)
+                if ok_restore then
+                    return nil, "干净源固化到 .orig 失败,已恢复原注入版(.old→doc_path);后续重注需再次指定干净源"
+                end
+                -- 恢复失败:保留 .old 作人工恢复入口,明确告知实际位置。
+                return nil, "干净源固化到 .orig 失败,且无法恢复当前注入版;请手动将 "
+                    .. old_path .. " 重命名为 " .. doc_path .. " 以恢复原书。(" .. tostring(restore_err or "未知") .. ")"
+            end
+            backed_up = true
+        else
+            -- 当前书是干净原书:保留为 .orig 备份,不进 .old,避免原书被销毁。
+            if file_exists(backup) then
+                local old_backup = backup .. ".old"
+                if file_exists(old_backup) then
+                    local ok_rm = remove(old_backup)
+                    if not ok_rm then remove(temp_dest); return nil, "无法清理旧备份暂存,请重试" end
+                end
+                if not rename(backup, old_backup) then
+                    remove(temp_dest); return nil, "无法暂存旧 .orig 备份,请重试"
+                end
+            end
+            local ok_bk, bk_err = rename(doc_path, backup)
+            if not ok_bk then
+                remove(temp_dest)
+                return nil, "无法备份当前原书:" .. tostring(bk_err or "重命名失败")
+            end
+            backed_up = true
         end
-        if not rename(doc_path, old_path) then
-            remove(temp_dest)
-            return nil, "无法暂存原注入版(请先关闭本书或确认未被占用)"
-        end
-        if not copy_file(clean_source, backup) then
-            -- 固化失败:恢复原注入版,保住用户当前书,不丢失数据。
-            rename(old_path, doc_path)
-            remove(temp_dest)
-            return nil, "干净源固化到 .orig 失败,已恢复原注入版;后续重注需再次指定干净源"
-        end
-        backed_up = true
     end
     local ok_swap, swap_err = rename(temp_dest, doc_path)
     if not ok_swap then
@@ -528,18 +577,36 @@ function Sync.run(deps)
         -- 首次注入/干净源重建已让原书离位时才需要回滚。增量失败时旧注入版仍在原路径，
         -- 绝不能删除它或移动干净 .orig；上一代只在原子替换成功时由系统丢弃。
         if backed_up and not file_exists(doc_path) then
+            -- 统一恢复逻辑:优先恢复原始注入版(.old),其次恢复干净 .orig;
+            -- 恢复结果必须检查,失败要明确告知实际位置并保留残留文件作人工恢复入口(P1#2)。
+            local recovered, rec_err
             local old_path = doc_path .. ".old"
             if file_exists(old_path) then
-                rename(old_path, doc_path)
-            else
-                rename(backup, doc_path)
+                recovered, rec_err = try_recover(old_path, doc_path)
+                if not recovered and file_exists(backup) then
+                    recovered, rec_err = try_recover(backup, doc_path)
+                end
+            elseif file_exists(backup) then
+                recovered, rec_err = try_recover(backup, doc_path)
+            end
+            if not recovered then
+                local msg = "无法替换原书(" .. tostring(swap_err or "rename 失败") .. ")"
+                if file_exists(old_path) then
+                    msg = msg .. ";当前注入版暂存于 " .. old_path .. ",请手动恢复"
+                elseif file_exists(backup) then
+                    msg = msg .. ";干净原书备份位于 " .. backup .. ",请手动恢复"
+                end
+                if rec_err then msg = msg .. "。恢复动作失败:" .. tostring(rec_err) end
+                return nil, msg
             end
         end
-        return nil, "无法替换原书:" .. tostring(swap_err or "重命名失败")
+        return nil, "无法替换原书,已恢复原文件:" .. tostring(swap_err or "重命名失败")
     end
-    -- 干净源重建成功:清理暂存的脏 .old(已无回滚需要,且避免占用空间)。
+    -- 重建成功:清理暂存的脏 .old / 旧 .orig 暂存(已无回滚需要,且避免占用空间)。
     local old_path = doc_path .. ".old"
     if file_exists(old_path) then pcall(remove, old_path) end
+    local old_backup = backup .. ".old"
+    if file_exists(old_backup) then pcall(remove, old_backup) end
 
     local underlines_injected = math.min(total_underlines,
         math.max(0, tonumber(stats.underlines_resolved) or 0))

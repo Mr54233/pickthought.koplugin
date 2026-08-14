@@ -62,6 +62,30 @@ function U.list(p)
     for x in lfs.dir(p) do if x~="." and x~=".." then o[#o+1]=p.."/"..x end end; table.sort(o); return o
 end
 function U.copy_file(a,b) local d,e=U.read_file(a,true); if not d then return nil,e end return U.atomic_write(b,d,true) end
+-- 流式复制:分块读写(默认 1MB),避免大书一次性读入 Lua 内存触发 OOM(KPW3/KPW4)。
+-- on_progress(done, total) 可选,用于上报复制进度/心跳;返回 true 或 nil,err。
+function U.copy_file_stream(a, b, on_progress)
+    local fi = io.open(a, "rb")
+    if not fi then return nil, "无法打开源文件:" .. tostring(a) end
+    local fo = io.open(b, "wb")
+    if not fo then fi:close(); return nil, "无法创建目标文件:" .. tostring(b) end
+    local size = U.file_size(a) or 0
+    local chunk = 1024 * 1024
+    local done = 0
+    while true do
+        local data = fi:read(chunk)
+        if not data then break end
+        local w, werr = fo:write(data)
+        if not w then
+            fi:close(); fo:close()
+            return nil, "写入目标失败:" .. tostring(werr or "未知")
+        end
+        done = done + #data
+        if on_progress then pcall(on_progress, done, size) end
+    end
+    fi:close(); fo:close()
+    return true
+end
 function U.copy_tree(a,b)
     local m=lfs.attributes(a,"mode"); if m=="file" then return U.copy_file(a,b) end; if m~="directory" then return nil,"source missing" end
     U.mkdir(b); for x in lfs.dir(a) do if x~="." and x~=".." then local ok,e=U.copy_tree(a.."/"..x,b.."/"..x); if not ok then return nil,e end end end; return true
