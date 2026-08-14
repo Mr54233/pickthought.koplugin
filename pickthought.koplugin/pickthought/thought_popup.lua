@@ -243,16 +243,19 @@ function NativeThoughtPopup:change_page(delta)
     if next_index < 1 or next_index > #self.display_pages then return end
     self.page_index = next_index
     self:_update_page()
-    if self.titlebar and self.titlebar.setTitle then
-        self.titlebar:setTitle(self.title, true)
-    end
     if not self:_replace_text() then
         self:init(true)
         local scroll = self:_text_widgets()
         if scroll and scroll.scrollToTop then scroll:scrollToTop() end
     end
     self:_sync_buttons()
-    UIManager:setDirty(self, "partial", self.frame.dimen)
+    -- 标题栏是固定的原文摘录,切换想法只刷新正文区域;按钮由各自的
+    -- refresh() 处理,避免整块弹窗重绘导致标题栏闪屏。
+    if self.textw and self.textw.dimen then
+        UIManager:setDirty(self, "partial", self.textw.dimen)
+    elseif self.frame and self.frame.dimen then
+        UIManager:setDirty(self, "partial", self.frame.dimen)
+    end
 end
 
 function NativeThoughtPopup:onClose()
