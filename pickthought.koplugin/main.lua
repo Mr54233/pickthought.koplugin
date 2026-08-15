@@ -752,13 +752,15 @@ function Plugin:sync_entry(path,mode,opts)
 end
 
 function Plugin:_has_reinject_cache(path)
-    local bound=path and Binding.get(self.store,path)
+    local bound = path and Binding.get(self.store, path)
     if not bound then return false end
-    -- 有 chapters.json 说明至少完成过一批;但首次注入中途失败会留下干净原书+缓存,
-    -- 此时并非注入版,不应提供"重新注入"(否则 clean_source 流程会误删当前干净原书,P1#3)。
-    -- 必须同时确认存在 .orig 干净备份(注入过才有),未注入/首次失败的原书不提供重注。
-    if not U.file_exists(Sync.backup_path(path)) then return false end
-    return U.file_exists(self.store:book_cache_path(bound.book_id).."/sync-cache/chapters.json")
+    -- 当前书含注入标记 → 提供"重新注入"入口(即使 .orig 丢失也能进 clean_source 逃生舱);
+    -- 干净原书(无标记)则隐藏,避免把干净原书当注入版误删(P1, 2026-08-15 二轮)。
+    local EpubReader = require("pickthought.epub_reader")
+    local EpubInject = require("pickthought.epub_inject")
+    local ok, meta = pcall(EpubReader.load, path)
+    if not ok or not meta then return false end
+    return meta.has and meta.has[EpubInject.MARKER] == true
 end
 
 -- 离线重注入口:先让用户决定是否提供一份干净原书作为注入源。

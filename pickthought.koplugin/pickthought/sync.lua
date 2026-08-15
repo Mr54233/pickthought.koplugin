@@ -55,7 +55,14 @@ function Sync.run(deps)
     -- 已有注入版时,增量同步直接以当前书为源;首次/全量重建才从 .orig 读取。
     local doc_path = tostring(deps.doc_path)
     local backup = Sync.backup_path(doc_path)
-    local current_meta = deps.load_meta(doc_path)
+    local current_meta, current_meta_err = deps.load_meta(doc_path)
+    -- 当前 EPUB 存在但解析失败(损坏):绝不能当作"干净原书"继续,
+    -- 否则下面 rename(doc_path, backup) 会把损坏文件当原书备份/销毁(P1#2, 2026-08-15 二轮)。
+    -- 必须在任何 rename/copy 前中止,且保证 doc_path/.orig/.old 都不被改动。
+    if not current_meta and file_exists(doc_path) then
+        return nil, "当前 EPUB(" .. tostring(doc_path) .. ") 已损坏无法解析,已中止操作(未改动任何文件);"
+            .. "请手动恢复原书,或指定一份可用的干净源后重试"
+    end
     local append = deps.append == true and current_meta and current_meta.has
         and current_meta.has[EpubInject.MARKER] == true
 
@@ -278,26 +285,31 @@ function Sync.run(deps)
     -- 避免 HTML 标记增长后改变引文定位结果。
     local map_meta = backup_meta or meta
     if deps.map_cache_path then
-        -- 指纹 = 源书大小 + 匹配算法版本:换书或改算法都让旧映射作废重建。
+        -- 指纹 = 源书大小 + 匹配算法版本 + 内容指纹:换书/改算法/改内容都让旧映射作废重建。
+        -- 内容指纹取文件头尾采样做 FNV-1a,避免"同体积不同内容"的 EPUB 复用旧章节映射/缓存(P2, 2026-08-15 二轮)。
         -- 指定 clean_source 重建时,映射必须基于干净源本身(而非可能版本不同的 .orig/当前书),
-        -- 故把 clean_source 的规范化路径也纳入签名,避免不同 EPUB 同体积时复用旧 spine 缓存(P2)。
+        -- 故把 clean_source 的规范化路径也纳入签名;并强制废弃旧映射缓存,杜绝复用。
         local use_clean = (src == clean_source and clean_source) or nil
         local map_source = use_clean or (file_exists(backup) and backup) or doc_path
-        -- 仅在指定 clean_source 时扩展签名(追加干净源路径),无 clean_source 时保持原格式
-        -- "大小@算法版本",向后兼容既有 spine/map 缓存。
         local src_sig = use_clean and ("@" .. tostring(use_clean)) or ""
+        local fingerprint = U.content_fingerprint(map_source) or "0"
         map_signature = tostring(U.file_size(map_source) or 0) .. "@"
-            .. tostring(ChapterMap.ALGO_VERSION) .. src_sig
-        local raw = U.read_file(deps.map_cache_path, true)
-        if raw then
-            local ok_decode, decoded = pcall(Json.decode, raw)
-            if ok_decode and type(decoded) == "table"
-                and tostring(decoded.signature) == map_signature
-                and type(decoded.map) == "table" then
-                map_store = decoded.map
+            .. tostring(ChapterMap.ALGO_VERSION) .. "@" .. fingerprint .. src_sig
+        if use_clean then
+            -- 指定干净源:强制废弃旧映射缓存,避免同体积不同内容复用旧 spine/map(P2)。
+            map_store = {}
+        else
+            local raw = U.read_file(deps.map_cache_path, true)
+            if raw then
+                local ok_decode, decoded = pcall(Json.decode, raw)
+                if ok_decode and type(decoded) == "table"
+                    and tostring(decoded.signature) == map_signature
+                    and type(decoded.map) == "table" then
+                    map_store = decoded.map
+                end
             end
+            map_store = map_store or {}
         end
-        map_store = map_store or {}
     end
 
     -- 缓存值格式:false = 确认无法匹配;{hrefs={...}, num=true|nil} =
@@ -538,10 +550,19 @@ function Sync.run(deps)
                 remove(temp_dest)
                 return nil, "无法暂存原注入版(请先关闭本书或确认未被占用)"
             end
-            local ok_copy, copy_err = copy_file(clean_source, backup)
+            local ok_copy, copy_err, copy_status = copy_file(clean_source, backup)
             if not ok_copy then
-                -- 固化失败:尽量回滚 .old → doc_path,恢复结果必须检查(P1#2)。
                 remove(temp_dest)
+                if copy_status == "cancelled" then
+                    -- 复制被用户取消:doc_path 已暂存为 .old,恢复回去;backup 未被改动。
+                    local ok_restore, restore_err = try_recover(old_path, doc_path)
+                    if ok_restore then
+                        return nil, "已取消干净源固化,已恢复原注入版(.old→doc_path)"
+                    end
+                    return nil, "已取消干净源固化,但无法恢复当前注入版;请手动将 "
+                        .. old_path .. " 重命名为 " .. doc_path .. " 以恢复原书。(" .. tostring(restore_err or "未知") .. ")"
+                end
+                -- 固化失败:尽量回滚 .old → doc_path,恢复结果必须检查(P1#2)。
                 local ok_restore, restore_err = try_recover(old_path, doc_path)
                 if ok_restore then
                     return nil, "干净源固化到 .orig 失败,已恢复原注入版(.old→doc_path);后续重注需再次指定干净源"

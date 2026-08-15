@@ -378,3 +378,86 @@ T.case("clean_source 重建:启动前遗留 .old 应被清理,不阻塞重建", 
     end
     T.ok(removed_old, "启动前应清理遗留的 .old")
 end)
+
+T.case("clean_source:当前书存在但解析失败(损坏)→ 中止且不改动任何文件", function()
+    -- P1#2, 2026-08-15 二轮 —— 当前 EPUB 存在但 load_meta 失败(损坏),
+    -- 若继续会把它当"干净原书" rename 成 .orig 销毁。必须在 rename/copy 前中止,零改动。
+    local deps, calls = make_deps({
+        clean_source = "/clean/原书.epub",
+        file_exists = function(p)
+            return p == "/clean/原书.epub" or p == "/books/书.epub"  -- doc_path 存在但损坏
+        end,
+        load_meta = function(p)
+            if p == "/clean/原书.epub" then
+                return {spine = {{href = "OEBPS/c1.xhtml"}}, has = {}}
+            end
+            return nil, "EPUB 损坏:无法解析"  -- doc_path 解析失败
+        end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil, "应失败(损坏中止)")
+    T.ok(tostring(err):find("已损坏", 1, true) or tostring(err):find("无法解析", 1, true),
+        "报错应指明损坏: " .. tostring(err))
+    T.eq(#calls.renames, 0, "任何 rename 都不应发生(doc_path/.orig/.old 均未被改动)")
+    T.eq(calls.copied, nil, "不应触发固化")
+end)
+
+T.case("U.copy_file_stream:替换失败保留旧备份并清理临时文件", function()
+    -- P1#3, 2026-08-15 二轮 —— 最终替换目标失败时,旧备份(.prev→b 还原)完好,临时文件清理。
+    local src = os.tmpname(); local dst = os.tmpname()
+    local f = io.open(src, "wb"); f:write(("A"):rep(1000)); f:close()
+    local g = io.open(dst, "wb"); g:write("OLD-BACKUP"); g:close()  -- 预先存在的可用备份
+    local real_rename = os.rename
+    os.rename = function(a, b)
+        if a == dst .. ".copy.tmp" and b == dst then
+            return nil, "模拟替换失败"  -- 仅阻断最终 tmp→b 替换
+        end
+        return real_rename(a, b)
+    end
+    local ok, e = U.copy_file_stream(src, dst)
+    os.rename = real_rename
+    T.ok(not ok and tostring(e):find("替换为目标失败", 1, true), "应报替换失败: " .. tostring(e))
+    local h = io.open(dst, "rb"); local got = h:read("*a"); h:close()
+    T.eq(got, "OLD-BACKUP", "旧备份内容未被覆盖/丢失(.prev 已还原)")
+    T.ok(not U.file_exists(dst .. ".copy.tmp"), "临时文件应已清理")
+    T.ok(not U.file_exists(dst .. ".prev"), "无残留 .prev")
+    os.remove(src); os.remove(dst)
+end)
+
+T.case("U.copy_file_stream:用户取消 → 丢弃临时副本,保留旧备份", function()
+    -- P1#3, 2026-08-15 二轮 —— on_progress 返回 false 视为取消,丢弃临时副本,旧 b 不动。
+    local src = os.tmpname(); local dst = os.tmpname()
+    local f = io.open(src, "wb"); f:write(("A"):rep(2000000)); f:close()
+    local g = io.open(dst, "wb"); g:write("OLD-BACKUP"); g:close()
+    local cancelled_called = false
+    local ok, e, status = U.copy_file_stream(src, dst, function(done)
+        if done > 500000 and not cancelled_called then
+            cancelled_called = true
+            return false  -- 用户取消
+        end
+        return true
+    end)
+    T.ok(not ok and status == "cancelled", "应返回取消状态: " .. tostring(e))
+    local h = io.open(dst, "rb"); local got = h:read("*a"); h:close()
+    T.eq(got, "OLD-BACKUP", "旧备份未被改动")
+    T.ok(not U.file_exists(dst .. ".copy.tmp"), "临时副本应已清理")
+    os.remove(src); os.remove(dst)
+end)
+
+T.case("U.content_fingerprint:同体积不同内容 → 不同指纹", function()
+    -- P2, 2026-08-15 二轮 —— 内容指纹用于区分"同体积不同内容"的 EPUB,避免复用错误映射。
+    local a = os.tmpname(); local b = os.tmpname()
+    local fa = io.open(a, "wb"); fa:write(("X"):rep(1000)); fa:close()
+    local fb = io.open(b, "wb"); fb:write(("Y"):rep(1000)); fb:close()  -- 同大小不同内容
+    local fp_a = U.content_fingerprint(a)
+    local fp_b = U.content_fingerprint(b)
+    T.ok(fp_a and fp_b, "应得到指纹")
+    T.ok(fp_a ~= fp_b, "同体积不同内容指纹应不同: " .. tostring(fp_a) .. " vs " .. tostring(fp_b))
+    T.eq(U.file_size(a), U.file_size(b), "大小相同(排除仅靠大小区分)")
+    os.remove(a); os.remove(b)
+end)
+
+T.case("U.content_fingerprint:损坏/缺失文件返回 nil", function()
+    local fp = U.content_fingerprint("/no/such/file.epub")
+    T.ok(fp == nil, "缺失文件应返回 nil(调用方回退默认指纹)")
+end)

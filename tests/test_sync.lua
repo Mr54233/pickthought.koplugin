@@ -369,7 +369,9 @@ T.case("正文 spine 缓存:冷读落盘,续批暖读不再解压", function()
         if not ok then error(err, 0) end
     end
     local cache_file = "tests/.tmp_sync_spine_map.json"
-    local signature = "0@" .. tostring(require("pickthought.chapter_map").ALGO_VERSION)
+    -- 签名格式 = 大小@算法版本@内容指纹(无干净源时干净源后缀为空);
+    -- 测试中 map_source 为不存在的虚拟路径,故大小=0、指纹=0。
+    local signature = "0@" .. tostring(require("pickthought.chapter_map").ALGO_VERSION) .. "@0"
     local spine_dir = SpineCache.dir_for(cache_file, signature)
     U.remove_tree(spine_dir)
 
