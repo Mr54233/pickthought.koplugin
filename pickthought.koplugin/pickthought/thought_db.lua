@@ -125,32 +125,81 @@ function ThoughtDB.integrity_check(db)
     return false, table.concat(bad, "; ")
 end
 
--- 损坏隔离:把 .db/-wal/-shm 重命名为 .corrupt-<ts>,保留证据供诊断/人工恢复。
+-- 生成真正唯一的损坏备份目标名:时间戳 + 递增序号,并在重命名前再次检查目标
+-- 是否已存在;目标已存在则换名,绝不覆盖(作者意见 #2:仅 os.time() 在 Kindle
+-- 同秒重复隔离时可能覆盖旧备份)。
+local function unique_corrupt_target(base)
+    local ts = os.time()
+    local salt = 0
+    while true do
+        local cand = base .. ".corrupt-" .. tostring(ts) .. "-" .. tostring(salt)
+        local probe = io.open(cand, "r")
+        if not probe then return cand end  -- 目标空闲,可用
+        probe:close()
+        salt = salt + 1
+        if salt > 9999 then return cand end  -- 安全阀,极端场景也返回最后一个候选
+    end
+end
+
+-- 写入并校验隔离标记:.isolated 存在即视为已隔离,即使主库仍残留也阻断自动重建
+-- (防部分隔离态 / 标记先行阶段静默建空库)。返回是否写入成功。
+local function write_isolated_marker(base)
+    local f = io.open(base .. ".isolated", "w")
+    if not f then return false end
+    f:close()
+    local check = io.open(base .. ".isolated", "r")  -- 校验确实落盘
+    if not check then return false end
+    check:close()
+    return true
+end
+
+-- 损坏隔离:把 .db/-wal/-shm 重命名为 .corrupt-<ts>-<salt>,保留证据供诊断/人工恢复。
 -- 用 os.rename(而非 os.remove)以保证想法数据可恢复,绝不静默丢弃。
--- 返回约定:成功返回 target 路径;主库重命名失败 / sidecar(源存在却)重命名失败
--- 均返回 nil,err(作者意见 #3:sidecar 隔离失败不得被吞掉当成成功)。
+-- 失败安全边界(作者第二轮复审 2026-08-15):
+--   1) 标记先行:先写并校验 .isolated,标记失败则不得移动主库,直接报错;
+--   2) 主库/WAL/SHM 逐个移动,每步校验返回值;
+--   3) 任一步失败保留隔离标记(阻断后续自动建库);sidecar 失败尝试回滚主库,
+--      回滚失败仍保持阻断;
+--   4) 核心:无论哪步失败,下次 open() 都不得得到新空库。
+-- 返回约定:成功返回 target 路径;否则返回 nil,err。
 function ThoughtDB.isolate_corrupt(book_dir)
     local base = ThoughtDB.db_path(book_dir)
-    local ts = os.time()
-    local target = base .. ".corrupt-" .. tostring(ts)
-    -- 主库必须先重命名成功,否则无隔离可言。
-    if not os.rename(base, target) then return nil, "主库重命名失败" end
-    -- 一并隔离 WAL/SHM:仅当源文件确实存在时才重命名;源不存在(无 WAL)属正常,
-    -- 不算失败。源存在却重命名失败 → 归档不完整,返回错误(作者意见 #3)。
-    for _, ext in ipairs({ "-wal", "-shm" }) do
+    -- 枚举实际存在的主库/WAL/SHM。
+    local sidecars = { "-wal", "-shm" }
+    local present = {}
+    do
+        local p = io.open(base, "r")
+        if p then p:close(); present[base] = true end
+    end
+    for _, ext in ipairs(sidecars) do
         local src = base .. ext
-        local probe = io.open(src, "r")
-        if probe then
-            probe:close()
+        local p = io.open(src, "r")
+        if p then p:close(); present[src] = true end
+    end
+    if not present[base] then
+        return nil, "主库不存在,无需隔离"
+    end
+    -- 1) 标记先行:标记写入失败 → 中止,绝不移动主库。
+    if not write_isolated_marker(base) then
+        return nil, "隔离标记写入失败,中止隔离以保护原库"
+    end
+    -- 2) 主库移动(唯一目标名,防同秒覆盖)。
+    local target = unique_corrupt_target(base)
+    if not os.rename(base, target) then
+        -- 主库移动失败:标记已就位(阻断),不回滚标记,直接报错。
+        return nil, "主库重命名失败(隔离标记已就位,阻断自动重建)"
+    end
+    -- 3) sidecar 逐个移动;源存在却失败 → 归档不完整。
+    for _, ext in ipairs(sidecars) do
+        local src = base .. ext
+        if present[src] then
             if not os.rename(src, target .. ext) then
+                -- sidecar 隔离失败:保留标记(阻断自动重建);主库已留在 .corrupt-*
+                -- 作为损坏证据,不回滚(避免把损坏文件移回原处掩盖证据)。
                 return nil, "sidecar 隔离失败: " .. src
             end
         end
     end
-    -- 写入隔离标记:阻止 open() 在下次自动重建空库(作者意见 #2)。
-    -- 旧想法不会因自动建空库而静默不可见;须显式恢复/重同步后才允许重建。
-    local mk = io.open(base .. ".isolated", "w")
-    if mk then mk:close() end
     return target
 end
 
@@ -187,15 +236,11 @@ function ThoughtDB.checkpoint(db)
     return true
 end
 
--- 隔离态判定:主库已被重命名为 .corrupt-*,且写入了 .isolated 标记。
--- 此时禁止 open() 自动重建空库(作者意见 #2):否则旧想法会静默变成不可见,
--- 须显式恢复或重新同步后才允许重建。
+-- 隔离态判定:以 .isolated 标记为准——标记存在即视为已隔离,即使主库仍残留
+-- 也阻断 open() 自动重建空库(作者意见 #2 + 第二轮复审:标记先行阶段主库仍在,
+-- 也必须识别标记,否则部分隔离态会被当成"无主库"而静默建空库)。
 local function is_isolated(book_dir)
     local base = ThoughtDB.db_path(book_dir)
-    -- 主库仍存在 → 未隔离(健康或首次打开)。
-    local probe = io.open(base, "r")
-    if probe then probe:close(); return false end
-    -- 主库缺失但存在隔离标记 → 已隔离。
     local mk = io.open(base .. ".isolated", "r")
     if mk then mk:close(); return true end
     return false
