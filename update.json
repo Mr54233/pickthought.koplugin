@@ -9,7 +9,7 @@
     "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.1/pickthought.koplugin.zip",
     "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.1/pickthought.koplugin.zip"
   ],
-  "size": 134739,
-  "sha256": "72251d7163c80b8123cf750211ff45253b66bff755b8063a0ee2273499da4bfb",
-  "notes": "问题修复：\n完善同步可靠性与前台操作保护\n同步 0.3.0 更新说明\n优化 Release 摘要生成与贡献者信息"
+  "size": 133836,
+  "sha256": "d679ef1e5d3ec16356ee482986b283e1d2b15258954ca4350481f825ce4f605b",
+  "notes": "问题修复：\n修复跨平台发布包一致性\n完善同步可靠性与前台操作保护\n同步 0.3.0 更新说明\n优化 Release 摘要生成与贡献者信息"
 }
