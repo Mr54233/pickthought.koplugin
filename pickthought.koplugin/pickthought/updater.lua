@@ -3,6 +3,7 @@ local Digests=require("pickthought.digests")
 local U=require("pickthought.util")
 local logger=require("logger")
 local Updater={}; Updater.__index=Updater
+local MAX_PACKAGE_BYTES=10*1024*1024
 
 function Updater:new(http,store,version,plugin_root)
     return setmetatable({http=http,store=store,version=version,plugin_root=plugin_root},self)
@@ -76,6 +77,25 @@ local function file_bytes(path)
     return data
 end
 
+local function header_value(headers,name)
+    local wanted=tostring(name or ""):lower()
+    for key,value in pairs(headers or {}) do
+        if tostring(key):lower()==wanted then return value end
+    end
+end
+
+local function plain_notes(value)
+    local text=tostring(value or ""):gsub("\r\n","\n"):gsub("\r","\n")
+    text=text:gsub("^[ \t]*#+[ \t]*",""):gsub("\n[ \t]*#+[ \t]*","\n")
+    text=text:gsub("%*%*(.-)%*%*","%1"):gsub("__(.-)__","%1")
+    text=text:gsub("`(.-)`","%1")
+    text=text:gsub("%[([^%]]+)%]%([^%)]+%)","%1")
+    text=text:gsub("\n[ \t]*[-*+][ \t]+","\n")
+    return text:gsub("^[ \t]+",""):gsub("[ \t]+$","")
+end
+
+Updater.normalize_notes=plain_notes
+
 local function validate_manifest(m)
     if type(m)~="table" or type(m.version)~="string" or m.version=="" then
         return nil,"更新清单缺少版本号"
@@ -101,6 +121,7 @@ function Updater:check()
             local valid,reason=validate_manifest(m)
             if valid then
                 logger.info("[撷思][Updater] manifest loaded",url,"version=",tostring(m.version))
+                self:cache_info(m)
                 if not U.semver_newer(m.version,self.version) then
                     return {current=true,version=m.version,name=m.name,notes=m.notes}
                 end
@@ -115,43 +136,167 @@ function Updater:check()
     return nil,errors[#errors] or "无法读取更新清单"
 end
 
-local function curl_download(url,path)
-    local cmd="curl -L --fail --silent --show-error --connect-timeout 20 --max-time 180 -o "
-        ..U.shell_quote(path).." "..U.shell_quote(url).." 2>/dev/null"
-    logger.info("[撷思][Updater] curl fallback download",url)
-    return command_ok(os.execute(cmd))
+function Updater:cache_info(m)
+    if not self.store or type(self.store.save_update_info)~="function" then return end
+    self.store:save_update_info({
+        version=tostring(m and m.version or ""),
+        name=plain_notes(m and m.name),
+        notes=plain_notes(m and m.notes),
+        checked_at=os.time(),
+    })
 end
 
-local function download_one(self,url,path)
+function Updater:cached_info()
+    if not self.store or type(self.store.update_info)~="function" then return nil end
+    local info=self.store:update_info()
+    if type(info)~="table" or tostring(info.version or "")=="" then return nil end
+    return info
+end
+
+local function curl_download(url,path)
+    local cmd="curl -L --fail --silent --show-error --connect-timeout 20 --max-time 180 --max-filesize "
+        ..tostring(MAX_PACKAGE_BYTES).." -o "
+        ..U.shell_quote(path).." "..U.shell_quote(url).." 2>/dev/null"
+    logger.info("[撷思][Updater] curl fallback download",url)
+    local ok=command_ok(os.execute(cmd))
+    if not ok then os.remove(path) end
+    return ok
+end
+
+local function stream_download(url,path,total_hint,on_progress)
+    local ok_http,http=pcall(require,"socket.http")
+    local ok_https,https=pcall(require,"ssl.https")
+    local ok_socketutil,socketutil=pcall(require,"socketutil")
+    local transport=url:match("^https://") and (ok_https and https or nil)
+        or (ok_http and http or nil)
+    if not transport or type(transport.request)~="function" then
+        return nil,"HTTP 流式下载不可用"
+    end
+
+    local file,open_error=io.open(path,"wb")
+    if not file then return nil,open_error or "无法创建更新临时文件" end
+    local received=0
+    local total=tonumber(total_hint) or 0
+    local stream_error
+    local function sink(chunk,err)
+        if chunk then
+            if received+#chunk>MAX_PACKAGE_BYTES then
+                stream_error="更新包过大(超过 10MB)"
+                return nil,stream_error
+            end
+            local wrote,werr=file:write(chunk)
+            if not wrote then
+                stream_error=werr or "写入更新临时文件失败"
+                return nil,stream_error
+            end
+            received=received+#chunk
+            if on_progress then
+                local called,keep=pcall(on_progress,received,total)
+                if not called then
+                    stream_error=tostring(keep)
+                    return nil,stream_error
+                end
+                if keep==false then
+                    stream_error="已取消"
+                    return nil,stream_error
+                end
+            end
+        end
+        if err and tostring(err)~="" then
+            stream_error=tostring(err)
+            return nil,stream_error
+        end
+        return 1
+    end
+
+    if ok_socketutil and socketutil and socketutil.set_timeout then
+        socketutil:set_timeout(20,180)
+    end
+    local called,result,code,headers,status=pcall(transport.request,{
+        url=url,method="GET",headers={
+            ["User-Agent"]="KOReader-PickThought-Updater/1.0",
+            ["Accept"]="application/zip,application/octet-stream,*/*",
+        },sink=sink,redirect=true,
+    })
+    if ok_socketutil and socketutil and socketutil.reset_timeout then
+        socketutil:reset_timeout()
+    end
+    pcall(file.flush,file)
+    pcall(file.close,file)
+    if not called then os.remove(path); return nil,tostring(result) end
+    if stream_error then os.remove(path); return nil,stream_error end
+    code=tonumber(code)
+    if not code or code<200 or code>=300 then
+        os.remove(path)
+        return nil,"HTTP "..tostring(code or status or "error")
+    end
+    local content_length=tonumber(header_value(headers,"content-length"))
+    if content_length and content_length>0 then total=content_length end
+    if on_progress then on_progress(received,total) end
+    return true
+end
+
+function Updater:download_to(url,path,total_hint,on_progress)
+    return stream_download(url,path,total_hint,on_progress)
+end
+
+local function download_one(self,url,path,total_hint,on_progress)
     os.remove(path)
-    local ok,data=pcall(function()
-        return self.http:download(url,{auth=false,retries=2,redirects=10,timeout={20,150}})
+    local ok,downloaded,err=pcall(function()
+        return self:download_to(url,path,total_hint,on_progress)
     end)
-    if ok and type(data)=="string" and #data>0 then
-        local wrote,err=U.atomic_write(path,data,true)
-        if not wrote then return nil,err or "无法保存更新包" end
+    if ok and downloaded then
         return true
     end
-    logger.warn("[撷思][Updater] Lua download unavailable or empty; using curl",url,tostring(data))
-    if curl_download(url,path) then return true end
-    return nil,tostring(data or "下载失败")
+    err=ok and err or tostring(downloaded)
+    if tostring(err):find("已取消",1,true) then
+        return nil,err
+    end
+    logger.warn("[撷思][Updater] Lua streaming download unavailable or failed; using curl",url,tostring(err))
+    if curl_download(url,path) then
+        local size=U.file_size(path) or 0
+        if on_progress then on_progress(size,total_hint or size) end
+        return true
+    end
+    return nil,tostring(err or "下载失败")
 end
 
 function Updater:download(m, on_progress)
     local urls=package_urls(m)
     if #urls==0 then error("更新包地址无效") end
-    local p=self.store.updates_dir.."pickthought-"..U.id_name(m.version)..".zip"
+    local p=self.store.updates_dir.."/pickthought-"..U.id_name(m.version)..".zip"
+    local part=p..".part"
     local expected=tostring(m.sha256 or ""):lower():gsub("%s+","")
     if expected=="" then error("更新清单缺少 SHA-256") end
     local expected_size=tonumber(m.size or m.bytes or m.package_size)
+    if expected_size and expected_size>MAX_PACKAGE_BYTES then error("更新包过大(超过 10MB)") end
     local last_error="下载失败"
 
+    os.remove(p)
+    os.remove(part)
+    local function report(event)
+        if not on_progress then return true end
+        return on_progress(event)~=false
+    end
+
     for index,url in ipairs(urls) do
-        if on_progress then on_progress(string.format("正在下载更新(%d/%d)…", index, #urls)) end
-        local downloaded,err=download_one(self,url,p)
-        local raw=downloaded and file_bytes(p) or nil
+        if not report({stage="downloading",current=0,total=expected_size or 0,percent=0,
+            source=index,sources=#urls}) then
+            os.remove(part); error("已取消")
+        end
+        local downloaded,err=download_one(self,url,part,expected_size,function(current,total)
+            local total_bytes=tonumber(total) or expected_size or 0
+            local percent=total_bytes>0 and math.floor(math.min(1,current/total_bytes)*100+0.5) or 0
+            return report({stage="downloading",current=current,total=total_bytes,percent=percent,
+                source=index,sources=#urls})
+        end)
+        if not downloaded and tostring(err or ""):find("已取消",1,true) then
+            os.remove(part)
+            error("已取消")
+        end
+        local raw=downloaded and file_bytes(part) or nil
         if type(raw)=="string" and #raw>0 then
-            if #raw > 10 * 1024 * 1024 then
+            if #raw > MAX_PACKAGE_BYTES then
                 last_error="更新包过大(超过 10MB)"
                 logger.warn("[撷思][Updater] package too large", url, "bytes=", tostring(#raw))
             elseif expected_size and expected_size>0 and #raw~=expected_size then
@@ -160,6 +305,20 @@ function Updater:download(m, on_progress)
             else
                 local actual=Digests.sha256(raw):lower()
                 if actual==expected then
+                    if not report({stage="verifying",current=#raw,total=expected_size or #raw,percent=100,
+                        source=index,sources=#urls}) then
+                        os.remove(part); error("已取消")
+                    end
+                    os.remove(p)
+                    local moved=os.rename(part,p)
+                    if not moved then
+                        os.remove(p)
+                        moved=os.rename(part,p)
+                    end
+                    if not moved then
+                        os.remove(part)
+                        error("无法保存已校验的更新包")
+                    end
                     logger.info("[撷思][Updater] package downloaded",
                         "source=",tostring(index),"bytes=",tostring(#raw),"version=",tostring(m.version))
                     return p
@@ -170,8 +329,9 @@ function Updater:download(m, on_progress)
         else
             last_error=err or "更新包下载失败或文件为空"
         end
-        os.remove(p)
+        os.remove(part)
     end
+    os.remove(part)
     error(last_error)
 end
 
@@ -199,7 +359,7 @@ function Updater:install(path,manifest)
     -- 版本验证:解压后读 _meta.lua 确认 version == manifest version(防下载/解压损坏)
     local meta_raw=U.read_file(incoming.."/_meta.lua",true) or ""
     local staged_version=meta_raw:match('version%s*=%s*"([^"]+)"')
-    if staged_version and tostring(staged_version)~=tostring(manifest.version) then
+    if not staged_version or tostring(staged_version)~=tostring(manifest.version) then
         U.remove_tree(stage); return nil,"更新包版本不匹配(期望 "..tostring(manifest.version)..",实际 "..tostring(staged_version)..")"
     end
     local roots=U.list(unpacked)

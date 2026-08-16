@@ -3,6 +3,7 @@ local Dispatcher=require("dispatcher")
 local InfoMessage=require("ui/widget/infomessage")
 local InputDialog=require("ui/widget/inputdialog")
 local Menu=require("ui/widget/menu")
+local TextViewer=require("ui/widget/textviewer")
 local UIManager=require("ui/uimanager")
 local WidgetContainer=require("ui/widget/container/widgetcontainer")
 local logger=require("logger")
@@ -20,6 +21,7 @@ local Binding=require("pickthought.binding")
 local SyncTask=require("pickthought.sync_task")
 local SyncGate=require("pickthought.sync_gate")
 local SyncProgress=require("pickthought.sync_progress")
+local UpdateProgress=require("pickthought.update_progress")
 local SyncReport=require("pickthought.sync_report")
 local BatchSync=require("pickthought.batch_sync")
 local AnnotationCompat=require("pickthought.annotation_compat")
@@ -61,8 +63,9 @@ function Plugin:init()
     self.updater=Updater:new(self.http,self.store,self.version,ROOT)
     self.sync_task=SyncTask:new(self.store)
     UIManager:scheduleIn(0.8,function() self:_recover_sync_state() end)
-    -- 自动检查更新默认关,用户在设置里开启才生效
-    if self.store:preferences().auto_check_update==true then
+    -- 自动检查由两个更新开关共同控制,新安装默认关闭。
+    local update_preferences=self.store:preferences().update or {}
+    if update_preferences.auto_update==true or update_preferences.notify_update==true then
         UIManager:scheduleIn(5,function() self:maybe_auto_check_update(false) end)
     end
     self:onDispatcherRegisterActions()
@@ -123,7 +126,9 @@ function Plugin:home_menu()
     items[#items+1]=self:annotation_style_item()
     items[#items+1]={text="账户",sub_item_table_func=function() return self:account_menu() end}
     items[#items+1]={text="设置",sub_item_table_func=function() return self:settings_menu() end}
-    items[#items+1]={text="更新与关于",sub_item_table_func=function() return self:update_about_menu() end}
+    items[#items+1]={text="更新",sub_item_table_func=function() return self:update_about_menu() end}
+    items[#items+1]={text="重置全部书籍",callback=self:safe("clear_all",function() self:clear_all_data() end)}
+    items[#items+1]={text="关于",callback=self:safe("about",function() self:show_about() end)}
     return items
 end
 
@@ -150,7 +155,9 @@ function Plugin:reader_menu()
     end
     items[#items+1]={text="账户",sub_item_table_func=function() return self:account_menu() end}
     items[#items+1]={text="设置",sub_item_table_func=function() return self:settings_menu() end}
-    items[#items+1]={text="更新与关于",sub_item_table_func=function() return self:update_about_menu() end}
+    items[#items+1]={text="更新",sub_item_table_func=function() return self:update_about_menu() end}
+    items[#items+1]={text="重置全部书籍",callback=self:safe("clear_all",function() self:clear_all_data() end)}
+    items[#items+1]={text="关于",callback=self:safe("about",function() self:show_about() end)}
     return items
 end
 
@@ -425,44 +432,117 @@ function Plugin:thought_font_menu()
 end
 
 function Plugin:update_about_menu()
+    local function update_preference(name)
+        return (self.store:preferences().update or {})[name]==true
+    end
     return {
-        {text="检查更新",callback=self:safe("update",function() self:check_update() end)},
-        {text="重置全部书籍",callback=self:safe("clear_all",function() self:clear_all_data() end)},
-        {text="当前版本 · "..tostring(self.version),enabled=false},
-        {text="关于",callback=self:safe("about",function() self:show_about() end)},
+        {text="检查更新（当前版本 · "..tostring(self.version).."）",callback=self:safe("update",function() self:check_update() end)},
+        {text="查看更新日志",callback=self:safe("update-log",function() self:show_update_log() end)},
+        {text="自动更新",checked_func=function() return update_preference("auto_update") end,
+            callback=function()
+                local p=self.store:preferences(); p.update=p.update or {}
+                p.update.auto_update=not (p.update.auto_update==true)
+                self.store:save_preferences(p)
+                self:toast(p.update.auto_update and "自动更新已开启" or "自动更新已关闭")
+                if p.update.auto_update==true or p.update.notify_update==true then
+                    UIManager:scheduleIn(0.1,function() self:maybe_auto_check_update(true) end)
+                end
+            end},
+        {text="通知有可用更新",checked_func=function() return update_preference("notify_update") end,
+            callback=function()
+                local p=self.store:preferences(); p.update=p.update or {}
+                p.update.notify_update=not (p.update.notify_update==true)
+                self.store:save_preferences(p)
+                self:toast(p.update.notify_update and "更新通知已开启" or "更新通知已关闭")
+                if p.update.auto_update==true or p.update.notify_update==true then
+                    UIManager:scheduleIn(0.1,function() self:maybe_auto_check_update(true) end)
+                end
+        end},
     }
 end
 
--- 启动后静默检查更新(每 24h 一次,失败 6h 后重试)。有新版 toast 提示,不弹窗。
--- 移植自 miuread maybe_auto_check_update。
+-- 启动后静默检查更新(每 24h 一次,失败 6h 后重试)。
 function Plugin:maybe_auto_check_update(force)
     if self._auto_update_check_running then return false end
-    local now = os.time()
-    local interval = Config.AUTO_UPDATE_INTERVAL
-    local state = self.store:get("update_check", {})
-    local last = tonumber(state.last_attempt_at) or 0
-    if not force and now - last < interval then return false end
+    local settings=self.store:preferences().update or {}
+    if not force and settings.auto_update~=true and settings.notify_update~=true then return false end
+    local now=os.time()
+    local interval=Config.AUTO_UPDATE_INTERVAL
+    local state=self.store:get("update_check",{})
+    local last=tonumber(state.last_attempt_at) or 0
+    if not force and now-last<interval then return false end
     if not self:is_online() then return false end
-    self._auto_update_check_running = true
-    state.last_attempt_at = now
-    self.store:set("update_check", state)
-    UIManager:scheduleIn(0.05, self:safe("auto-update", function()
-        local m = self.updater:check()
-        self._auto_update_check_running = false
-        local fresh = self.store:get("update_check", {})
-        if m and not m.current then
-            fresh.last_success_at = os.time()
-            self.store:set("update_check", fresh)
-            self:toast(string.format("发现新版本 %s,「更新与关于」查看", tostring(m.version or "")), 5)
-        elseif m then
-            fresh.last_success_at = os.time()
-            self.store:set("update_check", fresh)
+    self._auto_update_check_running=true
+    state.last_attempt_at=now
+    self.store:set("update_check",state)
+    UIManager:scheduleIn(0.05,self:safe("auto-update",function()
+        local ok,m,e=pcall(function() return self.updater:check() end)
+        self._auto_update_check_running=false
+        local fresh=self.store:get("update_check",{})
+        local current_settings=self.store:preferences().update or {}
+        if ok and m and not m.current then
+            fresh.last_success_at=os.time()
+            self.store:set("update_check",fresh)
+            if current_settings.notify_update==true then
+                self:toast(string.format("撷思发现新版本 %s，请前往「更新」查看",tostring(m.version or "")),5)
+            end
+            if current_settings.auto_update==true then
+                UIManager:nextTick(function() self:_do_update(m,true) end)
+            end
+        elseif ok and m then
+            fresh.last_success_at=os.time()
+            self.store:set("update_check",fresh)
         else
-            fresh.last_attempt_at = os.time() - (interval - Config.AUTO_UPDATE_RETRY_INTERVAL)
-            self.store:set("update_check", fresh)
+            fresh.last_attempt_at=os.time()-(interval-Config.AUTO_UPDATE_RETRY_INTERVAL)
+            self.store:set("update_check",fresh)
+            logger.warn("[撷思][Updater] automatic check failed",tostring(e or m))
         end
     end))
     return true
+end
+
+function Plugin:_update_log_text(m)
+    m=m or {}
+    local version=tostring(m.version or self.version)
+    local text="版本："..version
+    if m.name and tostring(m.name)~="" then text=text.."\n"..tostring(m.name) end
+    local notes=Updater.normalize_notes(m.notes)
+    text=text.."\n\n更新说明：\n"..(notes~="" and notes or "暂无更新说明")
+    if m.checked_at then text=text.."\n\n检查时间："..U.now_text(m.checked_at) end
+    return text
+end
+
+function Plugin:_show_update_log(m)
+    local viewer
+    viewer=TextViewer:new{
+        title="更新日志 · v"..tostring(m.version or self.version),
+        text=self:_update_log_text(m),text_type="general",auto_para_direction=true,
+        buttons_table={{{text="关闭",callback=function() UIManager:close(viewer) end}}},
+    }
+    UIManager:show(viewer)
+end
+
+function Plugin:show_update_log()
+    local cached=self.updater:cached_info()
+    if not self:is_online() then
+        if cached then self:_show_update_log(cached)
+        else self:info("没有缓存的更新日志,请连接网络后重试") end
+        return
+    end
+    local Trapper=require("ui/trapper")
+    Trapper:wrap(function()
+        if not Trapper:info("正在读取更新日志…") then return end
+        local m,e=self.updater:check()
+        Trapper:clear()
+        if not m then
+            if cached then self:_show_update_log(cached)
+            else self:_update_fail("读取更新日志失败：\n"..tostring(e or "未知错误")) end
+            return
+        end
+        UIManager:nextTick(function()
+            self:_show_update_log(self.updater:cached_info() or m)
+        end)
+    end)
 end
 
 function Plugin:check_update()
@@ -475,47 +555,79 @@ function Plugin:check_update()
         if not m then self:_update_fail("检查更新失败：\n"..tostring(e or "未知错误")); return end
         if m.current then self:info("当前已是最新版本\n\n当前版本："..tostring(self.version)); return end
         local text="发现新版本："..tostring(m.version)
-        if m.name and tostring(m.name)~="" then text=text.."\n"..tostring(m.name) end
-        if m.notes and tostring(m.notes)~="" then text=text.."\n\n更新说明：\n"..tostring(m.notes) end
+        if m.name and tostring(m.name)~="" then text=text.."\n"..Updater.normalize_notes(m.name) end
+        local notes=Updater.normalize_notes(m.notes)
+        if notes~="" then text=text.."\n\n更新说明：\n"..notes end
         text=text.."\n\n是否下载并安装？"
-        -- 推迟到协程外弹 ConfirmBox:Trapper 退出 + 菜单关闭各排一次重绘,
-        -- 同步弹的窗口会被顶掉(和文管选书操作面板同一类时序 bug)。
+        -- 推迟到协程外,避免菜单重绘把确认框顶掉。
         UIManager:nextTick(function()
             UIManager:show(ConfirmBox:new{text=text,ok_text="下载并安装",
-                ok_callback=function() self:_do_update(m) end})
+                ok_callback=function() self:_do_update(m,false) end})
         end)
     end)
 end
 
-function Plugin:_do_update(m)
-    if self:_sync_mutation_blocked("同步任务进行中,请等它完成或取消后再安装更新") then return end
+function Plugin:_update_retry_after_busy()
+    local state=self.store:get("update_check",{})
+    state.last_attempt_at=os.time()-(Config.AUTO_UPDATE_INTERVAL-Config.AUTO_UPDATE_RETRY_INTERVAL)
+    self.store:set("update_check",state)
+end
+
+function Plugin:_show_update_installed(silent)
+    if silent then
+        self:toast("更新已安装,请重启 KOReader",5)
+        return
+    end
+    UIManager:show(ConfirmBox:new{
+        text="更新已安装\n\n需要重启 KOReader 才会生效。",
+        ok_text="立即重启",
+        ok_callback=function() UIManager:restartKOReader() end,
+        cancel_text="稍后",
+    })
+end
+
+function Plugin:_do_update(m,silent)
+    if SyncGate.busy(self.sync_task) then
+        if not silent then self:info("同步任务进行中,请等它完成或取消后再安装更新") end
+        self:_update_retry_after_busy()
+        return
+    end
     local Trapper=require("ui/trapper")
     Trapper:wrap(function()
+        local progress
+        if not silent then
+            progress=UpdateProgress:new{title="更新撷思",on_cancel=function() end}
+            progress:show()
+        end
         local path
         local ok_dl,err=pcall(function()
-            path=self.updater:download(m, function(msg)
-                if not Trapper:info(msg) then error("已取消") end
-            end)
+            path=self.updater:download(m,progress and function(event)
+                progress:set_state(event)
+                return not progress.cancelled
+            end or nil)
         end)
         if not ok_dl or not path then
-            Trapper:clear()
-            if tostring(err or ""):find("已取消") then return end
-            self:_update_fail("下载失败：\n"..tostring(err or "未知错误"))
+            if progress then progress:close() end
+            if tostring(err or ""):find("已取消",1,true) then return end
+            self:_update_fail("下载失败：\n"..tostring(err or "未知错误"),silent)
             return
         end
-        if not Trapper:info("正在安装更新…") then return end
-        if self:_sync_mutation_blocked("同步任务已开始,本次更新暂不安装") then
-            Trapper:clear()
+        if SyncGate.busy(self.sync_task) then
+            if progress then progress:close() end
+            if not silent then self:info("同步任务已开始,本次更新暂不安装") end
+            self:_update_retry_after_busy()
             return
         end
+        if progress then progress:set_state({stage="installing",percent=100}) end
         local ok_inst,er=self.updater:install(path,m)
-        Trapper:clear()
-        if ok_inst then self:info("更新已安装\n\n请完全退出并重新启动 KOReader。")
-        else self:_update_fail("安装失败：\n"..tostring(er)) end
+        if progress then progress:close() end
+        if ok_inst then self:_show_update_installed(silent)
+        else self:_update_fail("安装失败：\n"..tostring(er),silent) end
     end)
 end
 
-function Plugin:_update_fail(text)
+function Plugin:_update_fail(text,silent)
+    if silent then self:toast("自动更新失败: "..U.first_line(text,120),5); return end
     UIManager:show(InfoMessage:new{text=tostring(text or ""),flush_events_on_show=true})
 end
 
