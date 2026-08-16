@@ -18,6 +18,7 @@ local Cookies=require("pickthought.cookies")
 local Thoughts=require("pickthought.thoughts")
 local Binding=require("pickthought.binding")
 local SyncTask=require("pickthought.sync_task")
+local SyncGate=require("pickthought.sync_gate")
 local SyncProgress=require("pickthought.sync_progress")
 local SyncReport=require("pickthought.sync_report")
 local BatchSync=require("pickthought.batch_sync")
@@ -487,6 +488,7 @@ function Plugin:check_update()
 end
 
 function Plugin:_do_update(m)
+    if self:_sync_mutation_blocked("同步任务进行中,请等它完成或取消后再安装更新") then return end
     local Trapper=require("ui/trapper")
     Trapper:wrap(function()
         local path
@@ -502,6 +504,10 @@ function Plugin:_do_update(m)
             return
         end
         if not Trapper:info("正在安装更新…") then return end
+        if self:_sync_mutation_blocked("同步任务已开始,本次更新暂不安装") then
+            Trapper:clear()
+            return
+        end
         local ok_inst,er=self.updater:install(path,m)
         Trapper:clear()
         if ok_inst then self:info("更新已安装\n\n请完全退出并重新启动 KOReader。")
@@ -515,6 +521,30 @@ end
 
 function Plugin:show_about()
     self:info(Config.NAME.." "..self.version.."\n\n撷思 撷思\n只同步微信读书划线与想法到本地 EPUB 副本\n\n".._("Unofficial client").."\n\n".._("This build has not been verified with every Kindle model or every WeRead book."))
+end
+
+function Plugin:_sync_mutation_blocked(message)
+    if not SyncGate.busy(self.sync_task) then return false end
+    self:info(message or "同步任务进行中,请等它完成或取消后再操作")
+    return true
+end
+
+function Plugin:_capture_sync_context(path, bound)
+    return SyncGate.capture(self.ui and self.ui.document, path, bound and bound.book_id)
+end
+
+function Plugin:_resolve_sync_context(context)
+    local path = self:current_doc_path()
+    local bound = path and Binding.get(self.store, path)
+    if not SyncGate.matches(context, self.ui and self.ui.document, path,
+        bound and bound.book_id) then
+        return nil
+    end
+    return path, bound
+end
+
+function Plugin:_stale_sync_context()
+    self:info("当前书籍已变化,请重新触发同步")
 end
 
 function Plugin:onShow撷思()
@@ -653,7 +683,8 @@ function Plugin:_start_sync_task(path,bound,mode,opts)
     local title=U.trim(tostring(bound.title or ""))
     if title=="" then title=self:doc_title_guess(path) end
     local runtime={doc_path=path,book_id=bound.book_id,title=title,mode=mode,started_at=os.time(),dialog=nil,background=false}
-    local ok,err=self.sync_task:start({doc_path=path,book_id=bound.book_id,title=title,mode=mode},
+    local ok,err=self.sync_task:start({doc_path=path,book_id=bound.book_id,title=title,mode=mode,
+            allow_memory_retry=opts.background ~= true},
         function(state) self:_on_sync_progress(runtime,state) end,
         function(result) self:_finish_sync(runtime,result) end)
     if not ok then
@@ -761,6 +792,7 @@ function Plugin:_maybe_auto_batch(page)
     if not path or not tostring(path):lower():match("%.epub$") then return end
     local bound=Binding.get(self.store,path)
     if not bound then return end
+    local operation_context=self:_capture_sync_context(path,bound)
     local state=self:_sync_state(bound.book_id)
     if not state or (tonumber(state.pending) or 0)<=0 then return end
     local doc=self.ui and self.ui.document
@@ -794,9 +826,11 @@ function Plugin:_maybe_auto_batch(page)
         "next_index=",tostring(context.plan.start_index),
         "auto=",tostring(auto))
     if auto then
+        local current_path,current_bound=self:_resolve_sync_context(operation_context)
+        if not current_path then self:_stale_sync_context(); return end
         self._auto_batch_started=true
         self:toast(BatchSync.background_text(context.plan),3)
-        if not self:_start_sync_task(path,bound,"sync",{background=true,silent=true}) then
+        if not self:_start_sync_task(current_path,current_bound,"sync",{background=true,silent=true}) then
             self._auto_batch_started=nil
         end
         return
@@ -809,8 +843,11 @@ function Plugin:_maybe_auto_batch(page)
         ok_text="后台同步",
         ok_callback=function()
             self._batch_prompt_open=nil
+            if self:_sync_mutation_blocked("已有同步任务进行中,本次不重复启动") then return end
+            local current_path,current_bound=self:_resolve_sync_context(operation_context)
+            if not current_path then self:_stale_sync_context(); return end
             self._auto_batch_started=true
-            if not self:_start_sync_task(path,bound,"sync",{background=true,silent=true}) then
+            if not self:_start_sync_task(current_path,current_bound,"sync",{background=true,silent=true}) then
                 self._auto_batch_started=nil
             end
         end,
@@ -1027,6 +1064,11 @@ function Plugin:restore_original(path)
         text="将用原书备份覆盖当前划线版,书内注入的划线与想法会移除(想法缓存保留)。",
         ok_text="还原原书",
         ok_callback=function()
+            if self:_sync_mutation_blocked("同步任务已开始,本次还原已取消") then return end
+            if is_open and path ~= self:current_doc_path() then
+                self:_stale_sync_context()
+                return
+            end
             os.remove(path)
             local ok,err=os.rename(backup,path)
             if not ok then self:info("还原失败:\n"..tostring(err or "重命名失败")); return end
@@ -1047,6 +1089,7 @@ end
 local RESET_TARGETS = {"sync-cache", "thoughts", "thoughts.db", "thoughts.db-wal", "thoughts.db-shm"}
 
 function Plugin:reset_book_data(path)
+    if self:_sync_mutation_blocked("同步任务进行中,请等它完成或取消后再重置本书") then return end
     path = path or self:current_doc_path()
     if not path then self:info("请先选择一本书"); return end
     local bound = Binding.get(self.store, path)
@@ -1061,10 +1104,12 @@ function Plugin:reset_book_data(path)
         text = string.format("将重置《%s》:\n\n%s\n\n保留绑定关系,重新同步即可恢复。", title, table.concat(lines, "\n")),
         ok_text = "继续",
         ok_callback = function()
+            if self:_sync_mutation_blocked("同步任务已开始,本次重置已取消") then return end
             UIManager:show(ConfirmBox:new{
                 text = "再次确认:重置《"..title.."》?\n此操作不可撤销。",
                 ok_text = "确认重置",
                 ok_callback = function()
+                    if self:_sync_mutation_blocked("同步任务已开始,本次重置已取消") then return end
                     self:_do_reset_book_data(book_dir, path, title)
                 end,
                 cancel_text = "取消",
@@ -1103,6 +1148,7 @@ function Plugin:_restore_original_file(path)
 end
 
 function Plugin:_do_reset_book_data(book_dir, path, title)
+    if self:_sync_mutation_blocked("同步任务进行中,暂不能重置本书") then return end
     local cleared, size_bytes = 0, 0
     if book_dir then
         size_bytes = self:_dir_size(book_dir)
@@ -1125,14 +1171,19 @@ end
 
 -- 重置全部书籍:清所有 book_dir 数据 + 还原所有有备份的原书。
 function Plugin:clear_all_data()
+    if self:_sync_mutation_blocked("同步任务进行中,请等它完成或取消后再重置全部书籍") then return end
     UIManager:show(ConfirmBox:new{
         text = "将重置所有书:\n\n• 清全部书的同步缓存/想法/映射\n• 还原所有注入书为原版\n\n保留绑定关系,各书需重新同步。",
         ok_text = "继续",
         ok_callback = function()
+            if self:_sync_mutation_blocked("同步任务已开始,本次重置已取消") then return end
             UIManager:show(ConfirmBox:new{
                 text = "再次确认:重置全部书籍?\n此操作不可撤销。",
                 ok_text = "确认重置",
-                ok_callback = function() self:_do_clear_all() end,
+                ok_callback = function()
+                    if self:_sync_mutation_blocked("同步任务已开始,本次重置已取消") then return end
+                    self:_do_clear_all()
+                end,
                 cancel_text = "取消",
             })
         end,
@@ -1141,6 +1192,7 @@ function Plugin:clear_all_data()
 end
 
 function Plugin:_do_clear_all()
+    if self:_sync_mutation_blocked("同步任务进行中,暂不能重置全部书籍") then return end
     local lfs = require("libs/libkoreader-lfs")
     local root = self.store.cache_books_dir
     local total_size, book_count, restored_count = 0, 0, 0

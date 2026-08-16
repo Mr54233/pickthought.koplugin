@@ -19,6 +19,15 @@ SyncTask.__index = SyncTask
 -- Kindle 512 MB 机型在可用内存约 100 MB 时，fork reader.lua 子进程会被内核
 -- 拒绝。这里留出保守余量，避免把底层 ENOMEM 直接抛给用户。
 local MIN_FORK_AVAILABLE_KB = 128 * 1024
+local FORK_MEMORY_COOLDOWN_SECONDS = 60
+
+local function is_memory_error(value)
+    local text = tostring(value or ""):lower()
+    return text:find("cannot allocate memory", 1, true) ~= nil
+        or text:find("not enough memory", 1, true) ~= nil
+        or text:find("out of memory", 1, true) ~= nil
+        or text:find("enomem", 1, true) ~= nil
+end
 
 local function lower_worker_priority()
     local ok,ffi=pcall(require,"ffi")
@@ -59,6 +68,7 @@ function SyncTask:new(store)
         backgrounded = false,
         foreground_poll_interval = 0.40,
         background_poll_interval = 1.50,
+        fork_memory_cooldown_until = nil,
         owner_path = store.temp_dir .. "/sync-task-owner.json",
         owner_token = owner_token,
     }, self)
@@ -173,6 +183,24 @@ end
 
 function SyncTask:_memory_available_kb()
     return parse_memory_available_kb(U.read_file("/proc/meminfo", true))
+end
+
+function SyncTask:_fork_memory_cooldown_remaining()
+    local until_at = tonumber(self.fork_memory_cooldown_until) or 0
+    local remaining = until_at - os.time()
+    if remaining <= 0 then
+        self.fork_memory_cooldown_until = nil
+        return 0
+    end
+    return remaining
+end
+
+function SyncTask:_mark_fork_memory_failure(message)
+    if not is_memory_error(message) then return false end
+    self.fork_memory_cooldown_until = os.time() + FORK_MEMORY_COOLDOWN_SECONDS
+    logger.warn("[撷思][SyncTask] fork memory cooldown",
+        "seconds=", tostring(FORK_MEMORY_COOLDOWN_SECONDS), "error=", tostring(message))
+    return true
 end
 
 function SyncTask:_enable_memory_mode()
@@ -478,6 +506,14 @@ end
 function SyncTask:start(task, on_progress, on_done)
     if self.job then return false, "已有同步任务正在运行" end
     if not self:available() then return false, "当前 KOReader 不支持后台同步" end
+    local retry_memory = type(task) == "table" and task.allow_memory_retry == true
+    local cooldown = self:_fork_memory_cooldown_remaining()
+    if cooldown > 0 and not retry_memory then
+        return false, string.format(
+            "设备刚刚报告内存不足,已暂停自动同步约 %d 秒;请稍后重试或手动重新启动同步。",
+            cooldown)
+    end
+    if retry_memory then self.fork_memory_cooldown_until = nil end
 
     local stamp = tostring(os.time()) .. "-" .. tostring(math.random(10000, 99999))
     local progress_path = self.store.temp_dir .. "/sync-progress-" .. stamp .. ".json"
@@ -507,6 +543,7 @@ function SyncTask:start(task, on_progress, on_done)
         local Api = require("pickthought.api")
         local WebFetch = require("pickthought.web_fetch")
         local Sync = require("pickthought.sync")
+        local SyncState = require("pickthought.sync_state")
         local EpubReader = require("pickthought.epub_reader")
         local EpubInject = require("pickthought.epub_inject")
         local Thoughts = require("pickthought.thoughts")
@@ -554,6 +591,34 @@ function SyncTask:start(task, on_progress, on_done)
             UChild.mkdir(cache_dir)
             local completed_marker = cache_dir .. "/.completed"
             local state_path = cache_dir .. "/state.json"
+            local commit_path = cache_dir .. "/commit.json"
+            local function write_json(path, value)
+                local ok_encode, encoded = pcall(JsonChild.encode, value)
+                if not ok_encode then return nil, tostring(encoded) end
+                local ok_write, write_error = UChild.atomic_write(path, encoded, true)
+                if not ok_write then return nil, tostring(write_error or "写入失败") end
+                return true
+            end
+            local function read_json(path)
+                local raw = UChild.read_file(path, true)
+                if not raw then return nil end
+                local ok_decode, decoded = pcall(JsonChild.decode, raw)
+                return ok_decode and type(decoded) == "table" and decoded or nil
+            end
+            local function write_sync_state(value)
+                return write_json(state_path, value)
+            end
+            local function sync_state_options()
+                return {
+                    now = os.time(),
+                    write_state = write_sync_state,
+                    write_marker = function(value)
+                        return UChild.atomic_write(completed_marker, value, true)
+                    end,
+                    marker_exists = function() return UChild.file_exists(completed_marker) end,
+                    remove_marker = function() return os.remove(completed_marker) end,
+                }
+            end
             -- 不再清 .completed 缓存:已缓存的章节 resumed 跳过(免费),失败的(缓存
             -- 损坏/不存在)重拉。用户想全新重拉走「重置本书」。之前清缓存导致用户
             -- 点「同步」补齐失败章节时缓存全没(issue #2 评论)。
@@ -596,8 +661,25 @@ function SyncTask:start(task, on_progress, on_done)
                 local state_ok, decoded = pcall(JsonChild.decode, state_raw)
                 if state_ok and type(decoded) == "table" then previous_state = decoded end
             end
-            local completed = UChild.file_exists(completed_marker)
             local incremental = mode == "sync"
+            if incremental then
+                -- 上次若在 EPUB 换位后、sidecar 提交前退出,先用提交记录补齐状态。
+                local pending_commit = read_json(commit_path)
+                if pending_commit and type(pending_commit.report) == "table" then
+                    local recovered, recover_error = SyncState.commit(
+                        pending_commit.report, sync_state_options())
+                    if not recovered then
+                        error("上次同步提交未完成:" .. tostring(recover_error))
+                    end
+                    os.remove(commit_path)
+                    if UChild.file_exists(commit_path) then
+                        error("上次同步提交记录无法清理")
+                    end
+                    previous_state = recovered
+                end
+            end
+            local completed = incremental and SyncState.is_complete(previous_state,
+                UChild.file_exists(completed_marker)) or false
             local retry_after = tonumber(previous_state.retry_after)
             if retry_after and retry_after > os.time() then
                 FFIUtil.usleep((retry_after - os.time()) * 1000000)
@@ -608,6 +690,16 @@ function SyncTask:start(task, on_progress, on_done)
                     or ((tonumber(previous_state.total) or 0)
                         - (tonumber(previous_state.pending) or 0) + 1)
                 chapter_start = math.max(1, chapter_start)
+            end
+            if incremental then
+                local running_ok, running_error = write_sync_state{
+                    status = "running", total = previous_state.total,
+                    pending = previous_state.pending, next_index = chapter_start,
+                    updated_at = os.time(),
+                }
+                if not running_ok then
+                    error("无法记录同步开始状态:" .. tostring(running_error))
+                end
             end
             local cached_annotations = {
                 fetch_chapter = function(_, bid, uid)
@@ -729,23 +821,33 @@ function SyncTask:start(task, on_progress, on_done)
                     return true
                 end,
             }
-            if not report then error(sync_err or "同步失败") end
+            if not report then
+                local failure_status = cancelled() and "cancelled" or "failed"
+                local failure_ok, failure_error = write_sync_state{
+                    status = failure_status, total = previous_state.total,
+                    pending = previous_state.pending, next_index = previous_state.next_index
+                        or chapter_start, updated_at = os.time(),
+                }
+                if not failure_ok then
+                    LoggerChild.warn("[撷思][SyncTask] failure state save failed", tostring(failure_error))
+                end
+                error(sync_err or "同步失败")
+            end
             -- 状态落盘:阅读端据此做「继续拉取」菜单与自动分批触发。
             -- 离线重注不写:它不碰网络,pending 恒为 0,写进去会把「还剩 N 章」
             -- 的真实批次状态抹掉(真机翻车:重注后续拉菜单消失)。
             if mode ~= "reinject" then
-                local pending = tonumber(report.chapters_pending) or 0
-                local state_ok, state_json = pcall(JsonChild.encode, {
-                    total = report.chapters_total, pending = pending,
-                    next_index = tonumber(report.next_index) or (report.chapters_total + 1),
-                    retry_after = report.rate_limit_wait and (os.time() + report.rate_limit_wait) or nil,
-                    updated_at = os.time(),
+                local journal_ok, journal_error = write_json(commit_path, {
+                    version = 1, report = serializable_copy(report), created_at = os.time(),
                 })
-                if state_ok then UChild.atomic_write(cache_dir .. "/state.json", state_json, true) end
-                -- 全部章节拉完才算「完成」:打标记保留缓存供离线重注,
-                -- 下次全新同步看到标记会清空重拉;分批未完/取消/失败不打标记=续传。
-                if pending == 0 then
-                    UChild.atomic_write(completed_marker, tostring(os.time()), true)
+                if not journal_ok then
+                    error("同步内容已生成,但提交记录保存失败:" .. tostring(journal_error))
+                end
+                local state, state_error = SyncState.commit(report, sync_state_options())
+                if not state then error(state_error) end
+                os.remove(commit_path)
+                if UChild.file_exists(commit_path) then
+                    error("同步状态已提交,但提交记录无法清理")
                 end
             end
             return {report = report, auth = store:auth()}
@@ -764,7 +866,7 @@ function SyncTask:start(task, on_progress, on_done)
             LoggerChild.warn("[撷思][SyncTask] child failed", raw_error)
             local display_error = raw_error:match("^(.-)\nstack traceback:") or raw_error
             display_error = display_error:gsub("^.-%.lua:%d+:%s*", "")
-            if raw_error:lower():find("not enough memory", 1, true) then
+            if is_memory_error(raw_error) then
                 display_error = "设备内存不足,同步未完成;原书与已有副本未受影响,已拉取章节保存在断点缓存。"
             end
             local was_cancelled = cancelled() or display_error == "已取消"
@@ -785,7 +887,9 @@ function SyncTask:start(task, on_progress, on_done)
     if not ok or not pid then
         os.remove(worker_settings_path)
         self:_release_memory_mode()
-        return false, tostring(err or pid or "无法启动同步子进程")
+        local launch_error = tostring(err or pid or "无法启动同步子进程")
+        self:_mark_fork_memory_failure(launch_error)
+        return false, launch_error
     end
 
     self.job = {
@@ -815,6 +919,8 @@ function SyncTask:start(task, on_progress, on_done)
 end
 
 SyncTask.MIN_FORK_AVAILABLE_KB = MIN_FORK_AVAILABLE_KB
+SyncTask.FORK_MEMORY_COOLDOWN_SECONDS = FORK_MEMORY_COOLDOWN_SECONDS
+SyncTask._is_memory_error = is_memory_error
 SyncTask._parse_memory_available_kb = parse_memory_available_kb
 
 return SyncTask

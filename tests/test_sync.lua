@@ -121,13 +121,38 @@ T.case("重同步从 .orig 干净备份注入", function()
     T.eq(report.dest, "/books/书.epub", "dest 仍是书架路径")
 end)
 
-T.case("想法缓存写入失败不计入注入成功", function()
-    local deps = make_deps({save_thoughts = function() return nil end})
+T.case("想法缓存写入失败时停在当前章节", function()
+    local deps, calls = make_deps({
+        api = {chapters = function()
+            return {data = {
+                {chapterUid = 1, title = "第一章", chapterIdx = 1},
+                {chapterUid = 2, title = "第二章", chapterIdx = 2},
+            }}
+        end},
+        annotations = {
+            fetch_chapter = function(_, _, uid)
+                if tostring(uid) == "1" then
+                    return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                        review_map = {}, review_groups = {}, underline_count = 1,
+                        thought_count = 0, thought_entry_count = 0, errors = {}}
+                end
+                return {underlines = {{range = "0-7", markText = "滟滟随波千万里"}},
+                    review_map = {["0-7"] = {{content = "想法"}}},
+                    review_groups = {{range = "0-7", texts = {{content = "想法"}}}},
+                    underline_count = 1, thought_count = 1, thought_entry_count = 1, errors = {}}
+            end,
+        },
+        save_thoughts = function(_, uid)
+            if tostring(uid) == "2" then return nil, "磁盘满" end
+            return true
+        end,
+    })
     local report, err = Sync.run(deps)
-    T.ok(report, "同步仍应完成: " .. tostring(err))
+    T.ok(report, "前一章成功时应提交部分结果: " .. tostring(err))
     T.eq(report.save_failures, 1, "记录想法缓存失败章节")
-    T.eq(report.thoughts_injected, 0, "不可打开的想法不计成功")
-    T.eq(report.thoughts_failed, 1, "不可打开的想法计入失败")
+    T.eq(report.next_index, 2, "保存失败章节不能推进游标")
+    T.eq(report.chapters_pending, 1, "保存失败章节计入待处理")
+    T.eq(#calls.injected.mapped, 1, "只注入保存成功的前一章")
 end)
 
 T.case("增量同步保留干净备份并原子替换当前注入版", function()
@@ -532,7 +557,31 @@ T.case("限流章节不推进游标,下次同步可重试", function()
     T.eq(calls.injected, nil, "限流章的半成品不注入")
 end)
 
-T.case("连续硬失败触发断网熔断", function()
+T.case("章节部分拉取失败也不能推进游标", function()
+    local deps, calls = make_deps({
+        annotations = {
+            fetch_chapter = function(_, _, uid)
+                if tostring(uid) == "1" then
+                    return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                        review_map = {}, review_groups = {}, underline_count = 1,
+                        thought_count = 0, thought_entry_count = 0, errors = {}}
+                end
+                return {underlines = {{range = "0-7", markText = "滟滟随波千万里"}},
+                    review_map = {}, review_groups = {}, underline_count = 1,
+                    thought_count = 0, thought_entry_count = 0,
+                    errors = {"想法批次请求失败"}}
+            end,
+        },
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "前一章成功时应保留部分结果: " .. tostring(err))
+    T.eq(report.fetch_errors, 1, "部分失败计入拉取错误")
+    T.eq(report.next_index, 2, "部分失败章节不能推进游标")
+    T.eq(report.chapters_pending, 1, "部分失败章节计入待处理")
+    T.eq(#calls.injected.mapped, 1, "不注入部分失败章节")
+end)
+
+T.case("首个硬失败立即停在失败章节", function()
     local rows = {}
     for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local fetch_count = 0
@@ -543,13 +592,13 @@ T.case("连续硬失败触发断网熔断", function()
         },
     })
     local report, err = Sync.run(deps)
-    T.ok(report == nil and tostring(err):find("连续", 1, true), "熔断报错: " .. tostring(err))
-    T.ok(tostring(err):find("network request failed", 1, true), "熔断消息必须带真实错误: " .. tostring(err))
-    T.eq(fetch_count, 3, "连续 3 章失败即中止,不磨完全书")
+    T.ok(report == nil and tostring(err):find("划线拉取失败", 1, true), "失败报错: " .. tostring(err))
+    T.ok(tostring(err):find("network request failed", 1, true), "失败消息必须带真实错误: " .. tostring(err))
+    T.eq(fetch_count, 1, "首个失败即停止,避免跨过连续游标")
     T.eq(calls.injected, nil, "熔断后不注入")
 end)
 
-T.case("断点缓存命中不复位熔断计数", function()
+T.case("缓存命中后失败仍停在失败章节", function()
     local rows = {}
     for i = 1, 7 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local fetch_calls = 0
@@ -559,8 +608,8 @@ T.case("断点缓存命中不复位熔断计数", function()
             fetch_chapter = function(_, _, uid)
                 fetch_calls = fetch_calls + 1
                 local n = tonumber(uid)
-                if n % 2 == 0 then
-                    -- 偶数章:断点缓存命中(resumed),不发网络
+                if n == 1 then
+                    -- 第一章:断点缓存命中(resumed),不发网络
                     return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
                         review_map = {}, review_groups = {}, resumed = true,
                         underline_count = 1, thought_count = 0, thought_entry_count = 0, errors = {}}
@@ -570,9 +619,9 @@ T.case("断点缓存命中不复位熔断计数", function()
         },
     })
     local report, err = Sync.run(deps)
-    T.ok(report == nil and tostring(err):find("连续", 1, true),
-        "缓存命中穿插的连续网络失败仍应熔断: " .. tostring(err))
-    T.eq(fetch_calls, 5, "第 5 章(第 3 次真实失败)后中止")
+    T.ok(report, "缓存命中后应保留前一章结果: " .. tostring(err))
+    T.eq(report.next_index, 2, "缓存命中后失败仍应停在失败章")
+    T.eq(fetch_calls, 2, "缓存命中后只尝试失败章节")
 end)
 
 T.case("末尾连续失败且成功章节无划线时报拉取失败而非无划线", function()
@@ -596,16 +645,6 @@ T.case("末尾连续失败且成功章节无划线时报拉取失败而非无划
     T.ok(not tostring(err):find("这本书在微信读书里没有划线", 1, true), "不得误报为书无划线")
 end)
 
-T.case("想法缓存写失败计入 save_failures 不计入 thoughts_saved", function()
-    local deps, _ = make_deps({
-        save_thoughts = function() return nil, "磁盘满" end,
-    })
-    local report, err = Sync.run(deps)
-    T.ok(report, "应成功: " .. tostring(err))
-    T.eq(report.thoughts_saved, 0, "写失败不算保存成功")
-    T.eq(report.save_failures, 1, "写失败计数")
-end)
-
 T.case("单章拉取失败不中断,计入 fetch_errors", function()
     local deps, calls = make_deps({
         annotations = {
@@ -623,4 +662,6 @@ T.case("单章拉取失败不中断,计入 fetch_errors", function()
     T.ok(report, "应成功: " .. tostring(err))
     T.eq(report.fetch_errors, 1, "失败章节计数")
     T.eq(report.injected, 1, "成功章节照常注入")
+    T.eq(report.next_index, 2, "失败章节作为连续游标边界")
+    T.eq(report.chapters_pending, 1, "失败章节计入待处理")
 end)

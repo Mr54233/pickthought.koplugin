@@ -91,11 +91,10 @@ function Sync.run(deps)
     local batch_start_index, batch_end_index
     local chapters_processed, chapters_fetch_succeeded = 0, 0
     local selected_end = #chapter_list
-    -- 硬失败=整章划线都没拉到(决定是否中止);部分失败=划线在手、想法批次有缺(只计报告)。
+    -- 硬失败=整章划线都没拉到;部分失败=章节数据不完整。两者都不能跨过,
+    -- 否则后续章节虽然拉到了,连续游标却会把失败章节永久跳过。
     local hard_failures, partial_errors = 0, 0
     local thoughts_saved, save_failures = 0, 0
-    local thought_save_failed = {}
-    local consecutive_hard = 0
     -- 记住最后一次真实错误:失败消息必须告诉用户到底错在哪,不能只说「网络失败」。
     local last_error
     local function short_err(text)
@@ -128,49 +127,57 @@ function Sync.run(deps)
         local chapter_rate_limited = good and type(data) == "table" and data.rate_limited == true
         local skipped_completed_cache = good and type(data) == "table"
             and data.resumed and skip_resumed
+        local chapter_completed = false
         if chapter_rate_limited then
             rate_limited = true
             rate_limit_wait = tonumber(data.rate_limit_wait) or rate_limit_wait
+            chapters_pending = #chapter_list - i + 1
         elseif good and type(data) == "table" and data.resumed and skip_resumed then
             -- 完整缓存只扫描以寻找新增/缺失章节,不重复写库和重注入旧章节。
+            chapter_completed = true
         elseif good and type(data) == "table" and data.underline_request_ok ~= false then
-            -- 断点缓存命中(resumed)不算网络成功,不能复位熔断计数:
-            -- 离线续传时散布的缓存命中会把计数清零,让熔断永不触发。
-            if not data.resumed then consecutive_hard = 0 end
-            if #(data.errors or {}) > 0 then partial_errors = partial_errors + 1 end
             total_underlines = total_underlines + (data.underline_count or 0)
             total_thought_entries = total_thought_entries + (data.thought_entry_count or 0)
-            if (data.underline_count or 0) > 0 then
-                fetched[#fetched + 1] = {
-                    uid = ch.uid, title = ch.title,
-                    underlines = data.underlines, review_map = data.review_map,
-                }
-            end
-            if #(data.review_groups or {}) > 0 then
-                local ok_save, saved = pcall(deps.save_thoughts, deps.book_id, ch.uid, data.review_groups)
-                if ok_save and saved then
-                    thoughts_saved = thoughts_saved + 1
+            local data_errors = #(data.errors or {})
+            if data_errors > 0 then
+                partial_errors = partial_errors + 1
+                last_error = tostring((data.errors or {})[1] or "章节数据不完整")
+                chapters_pending = #chapter_list - i + 1
+            else
+                local save_ok = true
+                if #(data.review_groups or {}) > 0 then
+                    local ok_save, saved = pcall(deps.save_thoughts, deps.book_id, ch.uid, data.review_groups)
+                    if ok_save and saved then
+                        thoughts_saved = thoughts_saved + 1
+                    else
+                        save_ok = false
+                        save_failures = save_failures + 1
+                        last_error = "想法缓存保存失败:" .. tostring(saved or "未知错误")
+                        chapters_pending = #chapter_list - i + 1
+                    end
+                end
+                if save_ok then
+                    if (data.underline_count or 0) > 0 then
+                        fetched[#fetched + 1] = {
+                            uid = ch.uid, title = ch.title,
+                            underlines = data.underlines, review_map = data.review_map,
+                        }
+                    end
+                    chapter_completed = true
                 else
-                    save_failures = save_failures + 1
-                    thought_save_failed[tostring(ch.uid)] = true
+                    -- 想法落盘失败时不把本章交给注入器,下次从本章重试。
                 end
             end
         else
             hard_failures = hard_failures + 1
-            consecutive_hard = consecutive_hard + 1
             if not good then
                 last_error = tostring(data)
             elseif type(data) == "table" then
                 last_error = tostring((data.errors or {})[1] or last_error or "接口返回异常")
             end
-            -- 断网熔断:连续多章整章失败(每章重试要吃满超时)不能逐章磨完全书。
-            -- 最后一章失败时不熔断,让已取到的数据走完正常出口。
-            if consecutive_hard >= 3 and i < #chapter_list then
-                return nil, string.format("连续 %d 章拉取失败,已中止同步。\n最后错误:%s",
-                    consecutive_hard, short_err(last_error))
-            end
+            chapters_pending = #chapter_list - i + 1
         end
-        if not chapter_rate_limited and not skipped_completed_cache then
+        if chapter_completed and not skipped_completed_cache then
             batch_start_index = batch_start_index or i
             batch_end_index = i
             chapters_processed = chapters_processed + 1
@@ -179,11 +186,11 @@ function Sync.run(deps)
                 chapters_fetch_succeeded = chapters_fetch_succeeded + 1
             end
         end
-        next_index = rate_limited and i or (i + 1)
-        if rate_limited then
-            chapters_pending = #chapter_list - next_index + 1
+        if not chapter_completed then
+            next_index = i
             break
         end
+        next_index = i + 1
         i = i + 1
     end
     if chapters_pending == 0 and next_index <= #chapter_list then
@@ -476,11 +483,6 @@ function Sync.run(deps)
     local underlines_injected = math.min(total_underlines,
         math.max(0, tonumber(stats.underlines_resolved) or 0))
     local thoughts_injected = math.max(0, tonumber(stats.thoughts_linked) or 0)
-    for uid, count in pairs(stats.thoughts_linked_by_uid or {}) do
-        if thought_save_failed[tostring(uid)] then
-            thoughts_injected = thoughts_injected - (tonumber(count) or 0)
-        end
-    end
     thoughts_injected = math.min(total_thought_entries, math.max(0, thoughts_injected))
     return with_batch_fields{
         dest = doc_path,

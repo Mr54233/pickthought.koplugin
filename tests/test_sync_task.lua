@@ -30,6 +30,18 @@ Cached: 69000 kB
 ]]), 98000, "旧内核回退可回收内存")
 end)
 
+T.case("SyncTask 识别常见的 fork 内存错误", function()
+    for _, message in ipairs({
+        "fork failed: Cannot allocate memory",
+        "not enough memory",
+        "out of memory",
+        "ENOMEM",
+    }) do
+        T.ok(SyncTask._is_memory_error(message), "应识别: " .. message)
+    end
+    T.ok(not SyncTask._is_memory_error("permission denied"), "普通 fork 错误不误判")
+end)
+
 T.case("SyncTask fork 前内存不足时恢复低内存设置", function()
     local task = SyncTask:new({temp_dir = "tests"})
     local events = {}
@@ -75,9 +87,23 @@ T.case("SyncTask fork 失败时也恢复低内存设置", function()
     end
 
     local ok, err = task:start({doc_path = "book.epub", book_id = "b1"})
-    FFIUtil.runInSubProcess = original
-    os.remove(settings_path)
     T.eq(ok, false, "fork 失败不创建任务")
     T.ok(tostring(err):find("Cannot allocate memory", 1, true), "保留底层错误供上层分类")
     T.eq(table.concat(events, ","), "prepare,fork,release", "预处理先于 fork 且失败后恢复")
+    T.ok(task:_fork_memory_cooldown_remaining() > 0, "内存 fork 失败进入冷却")
+
+    local blocked, blocked_error = task:start({doc_path = "book.epub", book_id = "b1"})
+    T.eq(blocked, false, "自动重试在冷却期内阻止")
+    T.ok(tostring(blocked_error):find("暂停自动同步", 1, true), "冷却提示明确")
+    T.eq(table.concat(events, ","), "prepare,fork,release", "冷却期不再次 fork")
+
+    local manual, manual_error = task:start({
+        doc_path = "book.epub", book_id = "b1", allow_memory_retry = true,
+    })
+    T.eq(manual, false, "手动重试仍返回底层错误")
+    T.ok(tostring(manual_error):find("Cannot allocate memory", 1, true), "手动重试重新尝试 fork")
+    T.eq(table.concat(events, ","), "prepare,fork,release,prepare,fork,release",
+        "手动重试清除冷却并重新测量")
+    FFIUtil.runInSubProcess = original
+    os.remove(settings_path)
 end)
