@@ -1,15 +1,15 @@
 {
-  "version": "0.3.0",
-  "name": "撷思 PickThought 0.3.0",
+  "version": "0.3.1",
+  "name": "撷思 PickThought 0.3.1",
   "package_type": "full",
-  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.0/pickthought.koplugin.zip",
+  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.1/pickthought.koplugin.zip",
   "package_urls": [
-    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.0/pickthought.koplugin.zip",
-    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.0/pickthought.koplugin.zip",
-    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.0/pickthought.koplugin.zip",
-    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.0/pickthought.koplugin.zip"
+    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.1/pickthought.koplugin.zip",
+    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.1/pickthought.koplugin.zip",
+    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.1/pickthought.koplugin.zip",
+    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.1/pickthought.koplugin.zip"
   ],
-  "size": 132942,
-  "sha256": "293678f8439b42e53995cb5ed88f528f9cad65c13980e64b2fe0b3dbfe778513",
-  "notes": "性能优化：\n持久化正文 spine 缓存（PR #12/#19）\nSQLite 句柄 LRU 与关书释放（PR #11/#18）\nEPUB 大文件磁盘中转（PR #10）\n\n新功能：\n统一文件管理器与阅读器菜单\n恢复想法弹窗按键翻页（Issue #16）\n增加运行时划线样式切换（Issue #14）\n\n问题修复：\n修复大文件磁盘中转误报失败（PR #10）\n限制想法弹窗切换重绘范围（Issue #16）\n修正 addPath 调用语义（PR #10）\n保留想法正文颜色（PR #9）\n低内存 HTML/CSS 注入优化（PR #9）\n\nContributors（本次更新的贡献者）：\n@Mr54233\n@ksaMask123"
+  "size": 134739,
+  "sha256": "72251d7163c80b8123cf750211ff45253b66bff755b8063a0ee2273499da4bfb",
+  "notes": "问题修复：\n完善同步可靠性与前台操作保护\n同步 0.3.0 更新说明\n优化 Release 摘要生成与贡献者信息"
 }
