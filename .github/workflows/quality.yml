@@ -1,0 +1,69 @@
+name: Quality Checks
+
+on:
+  workflow_call:
+    inputs:
+      skip_tests:
+        description: "特殊情况：Actions runner 不可用时跳过测试"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: ${{ !inputs.skip_tests }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit python3
+
+      - name: 运行 Lua 测试
+        run: luajit tests/run.lua
+
+      - name: 编译全部 Lua 文件
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            luajit -b "$file" "$RUNNER_TEMP/pickthought-lua-check.luac"
+          done < <(find pickthought.koplugin -type f -name '*.lua' -print0)
+
+      - name: 运行 Python 工具测试
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: 检查补丁格式
+        shell: bash
+        run: git diff --check
+
+      - name: 构建并校验测试包
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/pickthought-package"
+          mkdir -p "$package_dir"
+          python3 tools/build_package.py \
+            --source . \
+            --output "$package_dir/pickthought.koplugin.zip" \
+            --metadata "$package_dir/package.json"
+          python3 tools/validate_package.py \
+            --archive "$package_dir/pickthought.koplugin.zip" \
+            --metadata "$package_dir/package-validated.json"
+          python3 tools/validate_manifest.py --manifest update.json
+
+      - name: 上传测试包 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pickthought-package
+          path: ${{ runner.temp }}/pickthought-package/pickthought.koplugin.zip
+          if-no-files-found: error
+          retention-days: 7

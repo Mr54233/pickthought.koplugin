@@ -1,3 +1,5 @@
 .recovered/
 .claude/
 DEV_NOTES.md
+.build/
+__pycache__/
