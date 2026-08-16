@@ -25,6 +25,13 @@ luajit tests/run.lua   # 76 例,全绿才能提交
 - 新增模块要在 `tests/run.lua` 的 files 列表注册测试文件。
 - main.lua 不被测试覆盖(依赖 KOReader 运行时),改动后用 `luajit -bl main.lua` 单独做语法检查。
 
+## 提交规范
+
+- 提交标题必须带规范前缀,格式为 `<type>(<scope>): 中文说明`;按改动性质使用 `feat`、`fix`、`perf`、`refactor`、`test`、`docs`、`ci` 或 `chore`。
+- 前缀和 scope 可以保留 Conventional Commits 的英文写法,但说明正文和提交正文必须使用中文,不允许直接提交全英文标题或正文。
+- 不要使用没有前缀的裸标题,否则 `tools/release_notes.py` 无法分类,发版摘要会漏掉该提交。
+- 提交前检查 `git diff`、测试结果和 `git log`,不要改写已推送的提交历史;需要修正时追加规范提交。
+
 ## 真机调试(Kindle)
 
 - SSH:`ssh -p 2222 root@<kindle-ip>`(空密码)。设备锁屏会断网,亮屏才连得上。
