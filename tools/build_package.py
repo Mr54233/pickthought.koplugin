@@ -60,6 +60,14 @@ def _package_files(plugin_root: Path) -> Iterable[Path]:
             yield path
 
 
+def _package_bytes(path: Path) -> bytes:
+    data = path.read_bytes()
+    if path.suffix.lower() == ".lua":
+        # Normalize checkout-specific line endings so local and CI packages match.
+        data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return data
+
+
 def _archive_version(archive: zipfile.ZipFile) -> str:
     try:
         meta = archive.read("pickthought.koplugin/_meta.lua").decode("utf-8")
@@ -158,7 +166,7 @@ def build_package(
             info.create_system = 3
             info.external_attr = 0o100644 << 16
             info.flag_bits = 0x800
-            archive.writestr(info, path.read_bytes())
+            archive.writestr(info, _package_bytes(path))
 
     metadata = validate_archive(output_path, source_version)
     if metadata_path is not None:

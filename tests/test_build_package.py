@@ -32,6 +32,22 @@ class BuildPackageTests(unittest.TestCase):
             with self.assertRaises(PackageError):
                 build_package(root, root / "package.zip", expected_version="1.2.4")
 
+    def test_crlf_sources_are_normalized_in_archive(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._source(root)
+            for path in (root / "pickthought.koplugin").rglob("*.lua"):
+                path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+
+            archive_path = root / "package.zip"
+            build_package(root, archive_path, expected_version="1.2.3")
+
+            import zipfile
+
+            with zipfile.ZipFile(archive_path) as archive:
+                for name in archive.namelist():
+                    self.assertNotIn(b"\r", archive.read(name))
+
 
 if __name__ == "__main__":
     unittest.main()
