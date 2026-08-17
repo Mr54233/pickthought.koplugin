@@ -123,9 +123,30 @@ package.preload["json"] = function()
 end
 
 package.preload["libs/libkoreader-lfs"] = function()
+    -- 忠实模拟真实 lfs.attributes 的存在性语义:
+    --   - 文件存在(1 参)→ 返回属性表; (2 参 "mode")→ 返回 "file"
+    --   - 文件不存在 → 返回 nil, "No such file or directory"(供 path_exists_distinct 区分
+    --     "不存在" 与 "权限/IO 不可检查",即作者第3轮意见 #3)。
+    -- 注:本桩仅识别文件,不识别目录(目录检测依赖 lfs.dir);调用方以
+    --   lfs.attributes(p,"mode")=="directory" 判目录时,桩对目录返回 nil,与旧桩一致,
+    --   故不改变既有目录相关测试行为。
+    local function attributes(path, field)
+        local f = io.open(path, "r")
+        local exists = f ~= nil
+        if f then f:close() end
+        if not exists then
+            return nil, "No such file or directory"
+        end
+        if field then
+            if field == "mode" then return "file" end
+            if field == "modification" then return 0 end
+            return nil
+        end
+        return { mode = "file" }
+    end
     return {
-        attributes = function() return nil end,
-        symlinkattributes = function() return nil end,
+        attributes = attributes,
+        symlinkattributes = attributes,
         dir = function() return function() return nil end end,
         mkdir = function() return true end,
         rmdir = function() return true end,

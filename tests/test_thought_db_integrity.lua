@@ -6,7 +6,19 @@
 -- wal_checkpoint(返回 {0,0,0}) 与 user_version 读写。
 local ThoughtDB = require("pickthought.thought_db")
 local SQ3 = require("lua-ljsqlite3/init")
-local lfs = require("lfs")
+
+-- 跨平台临时目录(替代 lfs):CI/Linux 用 POSIX,Windows 回退 cmd(作者第3轮意见 #1:
+-- 测试不得依赖 lfs,也避免仅依赖 Windows rmdir /s /q)。
+local SEP = package.config:sub(1, 1)  -- "\\" on Windows
+local function sh(cmd) return os.execute(cmd) == 0 end
+local function mkdir_p(d)
+    if SEP == "\\" then return sh('cmd /c mkdir "' .. d .. '" >nul 2>nul') end
+    return sh('mkdir -p "' .. d .. '" 2>/dev/null')
+end
+local function rm_rf(d)
+    if SEP == "\\" then return sh('cmd /c rmdir /s /q "' .. d .. '" >nul 2>nul') end
+    return sh('rm -rf "' .. d .. '" 2>/dev/null')
+end
 
 local function fresh_db()
     SQ3._reset()
@@ -29,29 +41,13 @@ local function spy_os()
 end
 
 -- 真实临时目录(用于验证 os.rename 真的移动了文件,而非只调用了 API)。
--- 跨平台创建(lfs.mkdir,不依赖 Windows mkdir)。
 local function tmp_dir()
     local d = "tests/_iso_tmp_" .. tostring(os.time()) .. "_" .. tostring(math.floor(math.random() * 1e7))
-    pcall(lfs.mkdir, d)
+    mkdir_p(d)
     return d
 end
--- 跨平台递归删除(不依赖 Windows rmdir /s /q;用 lfs 遍历后逐文件/目录删除)。
-local function rm_tmp(d)
-    local function remove_recursive(path)
-        local mode = lfs.attributes(path, "mode")
-        if mode == "directory" then
-            for name in lfs.dir(path) do
-                if name ~= "." and name ~= ".." then
-                    remove_recursive(path .. "/" .. name)
-                end
-            end
-            lfs.rmdir(path)
-        else
-            os.remove(path)
-        end
-    end
-    pcall(remove_recursive, d)
-end
+-- 删除真实临时目录(跨平台,不依赖 lfs / Windows rmdir /s /q)。
+local function rm_tmp(d) rm_rf(d) end
 -- 真实文件中是否仍存在(存在返回 true)。
 local function file_exists(p)
     local f = io.open(p, "r"); if f then f:close(); return true end
@@ -318,11 +314,61 @@ T.case("隔离目标名唯一:预建同名 .corrupt-* 不被覆盖", function()
     local old_target = base .. ".corrupt-" .. tostring(old_ts) .. "-0"
     local of = io.open(old_target, "w"); of:write("OLD BACKUP"); of:close()
     T.ok(file_exists(old_target), "预建旧备份存在")
-    -- 触发隔离:unique_corrupt_target 应避开已存在的 old_target,换新名。
+    -- 触发隔离:reserve_corrupt_main 应避开已存在的 old_target,换新名。
     local target, err = ThoughtDB.isolate_corrupt(dir)
     T.ok(target ~= nil, "隔离成功")
     T.ok(target ~= old_target, "新目标名不同于旧备份(避免覆盖)")
     T.ok(file_exists(old_target), "旧备份未被覆盖,仍保留")
     T.ok(file_exists(target), "新隔离目标存在")
+    rm_tmp(dir)
+end)
+
+-- 作者第3轮意见 #4:直接覆盖 integrity_check 的 prepare/step 异常路径,
+-- 而非整体替换函数。命中 `if not stmt then error(...)` 与 stmt:step() 抛错透传。
+T.case("integrity_check:prepare 返回 nil 直接抛错(prepare 异常路径)", function()
+    local fake = { prepare = function() return nil end, close = function() end }
+    local ok, err = pcall(ThoughtDB.integrity_check, fake)
+    T.ok(not ok, "prepare 返回 nil → integrity_check 抛错")
+    T.ok(err ~= nil and tostring(err):find("prepare"), "错误含 prepare")
+end)
+
+T.case("integrity_check:stmt:step 抛错被透传为过程失败", function()
+    local fake = {
+        prepare = function()
+            return { step = function() error("SQLITE_IOERR") end, close = function() end }
+        end,
+        close = function() end,
+    }
+    local ok, err = pcall(ThoughtDB.integrity_check, fake)
+    T.ok(not ok, "step 抛错 → integrity_check 抛错(被 open 当作过程失败)")
+    T.ok(err ~= nil and tostring(err):find("SQLITE_IOERR"), "透传底层错误")
+end)
+
+-- 作者第3轮意见 #3:sidecar 无法检查(权限/IO)时不能误判为"不存在"而静默跳过,
+-- 必须保守地尝试归档,失败时返回错误(避免留下未归档文件)。
+T.case("隔离:sidecar 无法检查(权限/IO)时保守报错,不静默跳过", function()
+    local dir = tmp_dir()
+    for _, name in ipairs({ "thoughts.db", "thoughts.db-wal", "thoughts.db-shm" }) do
+        local f = io.open(dir .. "/" .. name, "w"); f:write("x"); f:close()
+    end
+    -- 注入 mock lfs:对 -shm 返回无法检查(Permission denied),模拟权限/IO 错误。
+    local old_lfs = package.loaded["libs/libkoreader-lfs"]
+    package.loaded["libs/libkoreader-lfs"] = {
+        attributes = function(p)
+            if p:find("%-shm$") then return nil, "Permission denied" end
+            return { mode = "file" }
+        end,
+    }
+    -- -shm 归档失败(模拟):无法检查 → 保守尝试 → 失败 → 必须报错而非跳过。
+    local o_rn = os.rename
+    os.rename = function(a, b)
+        if b:find("-shm$") then return nil, "mock shm fail" end
+        return o_rn(a, b)
+    end
+    local target, err = ThoughtDB.isolate_corrupt(dir)
+    os.rename = o_rn
+    package.loaded["libs/libkoreader-lfs"] = old_lfs
+    T.ok(target == nil, "无法确认 sidecar 状态时隔离报错(不静默跳过)")
+    T.ok(err ~= nil and tostring(err):find("sidecar"), "错误含 sidecar")
     rm_tmp(dir)
 end)

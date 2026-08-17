@@ -125,20 +125,47 @@ function ThoughtDB.integrity_check(db)
     return false, table.concat(bad, "; ")
 end
 
--- 生成真正唯一的损坏备份目标名:时间戳 + 递增序号,并在重命名前再次检查目标
--- 是否已存在;目标已存在则换名,绝不覆盖(作者意见 #2:仅 os.time() 在 Kindle
--- 同秒重复隔离时可能覆盖旧备份)。
-local function unique_corrupt_target(base)
+-- 无覆盖目标预留:先探测候选目标是否空闲(io.open 不存在),再用 os.rename 占用;
+-- 任一步失败(目标被占/权限/IO)均持续换名重试,绝不返回未经确认的候选
+-- (作者第3轮意见 #2:消除"探测后 rename"的竞态隐患,且序号到顶后再次确认目标为空)。
+-- 仅在 rename 真正成功时返回占用名;极端持续失败时返回 nil。
+local function reserve_corrupt_main(base)
     local ts = os.time()
     local salt = 0
-    while true do
+    local attempts = 0
+    while attempts < 100000 do
+        attempts = attempts + 1
         local cand = base .. ".corrupt-" .. tostring(ts) .. "-" .. tostring(salt)
         local probe = io.open(cand, "r")
-        if not probe then return cand end  -- 目标空闲,可用
-        probe:close()
+        if not probe then
+            -- 目标空闲才占用;rename 失败(极小概率竞态/权限)则换名重试。
+            if os.rename(base, cand) then return cand end
+        else
+            probe:close()
+        end
         salt = salt + 1
-        if salt > 9999 then return cand end  -- 安全阀,极端场景也返回最后一个候选
+        if salt > 9999 then ts = os.time(); salt = 0 end  -- 安全阀:换时间戳继续,再次确认
     end
+    return nil
+end
+
+-- 区分"文件不存在"与"因权限/I-O 无法检查"(作者第3轮意见 #3)。
+-- lfs(libs/libkoreader-lfs)在 KOReader 运行时可用,其 attributes 的错误码可区分
+-- 二者;测试环境无 lfs 时退化为 io.open 探测(此时无法区分,保守按"可检查"处理)。
+-- 返回 (exists, state):state 为 "uncheckable" 表示无法确认(权限/IO),调用方应保守处理。
+local function path_exists_distinct(path)
+    local lfsm = package.loaded["libs/libkoreader-lfs"]
+    if lfsm and lfsm.attributes then
+        local attr, err = lfsm.attributes(path)
+        if attr then return true, nil end
+        if err and tostring(err):lower():find("no such file") then
+            return false, nil
+        end
+        return false, "uncheckable"
+    end
+    local f = io.open(path, "r")
+    if f then f:close(); return true, nil end
+    return false, nil
 end
 
 -- 写入并校验隔离标记:.isolated 存在即视为已隔离,即使主库仍残留也阻断自动重建
@@ -164,35 +191,30 @@ end
 -- 返回约定:成功返回 target 路径;否则返回 nil,err。
 function ThoughtDB.isolate_corrupt(book_dir)
     local base = ThoughtDB.db_path(book_dir)
-    -- 枚举实际存在的主库/WAL/SHM。
-    local sidecars = { "-wal", "-shm" }
-    local present = {}
-    do
-        local p = io.open(base, "r")
-        if p then p:close(); present[base] = true end
-    end
-    for _, ext in ipairs(sidecars) do
-        local src = base .. ext
-        local p = io.open(src, "r")
-        if p then p:close(); present[src] = true end
-    end
-    if not present[base] then
+    -- 主库必须存在才隔离;无法确认主库状态时保守报错,绝不静默跳过(避免损坏证据丢失)。
+    local main_exists, main_state = path_exists_distinct(base)
+    if not main_exists then
+        if main_state == "uncheckable" then
+            return nil, "主库状态无法确认(权限/IO),隔离中止以保护原库"
+        end
         return nil, "主库不存在,无需隔离"
     end
     -- 1) 标记先行:标记写入失败 → 中止,绝不移动主库。
     if not write_isolated_marker(base) then
         return nil, "隔离标记写入失败,中止隔离以保护原库"
     end
-    -- 2) 主库移动(唯一目标名,防同秒覆盖)。
-    local target = unique_corrupt_target(base)
-    if not os.rename(base, target) then
+    -- 2) 主库移动(以 rename 自身预留唯一目标,消除探测后 rename 竞态)。
+    local target = reserve_corrupt_main(base)
+    if not target then
         -- 主库移动失败:标记已就位(阻断),不回滚标记,直接报错。
         return nil, "主库重命名失败(隔离标记已就位,阻断自动重建)"
     end
-    -- 3) sidecar 逐个移动;源存在却失败 → 归档不完整。
-    for _, ext in ipairs(sidecars) do
+    -- 3) sidecar 逐个移动;源存在(或无法确认)却失败 → 归档不完整,返回错误。
+    --    绝不把"无法检查"的 sidecar 误判为不存在而留下未归档文件(作者第3轮意见 #3)。
+    for _, ext in ipairs({ "-wal", "-shm" }) do
         local src = base .. ext
-        if present[src] then
+        local exists, state = path_exists_distinct(src)
+        if exists or state == "uncheckable" then
             if not os.rename(src, target .. ext) then
                 -- sidecar 隔离失败:保留标记(阻断自动重建);主库已留在 .corrupt-*
                 -- 作为损坏证据,不回滚(避免把损坏文件移回原处掩盖证据)。
