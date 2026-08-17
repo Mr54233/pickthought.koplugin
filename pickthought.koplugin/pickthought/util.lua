@@ -77,8 +77,15 @@ function U.copy_file_stream(a, b, on_progress)
     local done = 0
     local cancelled = false
     while true do
-        local data = fi:read(chunk)
-        if not data then break end
+        local data, rerr = fi:read(chunk)
+        if data == nil then
+            if rerr then
+                -- 读取错误(非 EOF):源文件中途损坏,半截副本绝不能当作成功备份(作者意见 #5)。
+                fi:close(); fo:close(); pcall(os.remove, tmp)
+                return nil, "读取源文件失败:" .. tostring(rerr)
+            end
+            break  -- 正常 EOF
+        end
         local w, werr = fo:write(data)
         if not w then
             fi:close(); fo:close(); pcall(os.remove, tmp)
@@ -109,7 +116,15 @@ function U.copy_file_stream(a, b, on_progress)
     end
     local ok_rename, rerr = os.rename(tmp, b)
     if not ok_rename then
-        if had_prev and U.file_exists(b .. ".prev") then pcall(os.rename, b .. ".prev", b) end
+        -- .prev 回滚结果必须检查:回滚失败绝不能谎称成功(作者意见 #5)。
+        if had_prev and U.file_exists(b .. ".prev") then
+            local ok_rb, rb_err = os.rename(b .. ".prev", b)
+            if not ok_rb then
+                pcall(os.remove, tmp)
+                return nil, "替换为目标失败且无法回滚旧备份:" .. tostring(rerr or "未知")
+                    .. ";回滚错误:" .. tostring(rb_err or "未知")
+            end
+        end
         pcall(os.remove, tmp)
         return nil, "替换为目标失败:" .. tostring(rerr or "未知")
     end
@@ -141,6 +156,19 @@ function U.content_fingerprint(path)
             -- LuaJIT(Lua5.1)无原生按位异或,用 bit 库;乘后取模保持 32 位。
             h = (bit.bxor(h, s:byte(i)) * 16777619) % 4294967296
         end
+    end
+    return string.format("%08x", h)
+end
+
+-- 路径指纹:FNV-1a 对路径字符串做定长 16 进制哈希,不含路径分隔符。
+-- 用于把 clean_source 的完整路径纳入缓存签名时,避免分隔符直接落入
+-- 缓存目录名造成异常嵌套目录(作者意见 #6)。
+function U.path_hash(path)
+    local bit = require("bit")
+    local s = tostring(path or "")
+    local h = 2166136261
+    for i = 1, #s do
+        h = (bit.bxor(h, s:byte(i)) * 16777619) % 4294967296
     end
     return string.format("%08x", h)
 end

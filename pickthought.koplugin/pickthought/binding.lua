@@ -115,4 +115,15 @@ function Binding.clear(store, doc_path)
     store:set(KEY, all)
 end
 
+-- 是否向用户展示「离线重注入」入口(纯判定,便于单元测试,不依赖 ui.* 栈)。
+-- 规则(作者意见 #3, 2026-08-17):
+--  · has_inject=true(当前书含注入标记)→ 展示,即使 .orig 丢失也能进 clean_source 逃生舱；
+--  · 干净原书(has_inject=false)默认隐藏,避免把干净原书当注入版误删；
+--  · 但若 has_chapter_cache=true(章节缓存 map.json 已存在:首次同步在缓存写入后、
+--    首次注入失败,当前书仍干净),仍保留入口,把"当前文件能否安全重建"交给同步层决定。
+function Binding.offer_reinject(has_inject, has_chapter_cache)
+    if has_inject then return true end
+    return has_chapter_cache == true
+end
+
 return Binding

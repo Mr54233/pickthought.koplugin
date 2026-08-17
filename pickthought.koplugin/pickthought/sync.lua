@@ -291,7 +291,9 @@ function Sync.run(deps)
         -- 故把 clean_source 的规范化路径也纳入签名;并强制废弃旧映射缓存,杜绝复用。
         local use_clean = (src == clean_source and clean_source) or nil
         local map_source = use_clean or (file_exists(backup) and backup) or doc_path
-        local src_sig = use_clean and ("@" .. tostring(use_clean)) or ""
+        -- 作者意见 #6:clean_source 完整路径含分隔符,直接进签名会让分隔符落入缓存目录名,
+        -- 生成异常嵌套目录;改为对路径做哈希(定长、无分隔符)。
+        local src_sig = use_clean and ("@" .. U.path_hash(use_clean)) or ""
         local fingerprint = U.content_fingerprint(map_source) or "0"
         map_signature = tostring(U.file_size(map_source) or 0) .. "@"
             .. tostring(ChapterMap.ALGO_VERSION) .. "@" .. fingerprint .. src_sig
@@ -573,21 +575,48 @@ function Sync.run(deps)
             end
             backed_up = true
         else
-            -- 当前书是干净原书:保留为 .orig 备份,不进 .old,避免原书被销毁。
+            -- 当前书是干净原书,且指定了外部 clean_source(可能与当前书版本不同)。
+            -- 统一注入基线:.orig 必须是注入基线 clean_source(而非当前不同版本的书),
+            -- 并把当前书暂存为 .old 保留,避免用户打开的版本被覆盖销毁(作者意见 #4)。
+            local old_path = doc_path .. ".old"
+            if file_exists(old_path) then
+                local ok_rm = remove(old_path)
+                if not ok_rm then remove(temp_dest); return nil, "无法清理旧的暂存文件,请重试" end
+            end
             if file_exists(backup) then
                 local old_backup = backup .. ".old"
                 if file_exists(old_backup) then
-                    local ok_rm = remove(old_backup)
-                    if not ok_rm then remove(temp_dest); return nil, "无法清理旧备份暂存,请重试" end
+                    local ok_rm2 = remove(old_backup)
+                    if not ok_rm2 then remove(temp_dest); return nil, "无法清理旧备份暂存,请重试" end
                 end
                 if not rename(backup, old_backup) then
                     remove(temp_dest); return nil, "无法暂存旧 .orig 备份,请重试"
                 end
             end
-            local ok_bk, bk_err = rename(doc_path, backup)
-            if not ok_bk then
+            -- 固化注入基线(clean_source)为 .orig,使最终 .orig 与注入源一致(作者意见 #4)。
+            local ok_copy, copy_err, copy_status = copy_file(clean_source, backup)
+            if not ok_copy then
                 remove(temp_dest)
-                return nil, "无法备份当前原书:" .. tostring(bk_err or "重命名失败")
+                if copy_status == "cancelled" then
+                    -- 取消发生在固化 .orig 之前:当前干净原书尚未离位(doc_path 仍完好),
+                    -- 直接报取消即可,不要谎称"无法恢复"(作者意见 #1/#2)。
+                    if file_exists(old_path) then
+                        local ok_r, r_err = try_recover(old_path, doc_path)
+                        if ok_r then return nil, "已取消干净源固化,已恢复原书(.old→doc_path)" end
+                        return nil, "已取消干净源固化,但无法恢复当前书;请手动将 " .. old_path
+                            .. " 重命名为 " .. doc_path .. " 以恢复原书。(" .. tostring(r_err or "未知") .. ")"
+                    end
+                    return nil, "已取消干净源固化,原书未改动(" .. tostring(doc_path) .. ")"
+                end
+                local ok_r, r_err = try_recover(old_path, doc_path)
+                if ok_r then return nil, "干净源固化到 .orig 失败,已恢复原书(.old→doc_path);后续重注需再次指定干净源" end
+                return nil, "干净源固化到 .orig 失败,且无法恢复当前书;请手动将 " .. old_path
+                    .. " 重命名为 " .. doc_path .. " 以恢复原书。(" .. tostring(r_err or "未知") .. ")"
+            end
+            -- 暂存当前书为 .old(保留用户打开的版本),让出原路径供 swap。
+            if not rename(doc_path, old_path) then
+                remove(temp_dest)
+                return nil, "无法暂存当前书(.old),请关闭本书或确认未被占用后重试"
             end
             backed_up = true
         end
@@ -598,17 +627,20 @@ function Sync.run(deps)
         -- 首次注入/干净源重建已让原书离位时才需要回滚。增量失败时旧注入版仍在原路径，
         -- 绝不能删除它或移动干净 .orig；上一代只在原子替换成功时由系统丢弃。
         if backed_up and not file_exists(doc_path) then
-            -- 统一恢复逻辑:优先恢复原始注入版(.old),其次恢复干净 .orig;
-            -- 恢复结果必须检查,失败要明确告知实际位置并保留残留文件作人工恢复入口(P1#2)。
-            local recovered, rec_err
+            -- 统一恢复逻辑:优先恢复原始注入版(.old),其次恢复干净 .orig(作者意见 #2)。
+            -- 必须记录"实际恢复的是哪一份",提示与实际文件状态一致,绝不谎称已恢复旧注入版。
+            local recovered, rec_err, recovered_from
             local old_path = doc_path .. ".old"
             if file_exists(old_path) then
                 recovered, rec_err = try_recover(old_path, doc_path)
+                recovered_from = "old"
                 if not recovered and file_exists(backup) then
                     recovered, rec_err = try_recover(backup, doc_path)
+                    recovered_from = "clean"
                 end
             elseif file_exists(backup) then
                 recovered, rec_err = try_recover(backup, doc_path)
+                recovered_from = "clean"
             end
             if not recovered then
                 local msg = "无法替换原书(" .. tostring(swap_err or "rename 失败") .. ")"
@@ -620,6 +652,11 @@ function Sync.run(deps)
                 if rec_err then msg = msg .. "。恢复动作失败:" .. tostring(rec_err) end
                 return nil, msg
             end
+            -- 恢复成功:提示必须与实际文件状态一致(作者意见 #2)。
+            if recovered_from == "clean" then
+                return nil, "无法替换原书,已恢复干净原书(.orig→doc_path):" .. tostring(swap_err or "重命名失败")
+            end
+            return nil, "无法替换原书,已恢复旧注入版(.old→doc_path):" .. tostring(swap_err or "重命名失败")
         end
         return nil, "无法替换原书,已恢复原文件:" .. tostring(swap_err or "重命名失败")
     end

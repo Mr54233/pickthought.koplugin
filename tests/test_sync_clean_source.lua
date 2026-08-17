@@ -295,10 +295,11 @@ T.case("clean_source 重建:swap 失败且回滚失败 → 明确告知实际位
     T.ok(not e:find("已恢复原", 1, true), "不得谎称已恢复: " .. e)
 end)
 
-T.case("clean_source 重建:当前书是干净原书(未注入)→ 保留为 .orig,不丢原书", function()
-    -- P1#3 —— 首次注入中途失败后当前书仍是干净原书(有章节缓存但无 MARKER),
-    -- 此时若另一份 clean_source 版本不同,把当前书丢进 .old 再删除会永久丢失原书。
-    -- 修复后:当前书保留为 .orig 备份,干净源仅作注入来源,原书不丢。
+T.case("clean_source 重建:当前书是干净原书(未注入)→ 统一基线,原书保留为 .old 不丢", function()
+    -- 作者意见 #4(2026-08-17):首次注入中途失败后当前书仍是干净原书(有章节缓存但无 MARKER),
+    -- 此时若另一份 clean_source 版本不同,绝不能把当前书丢进 .orig 混入错误版本。
+    -- 修复后采用"统一注入基线":干净源固化为 .orig(注入基线与源一致),
+    -- 当前打开的干净原书暂存为 .old 保留——不销毁、不混入 .orig。
     local EpubInject = require("pickthought.epub_inject")
     local deps, calls = make_deps({
         clean_source = "/clean/原书.epub",
@@ -313,16 +314,19 @@ T.case("clean_source 重建:当前书是干净原书(未注入)→ 保留为 .or
     })
     local report, err = Sync.run(deps)
     T.ok(report, "应成功: " .. tostring(err))
-    local staged_as_backup, staged_as_old = false, false
+    -- 干净源固化到 .orig(统一注入基线,与注入源一致)
+    T.eq(calls.copied[1], "/clean/原书.epub", "copy 源为干净源")
+    T.eq(calls.copied[2], "/books/书.epub.orig", "copy 目标为 .orig")
+    -- 当前干净原书暂存为 .old 保留(不销毁、不混入 .orig)
+    local staged_as_old, staged_as_orig = false, false
     for _, r in ipairs(calls.renames) do
-        if r[1] == "/books/书.epub" and r[2] == "/books/书.epub.orig" then staged_as_backup = true end
         if r[1] == "/books/书.epub" and r[2] == "/books/书.epub.old" then staged_as_old = true end
+        if r[1] == "/books/书.epub" and r[2] == "/books/书.epub.orig" then staged_as_orig = true end
     end
-    T.ok(staged_as_backup, "当前干净原书应保留为 .orig 备份")
-    T.ok(not staged_as_old, "不得把干净原书丢进 .old 销毁")
-    T.eq(calls.copied, nil, "未注入版不应再固化 .orig(原书已作为 .orig)")
+    T.ok(staged_as_old, "当前干净原书应暂存为 .old 保留(不销毁)")
+    T.ok(not staged_as_orig, "当前干净原书不得直接当 .orig(避免版本不一致)")
     T.eq(report.dest, "/books/书.epub", "dest 仍是书架路径")
-    T.eq(report.backup, "/books/书.epub.orig", "备份路径")
+    T.eq(report.backup, "/books/书.epub.orig", "备份路径为干净源固化结果")
 end)
 
 T.case("U.copy_file_stream 流式复制(分块/进度/失败)", function()
@@ -442,6 +446,48 @@ T.case("U.copy_file_stream:用户取消 → 丢弃临时副本,保留旧备份",
     T.eq(got, "OLD-BACKUP", "旧备份未被改动")
     T.ok(not U.file_exists(dst .. ".copy.tmp"), "临时副本应已清理")
     os.remove(src); os.remove(dst)
+end)
+
+T.case("clean_source 重建:固化 .orig 时用户取消(默认复制路径)→ 中止且不替换原书", function()
+    -- 作者意见 #1(2026-08-17):复制阶段的取消结果须从进度回调继续向上传递,
+    -- 用户取消后不得继续完成 .orig 固化与原书替换。此处令 copy_file 直接返回
+    -- 默认 U.copy_file_stream 在复制中途被取消的契约三元组
+    -- (nil,"已取消复制","cancelled")——底层 progress→on_progress→copy_file_stream 的取消机制
+    -- 已由 "U.copy_file_stream:用户取消" 用例单独覆盖;本用例验证 Sync.run 收到该取消状态后
+    -- 正确中止:不继续 .orig 固化、不执行最终 swap、并把 .old 回滚为 doc_path。
+    local EpubInject = require("pickthought.epub_inject")
+    local deps, calls = make_deps({
+        clean_source = "/clean/原书.epub",
+        file_exists = function(p) return p == "/clean/原书.epub" end,
+        load_meta = function(p)
+            if p == "/clean/原书.epub" then
+                return {spine = {{href = "OEBPS/c1.xhtml"}}, has = {}}
+            end
+            return {spine = {{href = "OEBPS/c1.xhtml"}}, has = {[EpubInject.MARKER] = true}}
+        end,
+        -- 模拟默认 copy_file 包装器在复制中途被取消的返回契约。
+        copy_file = function(a, b)
+            last_copy = {a, b}
+            return nil, "已取消复制", "cancelled"
+        end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil, "应失败(用户取消)")
+    local e = tostring(err)
+    T.ok(e:find("取消", 1, true), "报错应指明取消: " .. e)
+    -- 关键:取消后不得继续完成 .orig 固化与原书替换(最终 swap)。
+    local swapped = false
+    for _, r in ipairs(calls.renames) do
+        if r[1] == "/books/书.epub.pickthought-new" and r[2] == "/books/书.epub" then swapped = true end
+    end
+    T.ok(not swapped, "取消后不得执行最终 swap(原书替换)")
+    -- 当前注入版(.old)应被回滚为 doc_path,原书不被破坏。
+    local rolled = false
+    for _, r in ipairs(calls.renames) do
+        if r[1] == "/books/书.epub.old" and r[2] == "/books/书.epub" then rolled = true end
+    end
+    T.ok(rolled, "取消后应将 .old 回滚为 doc_path(恢复原注入版)")
+    T.ok(last_copy ~= nil, "复制被尝试(默认复制路径)")
 end)
 
 T.case("U.content_fingerprint:同体积不同内容 → 不同指纹", function()

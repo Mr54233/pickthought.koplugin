@@ -755,12 +755,18 @@ function Plugin:_has_reinject_cache(path)
     local bound = path and Binding.get(self.store, path)
     if not bound then return false end
     -- 当前书含注入标记 → 提供"重新注入"入口(即使 .orig 丢失也能进 clean_source 逃生舱);
-    -- 干净原书(无标记)则隐藏,避免把干净原书当注入版误删(P1, 2026-08-15 二轮)。
+    -- 干净原书(无标记)则默认隐藏,避免把干净原书当注入版误删(P1, 2026-08-15 二轮)。
     local EpubReader = require("pickthought.epub_reader")
     local EpubInject = require("pickthought.epub_inject")
     local ok, meta = pcall(EpubReader.load, path)
     if not ok or not meta then return false end
-    return meta.has and meta.has[EpubInject.MARKER] == true
+    local has_inject = meta.has and meta.has[EpubInject.MARKER] == true
+    if has_inject then return true end
+    -- 作者意见 #3(2026-08-17):首次同步在章节缓存已写入、但首次注入失败时,
+    -- 当前书仍是干净原书,用户反而无法从菜单进入离线恢复流程。
+    -- 若章节缓存(map.json)已存在,仍保留重注入口,把"能否安全重建"交给同步层决定。
+    local has_cache = U.file_exists(self.store:book_cache_path(bound.book_id) .. "/sync-cache/map.json")
+    return Binding.offer_reinject(has_inject, has_cache)
 end
 
 -- 离线重注入口:先让用户决定是否提供一份干净原书作为注入源。

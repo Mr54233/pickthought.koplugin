@@ -100,3 +100,14 @@ T.case("normalize_search 标注版本类型(format)", function()
     T.eq(rows[2].title, "剑来精校 [出版]", "epub 标出版")
     T.eq(rows[3].title, "未知版", "无 format 不标注")
 end)
+
+T.case("offer_reinject 离线重注入口可见性(作者意见 #3)", function()
+    -- 注入版:始终展示(即使 .orig 丢失也能进 clean_source 逃生舱)。
+    T.ok(Binding.offer_reinject(true, false), "注入版应展示(无缓存)")
+    T.ok(Binding.offer_reinject(true, true), "注入版应展示(有缓存)")
+    -- 干净原书无缓存:隐藏,避免把干净原书当注入版误删。
+    T.ok(not Binding.offer_reinject(false, false), "干净原书无缓存应隐藏")
+    -- 干净原书但有章节缓存(首次同步缓存写入后、首次注入失败):保留入口,
+    -- 把"能否安全重建"交给同步层决定(作者意见 #3, 2026-08-17)。
+    T.ok(Binding.offer_reinject(false, true), "干净原书有章节缓存应保留入口")
+end)
