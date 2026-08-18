@@ -116,18 +116,60 @@ function ThoughtDB.integrity_check(db)
     if not stmt then error("integrity_check prepare 失败") end
     local bad = {}
     local row = stmt:step()
+    -- 返回格式校验(作者第4轮意见 #3):integrity_check 必须至少返回一行;
+    -- 否则视为核验过程异常(格式异常),按"过程失败"处理(保留原库、绝不触发隔离)。
+    if not row or type(row) ~= "table" then
+        pcall(function() stmt:close() end)
+        error("integrity_check 返回格式异常:缺少结果行")
+    end
     while row do
-        if tostring(row[1] or "") ~= "ok" then bad[#bad + 1] = tostring(row[1]) end
+        if type(row) ~= "table" then
+            pcall(function() stmt:close() end)
+            error("integrity_check 返回格式异常:结果行非表")
+        end
+        local v = row[1]
+        if type(v) ~= "string" then
+            pcall(function() stmt:close() end)
+            error("integrity_check 返回格式异常:首列非字符串")
+        end
+        if v ~= "ok" then bad[#bad + 1] = v end
         row = stmt:step()
     end
-    stmt:close()
+    pcall(function() stmt:close() end)
     if #bad == 0 then return true end
     return false, table.concat(bad, "; ")
 end
 
--- 无覆盖目标预留:先探测候选目标是否空闲(io.open 不存在),再用 os.rename 占用;
--- 任一步失败(目标被占/权限/IO)均持续换名重试,绝不返回未经确认的候选
--- (作者第3轮意见 #2:消除"探测后 rename"的竞态隐患,且序号到顶后再次确认目标为空)。
+-- 原子无覆盖目标预留:优先用 C.open(O_CREAT|O_EXCL) 在 Linux(含 Kindle ARM Linux)
+-- 上原子占用目标名——"探测即占用",彻底消除"先探测再 os.rename"的 TOCTOU 竞态,
+-- 绝不会覆盖已有 .corrupt-* 备份(作者第4轮意见 #1)。仅 Linux + ffi 可用时启用;
+-- 非 Linux / 无 ffi(如 Windows 测试环境)退化为 probe+rename,同样能正确跳过已存在目标。
+local ffi = nil
+pcall(function() ffi = require("ffi") end)
+local ATOMIC_OPEN, ATOMIC_FLAGS, ATOMIC_MODE
+if ffi and ffi.abi and ffi.abi("os") == "Linux" then
+    ATOMIC_OPEN = ffi.C.open          -- open(2)
+    ATOMIC_FLAGS = 0x40 + 0x80 + 0x1  -- O_CREAT | O_EXCL | O_WRONLY
+    ATOMIC_MODE = 0x180              -- 0600
+end
+
+-- 原子独占创建目标(空文件)。成功返回 true(目标名已独占占有,可安全移入主库内容);
+-- 已存在/权限失败返回 false;ffi 不可用时返回 nil(交由调用方退化处理)。
+local function atomic_claim(cand)
+    if not ATOMIC_OPEN then return nil end
+    local fd = ATOMIC_OPEN(cand, ATOMIC_FLAGS, ATOMIC_MODE)
+    local n = tonumber(fd) or -1
+    if n >= 0 then
+        if ffi.C.close then pcall(ffi.C.close, fd) end
+        return true
+    end
+    return false
+end
+
+-- 无覆盖目标预留:先原子占用候选目标(已存在则跳过换名),再 os.rename 主库内容填入。
+-- 原子路径下候选是我们刚独占的空占位,rename 覆盖它不会触碰任何真实备份;
+-- 退化路径下先 probe 存在即跳过。任一步失败均持续换名重试,绝不返回未经确认的候选
+-- (作者第3轮意见 #2 + 第4轮意见 #1:消除竞态隐患,序号到顶后再次确认目标为空)。
 -- 仅在 rename 真正成功时返回占用名;极端持续失败时返回 nil。
 local function reserve_corrupt_main(base)
     local ts = os.time()
@@ -136,12 +178,23 @@ local function reserve_corrupt_main(base)
     while attempts < 100000 do
         attempts = attempts + 1
         local cand = base .. ".corrupt-" .. tostring(ts) .. "-" .. tostring(salt)
-        local probe = io.open(cand, "r")
-        if not probe then
-            -- 目标空闲才占用;rename 失败(极小概率竞态/权限)则换名重试。
-            if os.rename(base, cand) then return cand end
+        local claimed
+        local ac = atomic_claim(cand)
+        if ac == true then
+            claimed = true   -- 已原子独占 cand(空文件),可安全移入主库内容。
+        elseif ac == false then
+            claimed = false  -- cand 已存在(原子创建失败)→ 跳过换名,绝不覆盖。
         else
-            probe:close()
+            -- 无 ffi / 未知平台:退化 probe——不存在才允许 rename 占用。
+            local probe = io.open(cand, "r")
+            if probe then probe:close(); claimed = false
+            else claimed = true end
+        end
+        if claimed then
+            -- cand 已确认空闲:把主库内容移入(原子路径下覆盖我们刚独占的空占位,
+            -- 不会触碰任何真实备份)。rename 失败(极小概率权限)则清理空占位。
+            if os.rename(base, cand) then return cand end
+            os.remove(cand)
         end
         salt = salt + 1
         if salt > 9999 then ts = os.time(); salt = 0 end  -- 安全阀:换时间戳继续,再次确认
@@ -258,43 +311,58 @@ function ThoughtDB.checkpoint(db)
     return true
 end
 
--- 隔离态判定:以 .isolated 标记为准——标记存在即视为已隔离,即使主库仍残留
--- 也阻断 open() 自动重建空库(作者意见 #2 + 第二轮复审:标记先行阶段主库仍在,
--- 也必须识别标记,否则部分隔离态会被当成"无主库"而静默建空库)。
-local function is_isolated(book_dir)
-    local base = ThoughtDB.db_path(book_dir)
-    local mk = io.open(base .. ".isolated", "r")
-    if mk then mk:close(); return true end
-    return false
-end
+-- 隔离态判定改由 open() 内直接调用 path_exists_distinct 完成(区分"确不存在"与
+-- "无法确认",作者第4轮意见 #2),不再保留单独的 is_isolated 函数。
 
 function ThoughtDB.open(book_dir)
     if type(book_dir) ~= "string" or book_dir == "" then return nil end
     local SQ3 = get_sq3()
     if not SQ3 then return nil end
     U.mkdir(book_dir)
-    -- 隔离态:主库已重命名为 .corrupt-*,禁止自动重建空库(作者意见 #2)。
-    if is_isolated(book_dir) then
+    local base = ThoughtDB.db_path(book_dir)
+    -- 隔离标记:区分"确不存在"与"无法确认"(作者第4轮意见 #2)。
+    -- 无法确认(权限/IO)时保守阻断,避免掩盖隔离态 / 损坏证据。
+    local iso_present, iso_state = path_exists_distinct(base .. ".isolated")
+    if iso_present then
         return nil, "数据库已被隔离(损坏),禁止自动重建;请恢复或重新同步"
     end
-    local path = ThoughtDB.db_path(book_dir)
-    local db = do_open(path)
+    if iso_state == "uncheckable" then
+        return nil, "隔离标记状态无法确认(权限/IO),阻断自动重建以保护数据"
+    end
+    -- 主库存在性:区分"明确不存在"与"无法确认"(作者第4轮意见 #2)。
+    -- 无法确认 → 报错阻断,绝不交给 SQLite 自动创建空库。
+    local main_present, main_state = path_exists_distinct(base)
+    if main_state == "uncheckable" then
+        return nil, "主库状态无法确认(权限/IO),阻断自动重建以保护数据"
+    end
+    if not main_present then
+        -- 主库缺失:检查是否有孤立 sidecar(-wal/-shm)。孤儿 sidecar 表明上次写入中途
+        -- 崩溃,主库可能已损坏/丢失——此时绝不允许 SQLite 静默新建空库(作者第4轮意见 #2)。
+        for _, ext in ipairs({ "-wal", "-shm" }) do
+            local ex, st = path_exists_distinct(base .. ext)
+            if ex or st == "uncheckable" then
+                return nil, "主库缺失但存在孤立 sidecar(" .. ext .. "),阻断自动重建"
+            end
+        end
+        -- 主库确缺失且无 sidecar:允许 SQLite 正常新建(首次打开一本书)。
+    end
+    local db = do_open(base)
     if not db then return nil end
     -- 打开即核验完整性:先做一次无写入的只读核验(作者意见 #5),
     -- 确认健康后再做连接级 PRAGMA + schema 初始化 / user_version 写入,绝不先改原库。
     local ic_ok, healthy, detail = pcall(ThoughtDB.integrity_check, db)
     if not ic_ok then
-        logger.warn("[撷思][ThoughtDB] integrity_check 过程失败,保留原库", path, tostring(healthy))
+        logger.warn("[撷思][ThoughtDB] integrity_check 过程失败,保留原库", base, tostring(healthy))
         ThoughtDB.close_no_checkpoint(db)  -- 隔离前不 checkpoint(作者意见 #1)
         return nil, "integrity_check 过程失败: " .. tostring(healthy)
     elseif healthy ~= true then
-        logger.warn("[撷思][ThoughtDB] integrity_check 检出损坏,隔离而非删除", path, tostring(detail))
+        logger.warn("[撷思][ThoughtDB] integrity_check 检出损坏,隔离而非删除", base, tostring(detail))
         ThoughtDB.close_no_checkpoint(db)  -- 隔离前不 checkpoint(作者意见 #1)
         local iso, iso_err = ThoughtDB.isolate_corrupt(book_dir)
         if iso then
             return nil, "已隔离损坏库至 " .. iso .. ";想法可由本地注入源(离线缓存)重建"
         end
-        return nil, "损坏库隔离失败(" .. tostring(iso_err or "无法重命名") .. ");请手动检查 " .. path
+        return nil, "损坏库隔离失败(" .. tostring(iso_err or "无法重命名") .. ");请手动检查 " .. base
     end
     -- 健康:此时才设置连接级 PRAGMA + schema 初始化 / user_version 写入。
     pcall(function() db:exec("PRAGMA journal_mode=WAL") end)
@@ -306,8 +374,8 @@ function ThoughtDB.open(book_dir)
     -- 健康库建立成功:清理可能残留的隔离标记(作者意见 #2)。
     -- 仅当标记确实存在时才删除,避免对不存在文件做无效 os.remove。
     pcall(function()
-        local mk = io.open(path .. ".isolated", "r")
-        if mk then mk:close(); os.remove(path .. ".isolated") end
+        local mk = io.open(base .. ".isolated", "r")
+        if mk then mk:close(); os.remove(base .. ".isolated") end
     end)
     return db
 end

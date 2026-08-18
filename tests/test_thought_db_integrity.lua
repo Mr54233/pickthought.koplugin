@@ -372,3 +372,130 @@ T.case("隔离:sidecar 无法检查(权限/IO)时保守报错,不静默跳过", 
     T.ok(err ~= nil and tostring(err):find("sidecar"), "错误含 sidecar")
     rm_tmp(dir)
 end)
+
+-- =====================================================================
+-- 作者第4轮复审 2026-08-18:三处数据安全边界补齐(原子预留 / 异常状态判定 / 格式校验)
+-- =====================================================================
+
+-- 第4轮意见 #1:损坏备份目标原子无覆盖预留——预占/并发场景下旧 .corrupt-* 备份内容不被覆盖。
+T.case("隔离:预占场景下旧 .corrupt-* 备份内容不被覆盖", function()
+    local dir = tmp_dir()
+    for _, name in ipairs({ "thoughts.db", "thoughts.db-wal", "thoughts.db-shm" }) do
+        local f = io.open(dir .. "/" .. name, "w"); f:write("MAIN"); f:close()
+    end
+    local base = dir .. "/thoughts.db"
+    local old_ts = os.time()
+    local old_target = base .. ".corrupt-" .. tostring(old_ts) .. "-0"
+    local of = io.open(old_target, "w"); of:write("OLD BACKUP PAYLOAD"); of:close()
+    T.ok(file_exists(old_target), "预建旧备份存在")
+    local target, err = ThoughtDB.isolate_corrupt(dir)
+    T.ok(target ~= nil, "隔离成功")
+    T.ok(target ~= old_target, "新目标名不同于旧备份(避免覆盖)")
+    -- 关键:旧备份内容原样保留,未被新隔离覆盖(无论原子路径还是退化 probe 路径)。
+    local rf = io.open(old_target, "r"); local content = rf and rf:read("*a"); if rf then rf:close() end
+    T.ok(content == "OLD BACKUP PAYLOAD", "旧备份内容未被覆盖")
+    -- 新隔离目标承载真实主库内容。
+    local nf = io.open(target, "r"); local ncontent = nf and nf:read("*a"); if nf then nf:close() end
+    T.ok(ncontent == "MAIN", "新隔离目标承载主库内容")
+    rm_tmp(dir)
+end)
+
+-- 第4轮意见 #2:.isolated 标记读取失败(权限/IO)→ 保守阻断自动重建,避免掩盖隔离态。
+T.case("open:隔离标记无法确认(权限/IO)→ 阻断自动重建", function()
+    local dir = tmp_dir()
+    local old_lfs = package.loaded["libs/libkoreader-lfs"]
+    package.loaded["libs/libkoreader-lfs"] = {
+        attributes = function() return nil, "Permission denied" end,
+    }
+    local c, restore = spy_os()
+    local db, err = ThoughtDB.open(dir)
+    restore()
+    package.loaded["libs/libkoreader-lfs"] = old_lfs
+    T.ok(db == nil, "标记无法确认 → open 返回 nil(阻断)")
+    T.ok(err ~= nil and tostring(err):find("无法确认"), "错误含'无法确认'")
+    T.ok(c.rename == 0 and c.remove == 0, "阻断时不隔离不删除")
+    T.ok(not file_exists(dir .. "/thoughts.db"), "未自动创建空库")
+    rm_tmp(dir)
+end)
+
+-- 第4轮意见 #2:主库状态无法确认(权限/IO)→ 阻断自动重建,绝不交给 SQLite 建空库。
+T.case("open:主库状态无法确认(权限/IO)→ 阻断自动重建", function()
+    local dir = tmp_dir()
+    -- .isolated 视为不存在,主库视为无法确认;其余随意。
+    local old_lfs = package.loaded["libs/libkoreader-lfs"]
+    package.loaded["libs/libkoreader-lfs"] = {
+        attributes = function(p)
+            if p:find("%.isolated$") then return nil, "No such file or directory" end
+            return nil, "Permission denied"
+        end,
+    }
+    local c, restore = spy_os()
+    local db, err = ThoughtDB.open(dir)
+    restore()
+    package.loaded["libs/libkoreader-lfs"] = old_lfs
+    T.ok(db == nil, "主库无法确认 → open 返回 nil(阻断)")
+    T.ok(err ~= nil and tostring(err):find("无法确认"), "错误含'无法确认'")
+    T.ok(c.rename == 0 and c.remove == 0, "阻断时不隔离不删除")
+    T.ok(not file_exists(dir .. "/thoughts.db"), "未自动创建空库")
+    rm_tmp(dir)
+end)
+
+-- 第4轮意见 #2:主库缺失但仍有孤立 sidecar(-wal/-shm)→ 阻断自动重建(不静默建空库)。
+T.case("open:主库缺失但有孤立 sidecar → 阻断,不建空库", function()
+    local dir = tmp_dir()
+    -- 仅留 orphan -wal(模拟上次写入中途崩溃),无主库、无 .isolated。
+    local f = io.open(dir .. "/thoughts.db-wal", "w"); f:write("x"); f:close()
+    local c, restore = spy_os()
+    local db, err = ThoughtDB.open(dir)
+    restore()
+    T.ok(db == nil, "orphan sidecar → open 返回 nil(阻断)")
+    T.ok(err ~= nil and tostring(err):find("孤立"), "错误含'孤立'")
+    T.ok(c.rename == 0 and c.remove == 0, "阻断时不隔离不删除原(可能残留的)数据")
+    T.ok(not file_exists(dir .. "/thoughts.db"), "未自动创建真实 thoughts.db")
+    rm_tmp(dir)
+end)
+
+-- 第4轮意见 #2(放行路径):主库确缺失且无 sidecar → 允许 SQLite 正常新建(首次打开一本书)。
+T.case("open:主库确缺失且无 sidecar → 正常新建", function()
+    SQ3._reset()
+    local clean = "/book/fresh-" .. tostring(os.time()) .. "-" .. tostring(math.floor(math.random() * 1e7))
+    local c, restore = spy_os()
+    local db, err = ThoughtDB.open(clean)
+    restore()
+    T.ok(db ~= nil, "首次打开(无主库无 sidecar)→ open 成功")
+    T.ok(err == nil, "无错误")
+    T.ok(c.rename == 0 and c.remove == 0, "无损坏/隔离,不重命名不删除")
+    T.ok(SQ3._stores[clean .. "/thoughts.db"] ~= nil, "内存库已建立(正常新建)")
+    if db then ThoughtDB.close(db) end
+end)
+
+-- 第4轮意见 #3:integrity_check 返回格式异常(无结果行)→ 抛错,按过程失败处理(保留原库)。
+T.case("integrity_check:无结果行(格式异常)→ 抛错(过程失败)", function()
+    local fake = { prepare = function() return { step = function() return nil end, close = function() end } end }
+    local ok, err = pcall(ThoughtDB.integrity_check, fake)
+    T.ok(not ok, "无结果行 → integrity_check 抛错(过程失败,保留原库)")
+    T.ok(err ~= nil and tostring(err):find("格式"), "错误含'格式'")
+end)
+
+-- 第4轮意见 #3:integrity_check 返回首列非字符串(格式异常)→ 抛错,避免误判为确认损坏。
+T.case("integrity_check:首列非字符串(格式异常)→ 抛错", function()
+    local fake = { prepare = function() return { step = function() return { 123 } end, close = function() end } end }
+    local ok, err = pcall(ThoughtDB.integrity_check, fake)
+    T.ok(not ok, "首列非字符串 → 抛错(不误判损坏、不触发隔离)")
+    T.ok(err ~= nil and tostring(err):find("格式"), "错误含'格式'")
+end)
+
+-- 第4轮意见 #3:integrity_check 格式异常经 open 按过程失败处理(保留原库,不隔离不删)。
+T.case("open:integrity_check 格式异常 → 过程失败(保留原库,不隔离不删)", function()
+    local orig = ThoughtDB.integrity_check
+    -- 模拟底层返回格式异常(非标准结果),integrity_check 应抛错 → open 视为过程失败。
+    ThoughtDB.integrity_check = function(_d) error("integrity_check 返回格式异常:缺少结果行") end
+    local c, restore = spy_os()
+    local db, err = ThoughtDB.open("/fmt/book")
+    restore()
+    T.ok(db == nil, "格式异常 → open 返回 nil(不静默重建空库)")
+    T.ok(err ~= nil and tostring(err):find("过程失败"), "错误含'过程失败'")
+    T.ok(c.rename == 0, "格式异常不触发隔离/重命名")
+    T.ok(c.remove == 0, "格式异常绝不删除想法数据")
+    ThoughtDB.integrity_check = orig
+end)
