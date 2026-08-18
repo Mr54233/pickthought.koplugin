@@ -490,6 +490,60 @@ T.case("clean_source 重建:固化 .orig 时用户取消(默认复制路径)→ 
     T.ok(last_copy ~= nil, "复制被尝试(默认复制路径)")
 end)
 
+T.case("clean_source 默认复制路径:用户取消 → 中止且不替换原书", function()
+    -- 作者意见(2026-08-18):默认 copy_file 包装器的进度回调必须 return step(...),
+    -- 取消才能从 progress 经 step → U.copy_file_stream 一路传播到 Sync.run。
+    -- 本用例不复写 copy_file(走 Sync.run 默认 U.copy_file_stream),仅用 progress 返回
+    -- false 触发取消,验证默认路径下取消信号不被吞掉:Sync.run 应中止、不执行最终
+    -- swap、并把 .old 回滚为 doc_path。若 sync.lua 默认包装未 return step(...),
+    -- 取消会被吞掉、继续完成固化与替换,本用例将失败。
+    local EpubInject = require("pickthought.epub_inject")
+    local src = os.tmpname()
+    local f = io.open(src, "wb"); f:write(("A"):rep(2000000)); f:close()  -- 2MB:多块可读,可中途取消
+    local doc_path = os.tmpname()  -- 仅作路径;backup 与其同目录,临时副本可创建
+    local deps, calls = make_deps({
+        doc_path = doc_path,
+        clean_source = src,
+        file_exists = function(p) return p == src end,
+        load_meta = function(p)
+            if p == src then
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+            end
+            -- doc_path 当前是脏注入版(走 .old 暂存分支,覆盖最复杂的取消恢复路径)
+            return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}},
+                has = {[EpubInject.MARKER] = true}}
+        end,
+        progress = function(phase, done, total, text)
+            if phase == "copy" then
+                return false  -- 用户取消固化
+            end
+            return true
+        end,
+    })
+    deps.copy_file = nil  -- 强制走 Sync.run 默认流式复制(验证默认路径取消传播)
+    local report, err = Sync.run(deps)
+    T.ok(report == nil, "应失败(用户取消): " .. tostring(err))
+    local e = tostring(err)
+    T.ok(e:find("取消", 1, true), "报错应指明取消: " .. e)
+    -- 取消后不得执行最终 swap(原书替换)
+    local swapped = false
+    for _, r in ipairs(calls.renames) do
+        if r[1] == doc_path .. ".pickthought-new" and r[2] == doc_path then swapped = true end
+    end
+    T.ok(not swapped, "取消后不得执行最终 swap(原书替换)")
+    -- 已暂存的 .old 应回滚为 doc_path,原书不被破坏
+    local rolled = false
+    for _, r in ipairs(calls.renames) do
+        if r[1] == doc_path .. ".old" and r[2] == doc_path then rolled = true end
+    end
+    T.ok(rolled, "取消后应将 .old 回滚为 doc_path(恢复原注入版)")
+    -- 清理真实临时文件(默认 copy_file 的 .copy.tmp 在取消时已被 copy_file_stream 清理)
+    pcall(os.remove, src)
+    pcall(os.remove, doc_path .. ".orig")
+    pcall(os.remove, doc_path .. ".orig.prev")
+    pcall(os.remove, doc_path .. ".orig.copy.tmp")
+end)
+
 T.case("U.content_fingerprint:同体积不同内容 → 不同指纹", function()
     -- P2, 2026-08-15 二轮 —— 内容指纹用于区分"同体积不同内容"的 EPUB,避免复用错误映射。
     local a = os.tmpname(); local b = os.tmpname()

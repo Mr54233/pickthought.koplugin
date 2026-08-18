@@ -48,7 +48,10 @@ function Sync.run(deps)
     -- 默认用流式复制(分块读写 + 进度心跳),避免大书一次性读入内存触发 OOM(P1#1)。
     local copy_file = deps.copy_file or function(a, b)
         return U.copy_file_stream(a, b, function(done, total)
-            step("copy", done, total, "固化干净源")
+            -- 必须 return step(...) 的布尔值:progress 返回 false(取消)时,
+            -- 该 false 需透传到 U.copy_file_stream 的 res==false 判定,
+            -- 否则取消信号在默认复制路径上被吞掉、会继续完成 .orig 固化与原书替换。
+            return step("copy", done, total, "固化干净源")
         end)
     end
 
