@@ -355,8 +355,8 @@ local function render_text_token(token, marks, data)
                 -- leave the original link as the only clickable target(仍用独立 <span>)。
                 if active.thought and not token.inside_anchor then
                     -- 折叠:把「链接 <a> + 标注 <span>」合并为单个 <a class="pickthought-link pickthought-mark">,
-                    -- 减半样式元素数量;配合 annotation_style 把 border-bottom 虚线改为 text-decoration,
-                    -- 规避 CRE 样式数据缓存被大量边框元素撑爆导致 KPW3 开书崩溃。
+                    -- 减半样式元素数量;配合 annotation_style 使用共享 class 的默认样式,
+                    -- 保留低内存设备的结构优化。
                     local href = Thoughts.href(data.book_id, data.chapter_uid, active.key)
                     out[#out + 1] = '<a class="pickthought-link pickthought-mark" data-pickthought-range="'
                         .. active.key .. '" href="' .. href .. '">'
