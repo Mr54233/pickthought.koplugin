@@ -132,6 +132,61 @@ local function process_exists(pid)
     return true
 end
 
+local function diagnostics_enabled(preferences)
+    return type(preferences) == "table" and preferences.debug_mode == true
+end
+
+local SIGNAL_NAMES = {
+    [6] = "SIGABRT", [9] = "SIGKILL", [11] = "SIGSEGV",
+    [13] = "SIGPIPE", [15] = "SIGTERM",
+}
+
+local function decode_wait_status(raw_status)
+    local raw = tonumber(raw_status)
+    if not raw then return nil end
+    local signal = raw % 128
+    if signal == 0 then
+        return {
+            exited = true,
+            raw_status = raw,
+            exit_code = math.floor(raw / 256) % 256,
+            core_dumped = false,
+        }
+    end
+    return {
+        exited = true,
+        raw_status = raw,
+        signal = signal,
+        signal_name = SIGNAL_NAMES[signal] or ("SIG" .. tostring(signal)),
+        core_dumped = math.floor(raw / 128) % 2 == 1,
+    }
+end
+
+-- 必须在 FFIUtil.isSubProcessDone 之前读取状态；后者会调用 waitpid 并丢弃
+-- 原始退出码。重启后接管的 worker 不是当前进程的子进程，ECHILD 时回退旧逻辑。
+local function wait_process_state(pid)
+    if not jit or jit.os ~= "Linux" then return nil, "unsupported" end
+    local ok, ffi = pcall(require, "ffi")
+    if not ok or not ffi then return nil, "unsupported" end
+    pcall(ffi.cdef, "int waitpid(int pid, int *status, int options);")
+    local status = ffi.new("int[1]")
+    local called, result = pcall(function()
+        return tonumber(ffi.C.waitpid(tonumber(pid), status, 1))
+    end)
+    if not called then return nil, tostring(result) end
+    if result == 0 then return {running = true, source = "waitpid"} end
+    if result == tonumber(pid) then
+        local decoded = decode_wait_status(status[0]) or {}
+        decoded.source = "waitpid"
+        return decoded
+    end
+    if result == -1 then
+        local errno = tonumber(ffi.errno())
+        return nil, errno == 10 and "echild" or ("errno=" .. tostring(errno))
+    end
+    return nil, "unexpected=" .. tostring(result)
+end
+
 -- 可靠终止:FFIUtil.terminateSubProcess 对非亲子进程(重启后 attach 接管)是
 -- 静默空操作(waitpid ECHILD 被当作 done 跳过 kill)。杀完必须用 /proc 复核,
 -- 仍活着就对进程组直接 SIGKILL;返回「是否确认已死」,杀不死不许收尾。
@@ -166,7 +221,7 @@ function SyncTask:descriptor()
         pid=job.pid,progress_path=job.progress_path,result_path=job.result_path,
         cancel_path=job.cancel_path,worker_settings_path=job.worker_settings_path,
         started_at=job.started_at,owner_token=self.owner_token,task_token=job.task_token,
-        mode=job.mode,
+        mode=job.mode,debug_mode=job.debug_mode,
     }
 end
 
@@ -381,8 +436,24 @@ function SyncTask:_poll()
         self:_reset_device_timeout()
     end
 
+    local wait_state,wait_error
+    if job.debug_mode then wait_state,wait_error=wait_process_state(job.pid) end
     local alive=process_exists(job.pid)
-    local done_ok,done=pcall(FFIUtil.isSubProcessDone,job.pid,false)
+    local done_ok,done
+    if wait_state and wait_state.running then
+        done_ok,done=true,false
+    elseif wait_state and wait_state.exited then
+        job.exit_status=wait_state
+        alive=false
+        done_ok,done=true,true
+    else
+        done_ok,done=pcall(FFIUtil.isSubProcessDone,job.pid,false)
+        if job.debug_mode and wait_error and wait_error~="unsupported" and wait_error~="echild"
+            and not job.waitpid_error_logged then
+            job.waitpid_error_logged=true
+            logger.warn("[撷思][SyncTask] waitpid unavailable",tostring(wait_error))
+        end
+    end
     if not done_ok then
         logger.warn("[撷思][SyncTask] poll failed",tostring(done))
         if alive~=false then self:_schedule(); return end
@@ -438,6 +509,19 @@ function SyncTask:_poll()
         return
     end
 
+    if job.debug_mode and job.exit_status and not job.exit_status_logged then
+        job.exit_status_logged=true
+        local state=job.last_progress_state or {}
+        logger.warn("[撷思][SyncTask] child exited without result",
+            "pid=",tostring(job.pid),"source=",tostring(job.exit_status.source),
+            "raw_status=",tostring(job.exit_status.raw_status),
+            "exit_code=",tostring(job.exit_status.exit_code),
+            "signal=",tostring(job.exit_status.signal),
+            "signal_name=",tostring(job.exit_status.signal_name),
+            "core_dumped=",tostring(job.exit_status.core_dumped == true),
+            "stage=",tostring(state.stage),"current=",tostring(state.current),
+            "total=",tostring(state.total),"chapter=",tostring(state.chapter))
+    end
     job.dead_seen_at=job.dead_seen_at or now
     if now-job.dead_seen_at<8 then self:_schedule(); return end
     self:_finish(job)
@@ -470,6 +554,7 @@ function SyncTask:attach(descriptor,on_progress,on_done)
         on_progress=on_progress,on_done=on_done,last_progress_raw=nil,last_progress_state=nil,
         last_progress_at=nil,last_keepalive=0,started_at=descriptor.started_at,dead_seen_at=nil,waiting_notified=false,
         task_token=descriptor.task_token,mode=descriptor.mode,
+        debug_mode=descriptor.debug_mode==true,
     }
     self.backgrounded=true
     self:_read_progress(self.job)
@@ -532,8 +617,10 @@ function SyncTask:start(task, on_progress, on_done)
     -- 只用上次拉取的数据重跑映射+注入,零网络。
     local mode = tostring(task.mode or "sync")
     -- 分批风控:每次同步最多拉这么多个新章节,大书分多次完成。
-    local batch_limit = tonumber(self.store:preferences().sync_batch_limit) or 200
-    self.keep_awake_enabled = self.store:preferences().sync_keep_awake ~= false
+    local preferences = self.store:preferences()
+    local batch_limit = tonumber(preferences.sync_batch_limit) or 200
+    local debug_mode = diagnostics_enabled(preferences)
+    self.keep_awake_enabled = preferences.sync_keep_awake ~= false
     if not self.keep_awake_enabled then self.power_inhibit:clear_stale() end
 
     local child = function()
@@ -550,6 +637,29 @@ function SyncTask:start(task, on_progress, on_done)
         local JsonChild = require("pickthought.json")
         local UChild = require("pickthought.util")
         local LoggerChild = require("logger")
+
+        local diagnostic_logger = LoggerChild.LvDEBUG or LoggerChild.info
+        local function worker_memory()
+            local available = parse_memory_available_kb(UChild.read_file("/proc/meminfo", true))
+            local status = UChild.read_file("/proc/self/status", true) or ""
+            local rss = tonumber(status:match("VmRSS:%s*(%d+)%s*kB"))
+            return available, rss, math.floor(collectgarbage("count"))
+        end
+        local function diagnostic(event, ...)
+            if not debug_mode then return end
+            local args = {"[撷思][Diag]", "event=", tostring(event)}
+            for index = 1, select("#", ...) do
+                args[#args + 1] = select(index, ...)
+            end
+            local available, rss, lua_heap = worker_memory()
+            args[#args + 1] = "mem_available_kb="
+            args[#args + 1] = tostring(available)
+            args[#args + 1] = "rss_kb="
+            args[#args + 1] = tostring(rss)
+            args[#args + 1] = "lua_heap_kb="
+            args[#args + 1] = tostring(lua_heap)
+            diagnostic_logger(unpack(args))
+        end
 
         local function emit(state)
             state = state or {}
@@ -703,11 +813,19 @@ function SyncTask:start(task, on_progress, on_done)
             end
             local cached_annotations = {
                 fetch_chapter = function(_, bid, uid)
+                    local fetch_started = os.time()
+                    diagnostic("chapter_begin", "book=", tostring(bid),
+                        "chapter=", tostring(uid), "index=", tostring(fetch_now.i))
                     local raw = UChild.read_file(cache_path(uid), true)
                     if raw then
                         local good, data = pcall(JsonChild.decode, raw)
                         if good and cache_valid(data) then
                             data.resumed = true
+                            diagnostic("chapter_done", "book=", tostring(bid),
+                                "chapter=", tostring(uid), "source=", "cache",
+                                "elapsed_s=", tostring(os.time() - fetch_started),
+                                "underlines=", tostring(data.underline_count or 0),
+                                "thoughts=", tostring(data.thought_entry_count or 0))
                             return data
                         end
                     end
@@ -729,6 +847,12 @@ function SyncTask:start(task, on_progress, on_done)
                             heartbeat("fetch", nil, fetch_percent())
                         end
                     end)
+                    diagnostic("chapter_done", "book=", tostring(bid),
+                        "chapter=", tostring(uid), "source=", "network",
+                        "elapsed_s=", tostring(os.time() - fetch_started),
+                        "underlines=", tostring(type(data) == "table" and data.underline_count or 0),
+                        "thoughts=", tostring(type(data) == "table" and data.thought_entry_count or 0),
+                        "errors=", tostring(type(data) == "table" and #(data.errors or {}) or 1))
                     -- 只有整章完整成功才缓存,否则下次重拉。
                     if type(data) == "table" and data.underline_request_ok ~= false
                         and #(data.errors or {}) == 0 then
@@ -769,6 +893,10 @@ function SyncTask:start(task, on_progress, on_done)
             -- 注入前释放拉取阶段的网络缓存/JSON 对象,降内存水位(低内存设备防 OOM)
             collectgarbage("collect")
 
+            local sync_started = os.time()
+            local diagnostic_stage, diagnostic_bucket
+            diagnostic("sync_begin", "mode=", mode, "chapter_start=", tostring(chapter_start),
+                "batch_limit=", tostring(batch_limit))
             local report, sync_err = Sync.run{
                 doc_path = doc_path,
                 book_id = book_id,
@@ -808,6 +936,16 @@ function SyncTask:start(task, on_progress, on_done)
                 spine_cache = true,
                 progress = function(phase, i, n, text)
                     if cancelled() then return false end
+                    if phase == "map" or phase == "inject" then
+                        local bucket = tonumber(i) and tonumber(n) and tonumber(n) > 0
+                            and math.floor(math.min(tonumber(i) / tonumber(n), 1) * 10) or 0
+                        if phase ~= diagnostic_stage or bucket ~= diagnostic_bucket then
+                            diagnostic_stage, diagnostic_bucket = phase, bucket
+                            diagnostic("stage_progress", "stage=", phase,
+                                "current=", tostring(i), "total=", tostring(n),
+                                "elapsed_s=", tostring(os.time() - sync_started))
+                        end
+                    end
                     local percent
                     if phase == "chapters" then percent = 0.02
                     elseif phase == "fetch" then
@@ -821,6 +959,9 @@ function SyncTask:start(task, on_progress, on_done)
                     return true
                 end,
             }
+            diagnostic("sync_end", "ok=", tostring(report ~= nil),
+                "elapsed_s=", tostring(os.time() - sync_started),
+                "error=", report and "" or tostring(sync_err))
             if not report then
                 local failure_status = cancelled() and "cancelled" or "failed"
                 local failure_ok, failure_error = write_sync_state{
@@ -908,6 +1049,7 @@ function SyncTask:start(task, on_progress, on_done)
         waiting_notified = false,
         task_token = task_token,
         mode = mode,
+        debug_mode = debug_mode,
         started_at = os.time(),
     }
     self:_claim(pid)
@@ -921,6 +1063,8 @@ end
 SyncTask.MIN_FORK_AVAILABLE_KB = MIN_FORK_AVAILABLE_KB
 SyncTask.FORK_MEMORY_COOLDOWN_SECONDS = FORK_MEMORY_COOLDOWN_SECONDS
 SyncTask._is_memory_error = is_memory_error
+SyncTask._diagnostics_enabled = diagnostics_enabled
 SyncTask._parse_memory_available_kb = parse_memory_available_kb
+SyncTask._decode_wait_status = decode_wait_status
 
 return SyncTask

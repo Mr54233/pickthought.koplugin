@@ -340,6 +340,15 @@ function Plugin:settings_menu()
             -- 对进行中的任务即时生效,不必等下次同步。
             if self.sync_task then self.sync_task:set_keep_awake(enabled) end
         end},
+        {text="调试模式(记录详细同步日志)",checked_func=function()
+            return self.store:preferences().debug_mode==true
+        end,callback=function()
+            local p=self.store:preferences()
+            p.debug_mode=not (p.debug_mode==true)
+            self.store:save_preferences(p)
+            self:toast(p.debug_mode and "调试模式已开启,下次同步生效"
+                or "调试模式已关闭,下次同步生效")
+        end},
     }
 end
 

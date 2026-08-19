@@ -42,6 +42,32 @@ T.case("SyncTask 识别常见的 fork 内存错误", function()
     T.ok(not SyncTask._is_memory_error("permission denied"), "普通 fork 错误不误判")
 end)
 
+T.case("SyncTask 调试模式默认关闭且只接受显式开启", function()
+    T.ok(not SyncTask._diagnostics_enabled(nil), "缺少设置时关闭")
+    T.ok(not SyncTask._diagnostics_enabled({}), "默认设置关闭")
+    T.ok(not SyncTask._diagnostics_enabled({debug_mode = false}), "显式关闭")
+    T.ok(SyncTask._diagnostics_enabled({debug_mode = true}), "显式开启")
+end)
+
+T.case("SyncTask 解码子进程退出码与终止信号", function()
+    local normal = SyncTask._decode_wait_status(0)
+    T.eq(normal.exit_code, 0, "正常退出码")
+    T.eq(normal.signal, nil, "正常退出没有信号")
+
+    local failed = SyncTask._decode_wait_status(256)
+    T.eq(failed.exit_code, 1, "非零退出码")
+
+    local killed = SyncTask._decode_wait_status(9)
+    T.eq(killed.signal, 9, "SIGKILL 编号")
+    T.eq(killed.signal_name, "SIGKILL", "SIGKILL 名称")
+    T.eq(killed.core_dumped, false, "SIGKILL 无 core 标志")
+
+    local segfault = SyncTask._decode_wait_status(139)
+    T.eq(segfault.signal, 11, "SIGSEGV 编号")
+    T.eq(segfault.signal_name, "SIGSEGV", "SIGSEGV 名称")
+    T.eq(segfault.core_dumped, true, "识别 core 标志")
+end)
+
 T.case("SyncTask fork 前内存不足时恢复低内存设置", function()
     local task = SyncTask:new({temp_dir = "tests"})
     local events = {}
