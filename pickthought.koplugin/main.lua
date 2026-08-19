@@ -322,7 +322,6 @@ end
 
 function Plugin:settings_menu()
     return {
-        {text="划线样式",sub_item_table_func=function() return self:annotation_style_menu() end},
         {text="想法弹窗字体",sub_item_table_func=function() return self:thought_font_menu() end},
         {text="阅读时自动分批拉取后续章节",checked_func=function()
             return BatchSync.auto_enabled(self.store:preferences())
