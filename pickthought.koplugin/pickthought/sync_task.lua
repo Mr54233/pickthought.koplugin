@@ -8,7 +8,6 @@ local FFIUtil = require("ffi/util")
 local Json = require("pickthought.json")
 local U = require("pickthought.util")
 local UIManager = require("ui/uimanager")
-local Device = require("device")
 local logger = require("logger")
 local lfs = require("libs/libkoreader-lfs")
 local PowerInhibit = require("pickthought.power_inhibit")
@@ -20,6 +19,7 @@ SyncTask.__index = SyncTask
 -- 拒绝。这里留出保守余量，避免把底层 ENOMEM 直接抛给用户。
 local MIN_FORK_AVAILABLE_KB = 128 * 1024
 local FORK_MEMORY_COOLDOWN_SECONDS = 60
+local KEEPALIVE_INTERVAL_SECONDS = 300
 
 local function is_memory_error(value)
     local text = tostring(value or ""):lower()
@@ -73,7 +73,6 @@ function SyncTask:new(store)
         owner_token = owner_token,
     }, self)
     instance.power_inhibit = PowerInhibit:new{
-        device = Device,
         marker_path = store.temp_dir .. "/sync-keep-awake.json",
         token = owner_token,
     }
@@ -227,13 +226,7 @@ end
 
 function SyncTask:_reset_device_timeout()
     if not self.keep_awake_enabled then return false end
-    local powerd = Device and Device.powerd
-    if powerd and type(powerd.resetT1Timeout) == "function" then
-        local ok, err = pcall(powerd.resetT1Timeout, powerd)
-        if not ok then logger.warn("[撷思][SyncTask] Kindle T1 reset failed", tostring(err)) end
-        return ok
-    end
-    return false
+    return self.power_inhibit:reset_timeout(true)
 end
 
 function SyncTask:_memory_available_kb()
@@ -320,7 +313,8 @@ function SyncTask:_hold_awake()
     end
     local system_lock = self.power_inhibit:acquire()
     local reset = self:_reset_device_timeout()
-    logger.info("[撷思][SyncTask] standby lock acquired",
+    if self.job then self.job.last_keepalive = os.time() end
+    logger.info("[撷思][SyncTask] standby lock requested",
         "system_lock=", tostring(system_lock), "t1_reset=", tostring(reset))
 end
 
@@ -331,7 +325,20 @@ function SyncTask:_release_awake()
     end
     self.power_inhibit:release()
     self:_release_memory_mode()
-    logger.info("[撷思][SyncTask] standby lock released")
+    logger.info("[撷思][SyncTask] standby lock release requested")
+end
+
+function SyncTask:_maintain_awake(now, force)
+    local job = self.job
+    if not job or not self.keep_awake_enabled then return false end
+    now = tonumber(now) or os.time()
+    if not force and job.last_keepalive and now - job.last_keepalive < KEEPALIVE_INTERVAL_SECONDS then
+        return false
+    end
+    job.last_keepalive = now
+    self.power_inhibit:verify(true)
+    self:_reset_device_timeout()
+    return true
 end
 
 function SyncTask:available()
@@ -421,20 +428,15 @@ function SyncTask:_poll()
     -- 挂起豁免:轮询间隔远超调度周期说明设备睡过一觉——挂起期间父子进程都被
     -- 冻结,墙钟静默对子进程不公平;重置活动基线,给它完整的恢复窗口,
     -- 否则唤醒后首轮 poll 会误杀健康的子进程。
-    if job.last_poll_at and now-job.last_poll_at>30 then
+    local poll_delayed = job.last_poll_at and now-job.last_poll_at>30
+    if poll_delayed then
         logger.info("[撷思][SyncTask] wakeup detected, resetting idle baseline",
             "gap=",tostring(now-job.last_poll_at))
         job.last_progress_at=now
         job.waiting_notified=false
-        self.power_inhibit:verify(true)
-        self:_reset_device_timeout()
     end
     job.last_poll_at=now
-    if not job.last_keepalive or now-job.last_keepalive>=60 then
-        job.last_keepalive=now
-        self.power_inhibit:verify(true)
-        self:_reset_device_timeout()
-    end
+    self:_maintain_awake(now, poll_delayed)
 
     local wait_state,wait_error
     if job.debug_mode then wait_state,wait_error=wait_process_state(job.pid) end
@@ -1062,6 +1064,7 @@ end
 
 SyncTask.MIN_FORK_AVAILABLE_KB = MIN_FORK_AVAILABLE_KB
 SyncTask.FORK_MEMORY_COOLDOWN_SECONDS = FORK_MEMORY_COOLDOWN_SECONDS
+SyncTask.KEEPALIVE_INTERVAL_SECONDS = KEEPALIVE_INTERVAL_SECONDS
 SyncTask._is_memory_error = is_memory_error
 SyncTask._diagnostics_enabled = diagnostics_enabled
 SyncTask._parse_memory_available_kb = parse_memory_available_kb

@@ -68,6 +68,47 @@ T.case("SyncTask 解码子进程退出码与终止信号", function()
     T.eq(segfault.core_dumped, true, "识别 core 标志")
 end)
 
+T.case("SyncTask 保活周期为五分钟", function()
+    local task = SyncTask:new({temp_dir = "tests"})
+    local verify_count, t1_count = 0, 0
+    task.power_inhibit = {
+        verify = function() verify_count = verify_count + 1 return true end,
+        reset_timeout = function() t1_count = t1_count + 1 return true end,
+    }
+    task.job = {last_keepalive = 100}
+    T.eq(task:_maintain_awake(399, false), false, "五分钟内不重复保活")
+    T.ok(task:_maintain_awake(400, false), "五分钟到期后保活")
+    T.eq(verify_count, 1, "系统锁只验证一次")
+    T.eq(t1_count, 1, "T1 只重置一次")
+    T.eq(SyncTask.KEEPALIVE_INTERVAL_SECONDS, 300, "周期常量")
+end)
+
+T.case("SyncTask 轮询延迟与周期到期同轮只保活一次", function()
+    local task = SyncTask:new({temp_dir = "tests"})
+    local verify_count, t1_count, schedule_count = 0, 0, 0
+    task.power_inhibit = {
+        verify = function() verify_count = verify_count + 1 return true end,
+        reset_timeout = function() t1_count = t1_count + 1 return true end,
+    }
+    task._owns_job = function() return true end
+    task._read_progress = function() return false end
+    task._schedule = function() schedule_count = schedule_count + 1 end
+    task.job = {
+        pid = 999999,
+        progress_path = "tests/.missing-progress",
+        result_path = "tests/.missing-result",
+        cancel_path = "tests/.missing-cancel",
+        last_poll_at = os.time() - 31,
+        last_keepalive = 0,
+        last_progress_at = os.time(),
+        started_at = os.time(),
+    }
+    task:_poll()
+    T.eq(verify_count, 1, "延迟恢复不重复验证系统锁")
+    T.eq(t1_count, 1, "延迟恢复不重复重置 T1")
+    T.eq(schedule_count, 1, "父进程轮询继续调度")
+end)
+
 T.case("SyncTask fork 前内存不足时恢复低内存设置", function()
     local task = SyncTask:new({temp_dir = "tests"})
     local events = {}
