@@ -163,24 +163,32 @@ if ffi and ffi.os == "Linux" then
     end
 end
 
--- 原子独占创建目标(空文件)。成功返回 true(目标名已独占占有,可安全移入主库内容);
--- 已存在/权限失败返回 false;ffi 不可用时返回 nil(交由调用方退化处理)。
+-- 原子独占创建目标(空文件)。返回约定(作者第6轮意见 #1/#2):
+--   成功      → true, fd   —— 占位文件已创建,fd 保持打开(调用方在 rename 完成后关闭,
+--                            避免"创建即关、到 rename 之间被删/替换"的竞态);
+--   目标已存在 → "exists"   —— 仅 errno==EEXIST 时,调用方换名重试,绝不覆盖已有备份;
+--   其他错误   → nil, err   —— 权限/磁盘/IO 错误立即中止(绝不盲目循环 100000 次阻塞 Kindle)。
+local EEXIST = 17  -- Linux errno: File exists
 local function atomic_claim(cand)
-    if not ATOMIC_OPEN then return nil end
+    if not ATOMIC_OPEN then return nil, "ffi 不可用" end
     local fd = ATOMIC_OPEN(cand, ATOMIC_FLAGS, ATOMIC_MODE)
     local n = tonumber(fd) or -1
-    if n >= 0 then
-        if ffi.C.close then pcall(ffi.C.close, fd) end
-        return true
+    if n >= 0 then return true, fd end
+    local errno = 0
+    if ffi and ffi.errno then
+        local ok, e = pcall(ffi.errno)
+        if ok then errno = tonumber(e) or 0 end
     end
-    return false
+    if errno == EEXIST then return "exists" end
+    return nil, "目标占用失败(errno=" .. tostring(errno) .. ")"
 end
 
 -- 无覆盖目标预留:先原子占用候选目标(已存在则跳过换名),再 os.rename 主库内容填入。
 -- 原子路径下候选是我们刚独占的空占位,rename 覆盖它不会触碰任何真实备份;
 -- 退化路径下先 probe 存在即跳过。任一步失败均持续换名重试,绝不返回未经确认的候选
 -- (作者第3轮意见 #2 + 第4轮意见 #1:消除竞态隐患,序号到顶后再次确认目标为空)。
--- 仅在 rename 真正成功时返回占用名;极端持续失败时返回 nil。
+-- 仅在 rename 真正成功时返回占用名;目标已存在换名重试;非 EEXIST 错误立即中止(第6轮意见 #1)。
+-- 返回 (target) 或 (nil, err)。
 local function reserve_corrupt_main(base)
     local ts = os.time()
     local salt = 0
@@ -188,14 +196,19 @@ local function reserve_corrupt_main(base)
     while attempts < 100000 do
         attempts = attempts + 1
         local cand = base .. ".corrupt-" .. tostring(ts) .. "-" .. tostring(salt)
-        local claimed
-        local ac = atomic_claim(cand)
+        local claimed, held_fd
+        local ac, ac_err = atomic_claim(cand)
         if ac == true then
-            claimed = true   -- 已原子独占 cand(空文件),可安全移入主库内容。
-        elseif ac == false then
-            claimed = false  -- cand 已存在(原子创建失败)→ 跳过换名,绝不覆盖。
+            claimed = true
+            held_fd = ac_err  -- 占位 fd:保持打开,rename 完成后才关闭(第6轮意见 #2)。
+        elseif ac == "exists" then
+            claimed = false  -- cand 已存在(EEXIST)→ 跳过换名,绝不覆盖。
         else
-            -- 无 ffi / 未知平台:退化 probe——不存在才允许 rename 占用。
+            -- 无 ffi / 未知平台:退化 probe——不存在才允许 rename 占用;
+            -- 或原子路径下遇非 EEXIST 错误(权限/磁盘/IO):立即中止,不盲目循环。
+            if ATOMIC_OPEN then
+                return nil, tostring(ac_err or "目标占用失败")
+            end
             local probe = io.open(cand, "r")
             if probe then probe:close(); claimed = false
             else claimed = true end
@@ -203,21 +216,36 @@ local function reserve_corrupt_main(base)
         if claimed then
             -- cand 已确认空闲:把主库内容移入(原子路径下覆盖我们刚独占的空占位,
             -- 不会触碰任何真实备份)。rename 失败(极小概率权限)则清理空占位。
-            if os.rename(base, cand) then return cand end
-            os.remove(cand)
+            if os.rename(base, cand) then
+                if held_fd and ffi and ffi.C.close then pcall(ffi.C.close, held_fd) end
+                return cand
+            end
+            -- rename 失败:先关闭 fd,再清理占位——仅删除本流程创建的空占位
+            -- (0 字节),若已被其他进程替换成有内容文件则不动,避免误删他人数据。
+            if held_fd and ffi and ffi.C.close then pcall(ffi.C.close, held_fd) end
+            local probe = io.open(cand, "r")
+            if probe then
+                local sz = probe:seek("end") or 0
+                probe:close()
+                if sz == 0 then pcall(os.remove, cand) end
+            end
         end
         salt = salt + 1
         if salt > 9999 then ts = os.time(); salt = 0 end  -- 安全阀:换时间戳继续,再次确认
     end
-    return nil
+    return nil, "无法预留损坏备份目标(已重试 100000 次)"
 end
 
--- 区分"文件不存在"与"因权限/I-O 无法检查"(作者第3轮意见 #3)。
--- lfs(libs/libkoreader-lfs)在 KOReader 运行时可用,其 attributes 的错误码可区分
--- 二者;测试环境无 lfs 时退化为 io.open 探测(此时无法区分,保守按"可检查"处理)。
+-- 区分"文件不存在"与"因权限/I-O 无法检查"(作者第3轮意见 #3 + 第6轮意见 #4)。
+-- 显式加载 libs/libkoreader-lfs(而非只查 package.loaded),其 attributes 的错误码可
+-- 区分二者;lfs 不可用时退化 io.open 探测,并据 err 文本同样区分(权限错误 → uncheckable)。
 -- 返回 (exists, state):state 为 "uncheckable" 表示无法确认(权限/IO),调用方应保守处理。
 local function path_exists_distinct(path)
     local lfsm = package.loaded["libs/libkoreader-lfs"]
+    if not lfsm then
+        local ok, loaded = pcall(require, "libs/libkoreader-lfs")
+        if ok then lfsm = loaded end
+    end
     if lfsm and lfsm.attributes then
         local attr, err = lfsm.attributes(path)
         if attr then return true, nil end
@@ -226,9 +254,14 @@ local function path_exists_distinct(path)
         end
         return false, "uncheckable"
     end
-    local f = io.open(path, "r")
+    local f, err = io.open(path, "r")
     if f then f:close(); return true, nil end
-    return false, nil
+    -- 退化路径也要区分"不存在"与"权限/IO 错误",避免把无法检查误判为不存在(第6轮意见 #4)。
+    local e = tostring(err or ""):lower()
+    if e:find("no such file") or e:find("不存在") or e == "" then
+        return false, nil
+    end
+    return false, "uncheckable"
 end
 
 -- 写入并校验隔离标记:.isolated 存在即视为已隔离,即使主库仍残留也阻断自动重建
@@ -267,10 +300,10 @@ function ThoughtDB.isolate_corrupt(book_dir)
         return nil, "隔离标记写入失败,中止隔离以保护原库"
     end
     -- 2) 主库移动(以 rename 自身预留唯一目标,消除探测后 rename 竞态)。
-    local target = reserve_corrupt_main(base)
+    local target, reserve_err = reserve_corrupt_main(base)
     if not target then
-        -- 主库移动失败:标记已就位(阻断),不回滚标记,直接报错。
-        return nil, "主库重命名失败(隔离标记已就位,阻断自动重建)"
+        -- 主库移动失败(含非 EEXIST 错误立即中止):标记已就位(阻断),不回滚标记,直接报错。
+        return nil, "主库重命名失败(" .. tostring(reserve_err or "未知") .. ";隔离标记已就位,阻断自动重建)"
     end
     -- 3) sidecar 逐个移动;源存在(或无法确认)却失败 → 归档不完整,返回错误。
     --    绝不把"无法检查"的 sidecar 误判为不存在而留下未归档文件(作者第3轮意见 #3)。

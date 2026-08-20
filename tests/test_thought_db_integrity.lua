@@ -500,35 +500,77 @@ T.case("open:integrity_check 格式异常 → 过程失败(保留原库,不隔�
     ThoughtDB.integrity_check = orig
 end)
 
--- 作者第5轮意见 2026-08-19:原子无覆盖路径在 Kindle Linux 必须真实启用,且测试须覆盖原子分支
--- (此前 CI 走降级 probe 路径,未验证 O_CREAT|O_EXCL 原子占用)。
--- 本用例注入 fake ffi(os="Linux" + C.open/C.close 模拟原子占用)强制走原子分支,验证:
---   ① 目标被占用(已存在 .corrupt-*)时换新名;② 旧 .corrupt-* 内容不被覆盖。
-T.case("原子预留(Linux 分支):目标被占用时换名,旧备份内容不覆盖", function()
-    -- 注入 fake ffi 强制启用原子路径,再重新加载模块(仅本用例作用域,加载后还原全局 ffi)。
+-- 完整模拟 Linux 原子预留的 fake ffi(作者第6轮意见 #3:必须真实模拟占位状态、错误码
+-- 与 fd 生命周期,而非只统计调用次数):
+--   - C.open(O_CREAT|O_EXCL) 语义:目标已存在(真实文件或本流程已占位)→ -1 + errno=EEXIST(17);
+--     成功 → 分配伪 fd 并记录占位(占位仅内存态,不落真实文件,使 Windows 上后续
+--     os.rename 能成功——与真实 Linux 的"rename 覆盖空占位"等价)。
+--   - errno_map[path] 可注入非 EEXIST 错误码(权限/磁盘等)模拟异常。
+--   - C.close 记录被关闭 fd 对应路径当时的文件内容:若 close 发生在 rename 完成之后,
+--     该路径应已承载主库内容("MAIN")——据此断言"fd 保持到 rename 完成后才关闭"。
+local function make_fake_ffi(errno_map)
+    local state = {
+        open_calls = 0, close_calls = 0, success_calls = 0,
+        fds = {}, opened = {}, errno = 0,
+        closed_content = nil,  -- 最近一次 close 时该路径的内容(验证 close 时机)
+    }
+    local C = {
+        open = function(path, _flags, _mode)
+            state.open_calls = state.open_calls + 1
+            state.errno = 0
+            -- errno_map 支持按路径精确注入,或 "*" 通配注入(对所有候选生效)。
+            local injected = errno_map and (errno_map[path] or errno_map["*"])
+            if injected then
+                state.errno = injected
+                return -1
+            end
+            local f = io.open(path, "r")
+            if f then f:close(); state.errno = 17; return -1 end  -- 已存在(EEXIST)
+            if state.opened[path] then state.errno = 17; return -1 end
+            state.opened[path] = true
+            state.success_calls = state.success_calls + 1
+            local fd = 10 + state.success_calls
+            state.fds[fd] = path
+            return fd
+        end,
+        close = function(fd)
+            state.close_calls = state.close_calls + 1
+            local p = state.fds[fd]
+            if p then
+                local f = io.open(p, "r")
+                if f then
+                    state.closed_content = f:read("*a"); f:close()
+                else
+                    state.closed_content = nil
+                end
+                state.fds[fd] = nil
+            end
+            return 0
+        end,
+    }
+    return { os = "Linux", abi = function() return true end, cdef = function() end,
+        C = C, errno = function() return state.errno end, _state = state }
+end
+
+-- 注入 fake ffi 并重新加载模块(仅用例作用域,结束后还原),返回 (模块, fake)。
+local function with_fake_ffi(errno_map)
     local real_ffi = package.loaded["ffi"]
     local real_tdb = package.loaded["pickthought.thought_db"]
-    local atomic_calls = 0  -- 计数:证明原子分支(ffi.C.open)确实被走到,而非降级 probe 路径。
-    package.loaded["ffi"] = {
-        os = "Linux",
-        abi = function() return true end,
-        cdef = function() end,  -- 无操作:fake 下无需真实声明
-        C = {
-            -- 模拟 C.open(O_CREAT|O_EXCL):目标已存在(磁盘)即返回 -1(EEXIST),
-            -- 否则原子占用(仅记录,不创建真实文件)返回伪 fd——这样后续 os.rename 在
-            -- Windows 测试机上也能成功(目标名未落真实文件)。
-            open = function(path, _flags, _mode)
-                atomic_calls = atomic_calls + 1
-                local f = io.open(path, "r")
-                if f then f:close(); return -1 end
-                return 3  -- 伪 fd
-            end,
-            close = function() return 0 end,
-        },
-    }
+    local fake = make_fake_ffi(errno_map)
+    package.loaded["ffi"] = fake
     package.loaded["pickthought.thought_db"] = nil
     local AtomicTDB = require("pickthought.thought_db")
     package.loaded["ffi"] = real_ffi  -- 模块已捕获 fake,立即还原全局 ffi,避免污染其它用例
+    return AtomicTDB, fake, function() package.loaded["pickthought.thought_db"] = real_tdb end
+end
+
+-- 作者第5轮意见 2026-08-19:原子无覆盖路径在 Kindle Linux 必须真实启用,且测试须覆盖原子分支
+-- (此前 CI 走降级 probe 路径,未验证 O_CREAT|O_EXCL 原子占用)。
+-- 第6轮意见(2026-08-20):fake 须完整模拟占位状态、错误码与 fd 生命周期。
+-- 本用例验证:① 目标被占用(EEXIST)时换新名;② 旧 .corrupt-* 内容不被覆盖;
+-- ③ 占位 fd 保持到 rename 完成之后才关闭(close 时目标已承载主库内容)。
+T.case("原子预留(Linux 分支):目标被占用时换名,旧备份不覆盖,fd 保持到 rename 后关闭", function()
+    local AtomicTDB, fake, restore_tdb = with_fake_ffi(nil)
 
     local dir = tmp_dir()
     for _, name in ipairs({ "thoughts.db", "thoughts.db-wal", "thoughts.db-shm" }) do
@@ -541,9 +583,9 @@ T.case("原子预留(Linux 分支):目标被占用时换名,旧备份内容不�
     T.ok(file_exists(old_target), "预建旧备份(当前秒 salt0)存在,恰好命中首个候选")
 
     local target, err = AtomicTDB.isolate_corrupt(dir)
-    package.loaded["pickthought.thought_db"] = real_tdb  -- 还原模块缓存
+    restore_tdb()
 
-    T.ok(atomic_calls > 0, "原子分支(ffi.C.open)确实被走到,非降级 probe 路径")
+    T.ok(fake._state.open_calls > 0, "原子分支(ffi.C.open)确实被走到,非降级 probe 路径")
     T.ok(target ~= nil, "隔离成功(原子分支已启用)")
     T.ok(target ~= old_target, "目标被占用 → 换新名(不覆盖旧备份)")
     -- 旧备份内容原样保留(原子 open(O_EXCL) 在占用同名目标时失败,分支换名)。
@@ -552,5 +594,54 @@ T.case("原子预留(Linux 分支):目标被占用时换名,旧备份内容不�
     -- 新目标承载主库内容。
     local nf = io.open(target, "r"); local ncontent = nf and nf:read("*a"); if nf then nf:close() end
     T.ok(ncontent == "MAIN", "新目标承载主库内容")
+    -- 占位 fd 生命周期(第6轮意见 #2):close 发生在 rename 之后——close 时该路径应已
+    -- 承载主库内容(占位已被 rename 覆盖),而非空占位。
+    T.eq(fake._state.closed_content, "MAIN", "fd 保持到 rename 完成后才关闭(close 时目标已承载主库内容)")
+    -- 每次成功 open 最终都有对应 close(无 fd 泄漏);EEXIST 失败尝试不产生 fd,不计入。
+    T.ok(fake._state.close_calls >= fake._state.success_calls, "成功占位的 fd 均已关闭")
+    rm_tmp(dir)
+end)
+
+-- 作者第6轮意见 #1:atomic_claim 必须读取 errno,仅 EEXIST 换名重试;权限/磁盘/IO 错误
+-- 立即中止(绝不盲目循环 100000 次阻塞 Kindle),且隔离标记保留阻断自动重建。
+T.case("原子预留:非 EEXIST 错误(errno=EACCES)立即中止,不换名不循环,标记保留", function()
+    -- 模块 require 时捕获 ATOMIC_OPEN,故 errno 注入须在加载前(通配 "*" 对所有候选生效)。
+    local AtomicTDB, fake, restore_tdb = with_fake_ffi({ ["*"] = 13 })  -- EACCES:权限不足
+
+    local dir = tmp_dir()
+    local f = io.open(dir .. "/thoughts.db", "w"); f:write("MAIN"); f:close()
+    local target, err = AtomicTDB.isolate_corrupt(dir)
+    restore_tdb()
+
+    T.ok(target == nil, "非 EEXIST 错误 → 隔离失败")
+    T.ok(tostring(err):find("目标占用失败") or tostring(err):find("重命名失败"),
+        "错误含失败原因: " .. tostring(err))
+    T.eq(fake._state.open_calls, 1, "只尝试 1 次即中止,不盲目换名循环")
+    T.ok(file_exists(dir .. "/thoughts.db.isolated"), ".isolated 标记保留(阻断自动重建)")
+    T.ok(file_exists(dir .. "/thoughts.db"), "主库未被移动(保护原库)")
+    rm_tmp(dir)
+end)
+
+-- 作者第6轮意见 #4:path_exists_distinct 在 lfs 不可用时退化的 io.open 也要区分
+-- "不存在"与"权限/IO 错误"(后者 → uncheckable → 阻断自动建库,不误判为不存在)。
+T.case("open:无 lfs 退化 io.open 遇权限错误 → uncheckable 阻断自动重建", function()
+    local dir = tmp_dir()
+    -- 让主库路径是一个"目录":io.open(dir, "r") 打不开且错误不是 "No such file" → uncheckable。
+    mkdir_p(dir .. "/thoughts.db")
+    -- 移除 lfs(loaded + preload),强制 path_exists_distinct 走 io.open 退化分支。
+    local old_loaded = package.loaded["libs/libkoreader-lfs"]
+    local old_preload = package.preload["libs/libkoreader-lfs"]
+    package.loaded["libs/libkoreader-lfs"] = nil
+    package.preload["libs/libkoreader-lfs"] = nil
+    local c, restore = spy_os()
+    local db, err = ThoughtDB.open(dir)
+    restore()
+    package.loaded["libs/libkoreader-lfs"] = old_loaded
+    package.preload["libs/libkoreader-lfs"] = old_preload
+
+    T.ok(db == nil, "主库无法检查 → open 返回 nil(阻断)")
+    T.ok(tostring(err):find("无法确认"), "错误含'无法确认': " .. tostring(err))
+    T.ok(c.rename == 0 and c.remove == 0, "阻断时不隔离不删除")
+    T.ok(not file_exists(dir .. "/thoughts.db"), "未自动创建空库")
     rm_tmp(dir)
 end)
