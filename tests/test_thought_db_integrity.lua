@@ -499,3 +499,58 @@ T.case("open:integrity_check 格式异常 → 过程失败(保留原库,不隔�
     T.ok(c.remove == 0, "格式异常绝不删除想法数据")
     ThoughtDB.integrity_check = orig
 end)
+
+-- 作者第5轮意见 2026-08-19:原子无覆盖路径在 Kindle Linux 必须真实启用,且测试须覆盖原子分支
+-- (此前 CI 走降级 probe 路径,未验证 O_CREAT|O_EXCL 原子占用)。
+-- 本用例注入 fake ffi(os="Linux" + C.open/C.close 模拟原子占用)强制走原子分支,验证:
+--   ① 目标被占用(已存在 .corrupt-*)时换新名;② 旧 .corrupt-* 内容不被覆盖。
+T.case("原子预留(Linux 分支):目标被占用时换名,旧备份内容不覆盖", function()
+    -- 注入 fake ffi 强制启用原子路径,再重新加载模块(仅本用例作用域,加载后还原全局 ffi)。
+    local real_ffi = package.loaded["ffi"]
+    local real_tdb = package.loaded["pickthought.thought_db"]
+    local atomic_calls = 0  -- 计数:证明原子分支(ffi.C.open)确实被走到,而非降级 probe 路径。
+    package.loaded["ffi"] = {
+        os = "Linux",
+        abi = function() return true end,
+        cdef = function() end,  -- 无操作:fake 下无需真实声明
+        C = {
+            -- 模拟 C.open(O_CREAT|O_EXCL):目标已存在(磁盘)即返回 -1(EEXIST),
+            -- 否则原子占用(仅记录,不创建真实文件)返回伪 fd——这样后续 os.rename 在
+            -- Windows 测试机上也能成功(目标名未落真实文件)。
+            open = function(path, _flags, _mode)
+                atomic_calls = atomic_calls + 1
+                local f = io.open(path, "r")
+                if f then f:close(); return -1 end
+                return 3  -- 伪 fd
+            end,
+            close = function() return 0 end,
+        },
+    }
+    package.loaded["pickthought.thought_db"] = nil
+    local AtomicTDB = require("pickthought.thought_db")
+    package.loaded["ffi"] = real_ffi  -- 模块已捕获 fake,立即还原全局 ffi,避免污染其它用例
+
+    local dir = tmp_dir()
+    for _, name in ipairs({ "thoughts.db", "thoughts.db-wal", "thoughts.db-shm" }) do
+        local f = io.open(dir .. "/" .. name, "w"); f:write("MAIN"); f:close()
+    end
+    local base = dir .. "/thoughts.db"
+    -- 预建"当前秒 salt 0"的旧备份,恰好命中 reserve_corrupt_main 首个候选 → 模拟目标被占用。
+    local old_target = base .. ".corrupt-" .. tostring(os.time()) .. "-0"
+    local of = io.open(old_target, "w"); of:write("OLD BACKUP PAYLOAD"); of:close()
+    T.ok(file_exists(old_target), "预建旧备份(当前秒 salt0)存在,恰好命中首个候选")
+
+    local target, err = AtomicTDB.isolate_corrupt(dir)
+    package.loaded["pickthought.thought_db"] = real_tdb  -- 还原模块缓存
+
+    T.ok(atomic_calls > 0, "原子分支(ffi.C.open)确实被走到,非降级 probe 路径")
+    T.ok(target ~= nil, "隔离成功(原子分支已启用)")
+    T.ok(target ~= old_target, "目标被占用 → 换新名(不覆盖旧备份)")
+    -- 旧备份内容原样保留(原子 open(O_EXCL) 在占用同名目标时失败,分支换名)。
+    local rf = io.open(old_target, "r"); local content = rf and rf:read("*a"); if rf then rf:close() end
+    T.ok(content == "OLD BACKUP PAYLOAD", "旧备份内容未被原子预留覆盖")
+    -- 新目标承载主库内容。
+    local nf = io.open(target, "r"); local ncontent = nf and nf:read("*a"); if nf then nf:close() end
+    T.ok(ncontent == "MAIN", "新目标承载主库内容")
+    rm_tmp(dir)
+end)

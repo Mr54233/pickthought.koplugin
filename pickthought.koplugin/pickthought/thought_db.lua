@@ -147,10 +147,20 @@ end
 local ffi = nil
 pcall(function() ffi = require("ffi") end)
 local ATOMIC_OPEN, ATOMIC_FLAGS, ATOMIC_MODE
-if ffi and ffi.abi and ffi.abi("os") == "Linux" then
-    ATOMIC_OPEN = ffi.C.open          -- open(2)
-    ATOMIC_FLAGS = 0x40 + 0x80 + 0x1  -- O_CREAT | O_EXCL | O_WRONLY
-    ATOMIC_MODE = 0x180              -- 0600
+-- 修正(作者第5轮意见 #1):ffi.abi("os") 返回布尔值而非字符串,导致 Kindle Linux 永远
+-- 走降级路径、TOCTOU 竞态实际仍存在。正确判断应用 ffi.os(字符串:"Linux"/"Windows"/...)。
+-- 仅 Linux + ffi 可用时启用原子路径(作者第5轮意见 #2:必须补 ffi.cdef 声明 open/close,
+-- 否则加载期报 "missing declaration for symbol 'open'";cdef 冲突则退化为 nil → 降级路径)。
+if ffi and ffi.os == "Linux" then
+    local ok_cdef = pcall(ffi.cdef, [[
+        int open(const char *pathname, int flags, int mode);
+        int close(int fd);
+    ]])
+    if ok_cdef then
+        ATOMIC_OPEN = ffi.C.open          -- open(2)
+        ATOMIC_FLAGS = 0x40 + 0x80 + 0x1  -- O_CREAT | O_EXCL | O_WRONLY
+        ATOMIC_MODE = 0x180              -- 0600
+    end
 end
 
 -- 原子独占创建目标(空文件)。成功返回 true(目标名已独占占有,可安全移入主库内容);
