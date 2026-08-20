@@ -694,3 +694,131 @@ T.case("clean_source:主文件缺失而 .old 存在(中断残留)→ 恢复 .old
     end
     T.ok(not removed_during_recovery, "中断残留 .old 只被恢复一次,不重复处理")
 end)
+
+
+-- 作者第7轮意见①(2026-08-20):中断残留恢复 .old→doc_path 后必须重新解析并校验;
+-- 恢复出的副本损坏(load_meta 失败)时中止后续流程并保留恢复出的文件,绝不把损坏
+-- 副本当干净书继续(否则成功后清掉最后一份可恢复文件)。
+T.case("clean_source:中断残留恢复出的副本损坏 → 中止并保留文件", function()
+    local EpubInject = require("pickthought.epub_inject")
+    local existing = {["/clean/原书.epub"] = true, ["/books/书.epub.old"] = true}  -- 主文件缺失
+    local rec = {renames = {}, removed = {}}
+    local deps, calls = make_deps({
+        clean_source = "/clean/原书.epub",
+        file_exists = function(p) return existing[p] == true end,
+        load_meta = function(p)
+            if p == "/clean/原书.epub" then
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+            end
+            -- 恢复后的 doc_path 副本损坏:load_meta 失败
+            return nil, "EPUB 损坏:恢复副本无法解析"
+        end,
+        rename = function(a, b)
+            rec.renames[#rec.renames + 1] = {a, b}
+            if existing[b] then return false, "目标已存在" end
+            existing[a] = nil; existing[b] = true; return true
+        end,
+        remove = function(p) existing[p] = nil; rec.removed[#rec.removed + 1] = p; return true end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil, "恢复副本损坏 → 应中止")
+    local e = tostring(err)
+    T.ok(e:find("无法解析", 1, true) or e:find("损坏", 1, true), "错误指明解析失败: " .. e)
+    -- 恢复动作确实发生了(.old → doc_path),文件被保留而非删除
+    local recovered = false
+    for _, r in ipairs(rec.renames) do
+        if r[1] == "/books/书.epub.old" and r[2] == "/books/书.epub" then recovered = true end
+    end
+    T.ok(recovered, "中断残留 .old 已被恢复回 doc_path")
+    local removed_old = false
+    for _, p in ipairs(rec.removed) do
+        if p == "/books/书.epub.old" then removed_old = true end
+    end
+    T.ok(not removed_old, "不得删除恢复出的副本(保留最后一份可恢复文件)")
+    T.eq(calls.copied, nil, "未触发固化/注入")
+end)
+
+-- 作者第7轮意见②(2026-08-20):干净书重建时旧 .orig→.orig.old、复制 clean_source 成功后,
+-- 若 doc_path→.old 主书暂存失败,必须完整回滚——恢复旧 .orig、清理新副本,
+-- 返回失败后文件状态与操作前一致(否则 .orig 已换新而 doc_path 仍是旧版本,重注用不匹配备份)。
+T.case("clean_source:复制成功但主书暂存失败 → 完整回滚(旧 .orig 恢复+新副本清理)", function()
+    local EpubInject = require("pickthought.epub_inject")
+    local existing = {["/books/书.epub"] = true, ["/clean/原书.epub"] = true,
+        ["/books/书.epub.orig"] = true}  -- 已有旧 .orig
+    local rec = {renames = {}, removed = {}}
+    local deps, calls = make_deps({
+        clean_source = "/clean/原书.epub",
+        file_exists = function(p) return existing[p] == true end,
+        load_meta = function(p)
+            if p == "/clean/原书.epub" then
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+            end
+            return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+        end,
+        copy_file = function(a, b) last_copy = {a, b}; existing[b] = true; return true end,  -- 复制成功并落盘
+        rename = function(a, b)
+            rec.renames[#rec.renames + 1] = {a, b}
+            -- 主书暂存失败:doc_path → .old 失败(文件被占用)
+            if a == "/books/书.epub" and b == "/books/书.epub.old" then
+                return false, "主书被占用(模拟)"
+            end
+            if existing[b] then return false, "目标已存在" end
+            existing[a] = nil; existing[b] = true; return true
+        end,
+        remove = function(p) existing[p] = nil; rec.removed[#rec.removed + 1] = p; return true end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil, "主书暂存失败 → 应失败")
+    local e = tostring(err)
+    T.ok(e:find("无法暂存当前书", 1, true) or e:find("回滚", 1, true), "报错指明暂存失败/回滚: " .. e)
+    -- 完整回滚:新副本被清理(remove backup)
+    local removed_new_orig = false
+    for _, p in ipairs(rec.removed) do
+        if p == "/books/书.epub.orig" then removed_new_orig = true end
+    end
+    T.ok(removed_new_orig, "新固化副本应被清理")
+    -- 旧 .orig 恢复:.orig.old → .orig
+    local restored_old = false
+    for _, r in ipairs(rec.renames) do
+        if r[1] == "/books/书.epub.orig.old" and r[2] == "/books/书.epub.orig" then restored_old = true end
+    end
+    T.ok(restored_old, "旧 .orig 备份应恢复(.orig.old → .orig)")
+    -- 主书 doc_path 全程未被移动:文件状态与操作前一致(失败的暂存尝试不改文件系统)。
+    T.ok(existing["/books/书.epub"], "doc_path 未被移动(原书仍在原路径)")
+    T.ok(not existing["/books/书.epub.old"], "主书未落入 .old")
+end)
+
+-- 作者第7轮意见③(2026-08-20):成功收尾时 .old/.orig.old 清理结果必须检查,
+-- 清理失败要在报告中明确提示(残留可能被后续误当有效旧备份)。
+T.case("clean_source:成功收尾暂存清理失败 → 报告带清理警告", function()
+    local EpubInject = require("pickthought.epub_inject")
+    local existing = {["/books/书.epub"] = true, ["/clean/原书.epub"] = true}
+    local rec = {renames = {}, removed = {}}
+    local deps, calls = make_deps({
+        clean_source = "/clean/原书.epub",
+        file_exists = function(p) return existing[p] == true end,
+        load_meta = function(p)
+            if p == "/clean/原书.epub" then
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+            end
+            return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+        end,
+        rename = function(a, b)
+            rec.renames[#rec.renames + 1] = {a, b}
+            if existing[b] then return false, "目标已存在" end
+            existing[a] = nil; existing[b] = true; return true
+        end,
+        remove = function(p)
+            existing[p] = nil; rec.removed[#rec.removed + 1] = p
+            -- 清理 .old / .orig.old 时失败(其余删除成功)
+            if p:find("%.old$") then return false, "清理失败(模拟)" end
+            return true
+        end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "重建本身应成功: " .. tostring(err))
+    T.ok(type(report.cleanup_warnings) == "table" and #report.cleanup_warnings > 0,
+        "报告应含清理警告")
+    local text = table.concat(require("pickthought.sync_report").build(report), "\n")
+    T.ok(text:find("清理失败", 1, true), "报告展示清理失败: " .. text)
+end)

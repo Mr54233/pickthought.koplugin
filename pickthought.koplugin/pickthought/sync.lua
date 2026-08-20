@@ -564,8 +564,16 @@ function Sync.run(deps)
                         .. "请手动将 " .. old_path .. " 重命名为 " .. doc_path .. " 以恢复原书。("
                         .. tostring(rec_err or "未知") .. ")"
                 end
-                -- 恢复后重新解析当前书(可能是注入版或干净书),统一走下方分支。
+                -- 恢复后重新解析当前书(可能是注入版或干净书),统一走下方分支;
+                -- 解析失败(恢复副本损坏)必须中止并保留恢复出的文件,绝不把损坏副本
+                -- 当干净书继续,否则成功后会清掉最后一份可恢复文件(作者 2026-08-20 第7轮意见①)。
                 current_meta, current_meta_err = deps.load_meta(doc_path)
+                if not current_meta then
+                    remove(temp_dest)
+                    return nil, "中断残留已恢复(" .. tostring(old_path) .. " → " .. tostring(doc_path)
+                        .. "),但恢复出的副本无法解析(" .. tostring(current_meta_err or "未知") .. ");"
+                        .. "已中止后续流程并保留该文件,请更换可用干净源后重试"
+                end
             else
                 -- 主路径存在:确认可解析才认定 .old 为陈旧残留,否则保留(不删除)。
                 local meta_ok = pcall(function() return deps.load_meta(doc_path) end)
@@ -666,7 +674,18 @@ function Sync.run(deps)
             -- 暂存当前书为 .old(保留用户打开的版本),让出原路径供 swap。
             if not rename(doc_path, old_path) then
                 remove(temp_dest)
-                return nil, "无法暂存当前书(.old),请关闭本书或确认未被占用后重试"
+                -- 复制已成功、但主书暂存失败:必须完整回滚,使文件状态与操作前一致
+                -- (否则 .orig 已换成新版本而 doc_path 仍是旧版本,后续重注会使用不匹配的
+                -- 备份——作者 2026-08-20 第7轮意见②)。restore_backup_old 内部先移除
+                -- 新副本再恢复旧 .orig(.orig.old → .orig)。
+                local rb_ok, rb_err = restore_backup_old()
+                if rb_ok then
+                    return nil, "干净源已固化但无法暂存当前书(.old),已回滚旧 .orig 备份并清理新副本;"
+                        .. "请关闭本书或确认未被占用后重试"
+                end
+                return nil, "干净源已固化但无法暂存当前书(.old),且旧 .orig 备份回滚失败("
+                    .. tostring(rb_err or "未知") .. ");请手动将 " .. (backup .. ".old")
+                    .. " 重命名为 " .. backup .. " 以恢复备份"
             end
             backed_up = true
         end
@@ -719,10 +738,25 @@ function Sync.run(deps)
         return nil, "无法替换原书,已恢复原文件:" .. tostring(swap_err or "重命名失败")
     end
     -- 重建成功:清理暂存的脏 .old / 旧 .orig 暂存(已无回滚需要,且避免占用空间)。
+    -- 清理结果必须检查:失败残留的 .orig.old 可能被后续误当有效旧备份恢复,须明确
+    -- 记录并随报告提示(作者 2026-08-20 第7轮意见③)。
+    local cleanup_warnings = {}
     local old_path = doc_path .. ".old"
-    if file_exists(old_path) then pcall(remove, old_path) end
+    if file_exists(old_path) then
+        local ok_rm = remove(old_path)
+        if not ok_rm then
+            cleanup_warnings[#cleanup_warnings + 1] = "无法清理暂存文件 " .. tostring(old_path)
+            logger.warn("[撷思][Sync] 成功重建后清理 .old 失败", old_path)
+        end
+    end
     local old_backup = backup .. ".old"
-    if file_exists(old_backup) then pcall(remove, old_backup) end
+    if file_exists(old_backup) then
+        local ok_rm = remove(old_backup)
+        if not ok_rm then
+            cleanup_warnings[#cleanup_warnings + 1] = "无法清理旧备份暂存 " .. tostring(old_backup)
+            logger.warn("[撷思][Sync] 成功重建后清理 .orig.old 失败", old_backup)
+        end
+    end
 
     local underlines_injected = math.min(total_underlines,
         math.max(0, tonumber(stats.underlines_resolved) or 0))
@@ -732,6 +766,8 @@ function Sync.run(deps)
         dest = doc_path,
         backup = backup,
         clean_source = clean_source,
+        -- 成功收尾时暂存清理失败的警告(作者 2026-08-20 第7轮意见③),报告层展示。
+        cleanup_warnings = #cleanup_warnings > 0 and cleanup_warnings or nil,
         injected = stats.injected,
         marks = stats.marks,
         quote_aligned = stats.quote_aligned,

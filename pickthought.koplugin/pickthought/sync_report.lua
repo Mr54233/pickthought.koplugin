@@ -96,6 +96,15 @@ function M.build(report, options)
         lines[#lines + 1] = string.format("有 %s 章想法缓存写入失败，请检查存储空间",
             integer(report.save_failures))
     end
+    -- 成功收尾时暂存清理失败的警告(作者 2026-08-20 第7轮意见③):残留的 .orig.old
+    -- 可能被后续误当有效旧备份,须明确提示。
+    if type(report.cleanup_warnings) == "table" and #report.cleanup_warnings > 0 then
+        lines[#lines + 1] = string.format("有 %s 项暂存文件清理失败(不影响本次结果):",
+            integer(#report.cleanup_warnings))
+        for _, w in ipairs(report.cleanup_warnings) do
+            lines[#lines + 1] = "· " .. tostring(w)
+        end
+    end
 
     lines[#lines + 1] = ""
     lines[#lines + 1] = "已替换原书(阅读进度保留)"
