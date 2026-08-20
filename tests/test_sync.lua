@@ -665,3 +665,36 @@ T.case("单章拉取失败不中断,计入 fetch_errors", function()
     T.eq(report.next_index, 2, "失败章节作为连续游标边界")
     T.eq(report.chapters_pending, 1, "失败章节计入待处理")
 end)
+
+-- fix #2:同步路径不依据整章 fetch(含网络/限流)耗时判定降级,避免网络慢误触发
+-- 粘性降级、挤占本地注入的让出预算。回归:即便传入 perf 桩,同步也不应采样或让出。
+T.case("同步不依据网络耗时降级(fix #2 回归)", function()
+    local rest_calls, record_calls = 0, 0
+    local perf_spy = {
+        record = function() record_calls = record_calls + 1 end,
+        rest = function() rest_calls = rest_calls + 1 end,
+        degraded = function() return false end,
+    }
+    local deps, calls = make_deps({
+        perf = perf_spy,  -- 若日后重新把 perf 接入 sync,此桩可捕获误用
+        annotations = {
+            -- 返回有效数据(否则 sync 会因"无划线"提前终止),但 sync 本就不对其计时/降级。
+            fetch_chapter = function(_, _, uid)
+                if tostring(uid) == "1" then
+                    return {
+                        underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                        review_map = {["0-7"] = {{content = "好句", author = "甲"}}},
+                        review_groups = {{range = "0-7", texts = {{content = "好句", author = "甲"}}}},
+                        underline_count = 1, thought_count = 1, thought_entry_count = 1, errors = {},
+                    }
+                end
+                return {underlines = {}, review_map = {}, review_groups = {},
+                    underline_count = 0, thought_count = 0, thought_entry_count = 0, errors = {}}
+            end,
+        },
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "同步应成功: " .. tostring(err))
+    T.eq(record_calls, 0, "sync 不应采样整章 fetch 耗时")
+    T.eq(rest_calls, 0, "sync 不应因网络慢触发让出")
+end)

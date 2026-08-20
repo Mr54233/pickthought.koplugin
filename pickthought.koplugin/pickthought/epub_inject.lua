@@ -10,6 +10,7 @@ local EpubReader = require("pickthought.epub_reader")
 local Json = require("pickthought.json")
 local U = require("pickthought.util")
 local logger = require("logger")
+local PerformanceMode = require("pickthought.performance_mode")
 
 local M = {}
 
@@ -371,12 +372,14 @@ function M.inject_copy(src, book_id, chapters, opts)
     local total_entries = #meta.names
     local seen_entries = 0
     local gc_policy = new_gc_policy(opts)
+    local perf = opts.perf or PerformanceMode.default()
     local written = {["mimetype"] = true, [M.MARKER] = true}
     for entry in reader:iterate() do
         if entry.mode == "file" then
             seen_entries = seen_entries + 1
             if not written[entry.path] then
                 written[entry.path] = true
+                local entry_start = perf:now()
                 local rows = groups[entry.path]
                 local ext = entry.path:match("%.(%w+)$")
                 local want = (not rows) and ext and STORED_EXTS[ext:lower()] and "store" or "deflate"
@@ -453,6 +456,10 @@ function M.inject_copy(src, book_id, chapters, opts)
                     if opts.progress then pcall(opts.progress, entry.path, seen_entries, total_entries) end
                     gc_policy:release(entry.size or 0)
                 end
+                -- 每单元本地处理耗时采样;降级时让出 CPU。与 opts.progress 心跳解耦:
+                -- 前台注入路径(经 main.lua 的 inject 包装)不传 progress,但同样需要让出。
+                perf:record(entry.path, perf:now() - entry_start)
+                if perf:degraded() then perf:rest() end
             end
         end
     end

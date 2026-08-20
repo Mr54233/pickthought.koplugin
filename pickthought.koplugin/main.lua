@@ -1088,6 +1088,7 @@ function Plugin:_sync_run(path,bound)
     local EpubReader=require("pickthought.epub_reader")
     local EpubInject=require("pickthought.epub_inject")
     local WebFetch=require("pickthought.web_fetch")
+    local PerformanceMode=require("pickthought.performance_mode")
     if not Trapper:info("正在读取本地书…") then return end
     -- Sync.run 内部对 api/fetch 已 pcall,但 ChapterMap/EpubReader 的意外异常
     -- 会死在协程里(Trapper 只记日志),必须在这里收敛成用户可见的失败。
@@ -1106,7 +1107,13 @@ function Plugin:_sync_run(path,bound)
             inject=function(src,book_id,mapped,dest,options)
                 return EpubInject.inject_copy(src,book_id,mapped,
                     {dest=dest,append=options and options.append==true,
-                     meta=options and options.meta})
+                     meta=options and options.meta,
+                     -- 前台 Trapper 回退路径:降级让出必须用非阻塞方式。本路径 Sync.run
+                     -- 处于 xpcall 内,Lua 5.1 无法跨 C 调用 yield,故不能用 coroutine.yield,
+                     -- 也不能用 fu.usleep(会阻塞前台协程、不交还 UIManager)。这里显式传入
+                     -- no-op rest,禁用 blocking rest(作者意见 #2 选项①)。子进程 worker 走
+                     -- Sync.run 另一注入入口,保留默认 usleep 让出 CPU。
+                     perf=PerformanceMode:new({ rest=function() end })})
             end,
             progress=function(phase,i,n,text)
                 local msg

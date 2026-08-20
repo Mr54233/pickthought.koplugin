@@ -1,5 +1,6 @@
 local EpubInject = require("pickthought.epub_inject")
 local Json = require("pickthought.json")
+local PerformanceMode = require("pickthought.performance_mode")
 
 local CONTAINER = [[<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
 <rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>]]
@@ -512,3 +513,32 @@ T.case("磁盘写入失败直接终止,不回退也不 rename", function()
         T.ok(entry.path ~= "OEBPS/Images/big.png", "失败条目不得被内存路径重复写入")
     end
 end)
+
+-- fix #1:降级让出与 opts.progress 解耦。前台注入路径(main.lua 的 inject 包装)不传
+-- progress,但慢条目仍须触发降级并让出 CPU,否则"注入热路径降级"形同虚设。
+T.case("降级让出不依赖 opts.progress(慢条目驱动)", function()
+    local t = 0
+    local rest_calls = 0
+    local perf = PerformanceMode:new({
+        now_ms = function() t = t + 5000; return t end,  -- 每次取时推进 5s,使每单元耗时远超阈值
+        rest = function() rest_calls = rest_calls + 1 end,
+        slow_ms = 100, consecutive = 2, window_s = 600,
+    })
+    local stats, err = run_inject(book_files(), CHAPTERS, nil, { perf = perf })  -- 不传 progress
+    T.ok(stats, "未传 progress 时 inject_copy 仍应成功: " .. tostring(err))
+    T.ok(perf:degraded(), "连续慢条目应触发降级")
+    T.ok(rest_calls > 0, "降级后应发生让出(rest 被调用),且与 progress 无关")
+end)
+
+T.case("降级让出不依赖 opts.progress(预置降级)", function()
+    local rest_calls = 0
+    local perf = PerformanceMode.default()
+    perf._degraded = true
+    perf.rest = function() rest_calls = rest_calls + 1 end
+    local stats, err = run_inject(book_files(), CHAPTERS, nil, { perf = perf })  -- 不传 progress
+    T.ok(stats, "未传 progress 时 inject_copy 仍应成功: " .. tostring(err))
+    T.ok(rest_calls > 0, "已降级时即使无 progress 也应让出")
+end)
+
+-- 前台禁用阻塞式 usleep 的集成测试已迁移至 tests/test_sync_frontend.lua:
+-- 经 main.lua:_sync_run 真实适配器驱动(作者 #17 收尾复核),而非此处手动构造 no-op PerformanceMode。
