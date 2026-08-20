@@ -624,18 +624,26 @@ end)
 
 -- 作者第6轮意见 #4:path_exists_distinct 在 lfs 不可用时退化的 io.open 也要区分
 -- "不存在"与"权限/IO 错误"(后者 → uncheckable → 阻断自动建库,不误判为不存在)。
+-- 注:不依赖"目录当不可读文件"(Linux/POSIX 允许 open 目录,CI 上不成立),
+-- 改用 mock io.open 精确返回 "Permission denied",跨平台可靠。
 T.case("open:无 lfs 退化 io.open 遇权限错误 → uncheckable 阻断自动重建", function()
     local dir = tmp_dir()
-    -- 让主库路径是一个"目录":io.open(dir, "r") 打不开且错误不是 "No such file" → uncheckable。
-    mkdir_p(dir .. "/thoughts.db")
     -- 移除 lfs(loaded + preload),强制 path_exists_distinct 走 io.open 退化分支。
     local old_loaded = package.loaded["libs/libkoreader-lfs"]
     local old_preload = package.preload["libs/libkoreader-lfs"]
     package.loaded["libs/libkoreader-lfs"] = nil
     package.preload["libs/libkoreader-lfs"] = nil
+    -- mock io.open:.isolated 标记=不存在;主库路径=权限错误(非 no such file → uncheckable)。
+    local real_io_open = io.open
+    io.open = function(p, mode)
+        if tostring(p):find("%.isolated$") then return nil, "No such file or directory" end
+        if tostring(p):find("thoughts%.db$") then return nil, "Permission denied" end
+        return real_io_open(p, mode)
+    end
     local c, restore = spy_os()
     local db, err = ThoughtDB.open(dir)
     restore()
+    io.open = real_io_open
     package.loaded["libs/libkoreader-lfs"] = old_loaded
     package.preload["libs/libkoreader-lfs"] = old_preload
 
