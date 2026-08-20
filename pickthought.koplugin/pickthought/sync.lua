@@ -58,6 +58,20 @@ function Sync.run(deps)
     -- 已有注入版时,增量同步直接以当前书为源;首次/全量重建才从 .orig 读取。
     local doc_path = tostring(deps.doc_path)
     local backup = Sync.backup_path(doc_path)
+    -- 旧 .orig 备份恢复:把 .orig.old 还原为标准 .orig 路径(作者 2026-08-19 意见 #1)。
+    -- 仅当 .orig.old 存在时有动作;.orig 目标若已存在(新固化残缺/半成品)先移除再还原
+    -- (Windows rename 不允许覆盖已存在目标)。返回 true 或 nil,err。
+    local function restore_backup_old()
+        local old_backup = backup .. ".old"
+        if not file_exists(old_backup) then return true end
+        if file_exists(backup) then
+            local ok_rm = remove(backup)
+            if not ok_rm then
+                return nil, "无法移除残缺的 .orig 目标(" .. tostring(backup) .. ")"
+            end
+        end
+        return try_recover(old_backup, backup)
+    end
     local current_meta, current_meta_err = deps.load_meta(doc_path)
     -- 当前 EPUB 存在但解析失败(损坏):绝不能当作"干净原书"继续,
     -- 否则下面 rename(doc_path, backup) 会把损坏文件当原书备份/销毁(P1#2, 2026-08-15 二轮)。
@@ -536,6 +550,37 @@ function Sync.run(deps)
         backed_up = true
     elseif clean_source and src == clean_source and not append then
         -- 从外部干净源全量重建。
+        -- 中断残留恢复(作者 2026-08-19 意见 #2):上一进程可能中断在"主书已移入 .old、
+        -- 新书尚未换回"阶段,此时 doc_path 缺失而 .old 存在——.old 是最后可恢复副本,
+        -- 必须恢复回 doc_path 而非删除,否则丢失最后副本、后续重建也因原书路径不存在而失败。
+        -- 仅当 doc_path 存在且可解析时,.old 才是可安全清理的陈旧残留。
+        local old_path = doc_path .. ".old"
+        if file_exists(old_path) then
+            if not file_exists(doc_path) then
+                local ok_recover, rec_err = try_recover(old_path, doc_path)
+                if not ok_recover then
+                    remove(temp_dest)
+                    return nil, "检测到中断残留(主文件缺失,但存在 " .. old_path .. "),且自动恢复失败;"
+                        .. "请手动将 " .. old_path .. " 重命名为 " .. doc_path .. " 以恢复原书。("
+                        .. tostring(rec_err or "未知") .. ")"
+                end
+                -- 恢复后重新解析当前书(可能是注入版或干净书),统一走下方分支。
+                current_meta, current_meta_err = deps.load_meta(doc_path)
+            else
+                -- 主路径存在:确认可解析才认定 .old 为陈旧残留,否则保留(不删除)。
+                local meta_ok = pcall(function() return deps.load_meta(doc_path) end)
+                if not meta_ok then
+                    remove(temp_dest)
+                    return nil, "当前 EPUB 已损坏且存在暂存 " .. old_path .. ",已中止操作(未删除任何文件);"
+                        .. "请先处理损坏文件或指定可用干净源"
+                end
+                local ok_rm, rm_err = remove(old_path)
+                if not ok_rm then
+                    remove(temp_dest)
+                    return nil, "无法清理旧的暂存文件,请重试"
+                end
+            end
+        end
         -- 安全前置(P1#3):确认当前 doc_path 确实是注入版;若当前仍是干净原书
         -- (如首次注入中途失败),不能把它当"旧注入版"丢进 .old 销毁——否则不同版本的
         -- 原书会被永久丢弃。此时应保留为 .orig 备份(与首次注入一致),干净源仅作注入来源。
@@ -600,21 +645,23 @@ function Sync.run(deps)
             local ok_copy, copy_err, copy_status = copy_file(clean_source, backup)
             if not ok_copy then
                 remove(temp_dest)
+                -- 旧 .orig(.orig.old)必须还原为标准路径,否则后续直接重注误报缺备份
+                -- (作者 2026-08-19 意见 #1)。此时 doc_path 尚未离位(原书完好)。
+                local rb_ok, rb_err = restore_backup_old()
+                local rb_hint
+                if rb_ok then
+                    rb_hint = "旧 .orig 备份已恢复(.orig.old→.orig)"
+                else
+                    rb_hint = "旧 .orig 备份恢复失败(" .. tostring(rb_err or "未知") .. "),请手动将 "
+                        .. (backup .. ".old") .. " 重命名为 " .. backup .. " 以恢复备份"
+                end
                 if copy_status == "cancelled" then
                     -- 取消发生在固化 .orig 之前:当前干净原书尚未离位(doc_path 仍完好),
                     -- 直接报取消即可,不要谎称"无法恢复"(作者意见 #1/#2)。
-                    if file_exists(old_path) then
-                        local ok_r, r_err = try_recover(old_path, doc_path)
-                        if ok_r then return nil, "已取消干净源固化,已恢复原书(.old→doc_path)" end
-                        return nil, "已取消干净源固化,但无法恢复当前书;请手动将 " .. old_path
-                            .. " 重命名为 " .. doc_path .. " 以恢复原书。(" .. tostring(r_err or "未知") .. ")"
-                    end
-                    return nil, "已取消干净源固化,原书未改动(" .. tostring(doc_path) .. ")"
+                    return nil, "已取消干净源固化,原书未改动(" .. tostring(doc_path) .. ");" .. rb_hint
                 end
-                local ok_r, r_err = try_recover(old_path, doc_path)
-                if ok_r then return nil, "干净源固化到 .orig 失败,已恢复原书(.old→doc_path);后续重注需再次指定干净源" end
-                return nil, "干净源固化到 .orig 失败,且无法恢复当前书;请手动将 " .. old_path
-                    .. " 重命名为 " .. doc_path .. " 以恢复原书。(" .. tostring(r_err or "未知") .. ")"
+                return nil, "干净源固化到 .orig 失败,原书未改动(" .. tostring(doc_path) .. ");"
+                    .. rb_hint .. ";后续重注需再次指定干净源"
             end
             -- 暂存当前书为 .old(保留用户打开的版本),让出原路径供 swap。
             if not rename(doc_path, old_path) then
@@ -656,10 +703,18 @@ function Sync.run(deps)
                 return nil, msg
             end
             -- 恢复成功:提示必须与实际文件状态一致(作者意见 #2)。
-            if recovered_from == "clean" then
-                return nil, "无法替换原书,已恢复干净原书(.orig→doc_path):" .. tostring(swap_err or "重命名失败")
+            -- 旧 .orig(.orig.old)同样要还原,否则后续重注误报缺备份(作者 2026-08-19 意见 #1)。
+            local rb_ok, rb_err = restore_backup_old()
+            local rb_hint = ""
+            if not rb_ok then
+                rb_hint = ";但旧 .orig 备份(.orig.old)未能自动恢复,请手动将 "
+                    .. (backup .. ".old") .. " 重命名为 " .. backup .. " 以恢复备份("
+                    .. tostring(rb_err or "未知") .. ")"
             end
-            return nil, "无法替换原书,已恢复旧注入版(.old→doc_path):" .. tostring(swap_err or "重命名失败")
+            if recovered_from == "clean" then
+                return nil, "无法替换原书,已恢复干净原书(.orig→doc_path):" .. tostring(swap_err or "重命名失败") .. rb_hint
+            end
+            return nil, "无法替换原书,已恢复暂存副本(.old→doc_path):" .. tostring(swap_err or "重命名失败") .. rb_hint
         end
         return nil, "无法替换原书,已恢复原文件:" .. tostring(swap_err or "重命名失败")
     end

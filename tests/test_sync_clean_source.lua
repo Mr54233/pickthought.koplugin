@@ -561,3 +561,136 @@ T.case("U.content_fingerprint:损坏/缺失文件返回 nil", function()
     local fp = U.content_fingerprint("/no/such/file.epub")
     T.ok(fp == nil, "缺失文件应返回 nil(调用方回退默认指纹)")
 end)
+
+T.case("clean_source:已有 .orig 时固化失败 → .orig.old 恢复为 .orig(原书未改动)", function()
+    -- 作者意见 #1(2026-08-19):当前书是干净原书、已有 .orig 时,流程先把旧备份移到
+    -- .orig.old 再固化新源;复制失败必须把 .orig.old 恢复回标准 .orig 路径,
+    -- 否则后续直接重注会误报缺备份。doc_path 此时尚未离位,应如实提示"原书未改动"。
+    local EpubInject = require("pickthought.epub_inject")
+    local existing = {["/books/书.epub"] = true, ["/clean/原书.epub"] = true,
+        ["/books/书.epub.orig"] = true}  -- 已有 .orig 备份
+    local rec = {renames = {}, removed = {}}
+    local deps, calls = make_deps({
+        clean_source = "/clean/原书.epub",
+        file_exists = function(p) return existing[p] == true end,
+        load_meta = function(p)
+            if p == "/clean/原书.epub" then
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+            end
+            -- doc_path 是干净原书(无 MARKER),走"已有 .orig 时先暂存旧备份"分支
+            return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+        end,
+        copy_file = function(a, b) last_copy = {a, b}; return nil, "复制失败(模拟)" end,
+        rename = function(a, b)
+            rec.renames[#rec.renames + 1] = {a, b}
+            if existing[b] then return false, "目标已存在" end
+            existing[a] = nil; existing[b] = true; return true
+        end,
+        remove = function(p) existing[p] = nil; rec.removed[#rec.removed + 1] = p; return true end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil, "应失败(固化失败)")
+    local e = tostring(err)
+    T.ok(e:find("固化到 .orig 失败", 1, true), "报错指明固化失败: " .. e)
+    T.ok(e:find("原书未改动", 1, true), "doc_path 未离位,应如实提示原书未改动: " .. e)
+    -- 关键:旧 .orig 必须恢复回标准路径(.orig.old → .orig),后续重注不误报缺备份
+    local restored = false
+    for _, r in ipairs(rec.renames) do
+        if r[1] == "/books/书.epub.orig.old" and r[2] == "/books/书.epub.orig" then restored = true end
+    end
+    T.ok(restored, ".orig.old 应恢复为 .orig")
+    -- doc_path 全程未被移动(原书完好)
+    local doc_moved = false
+    for _, r in ipairs(rec.renames) do
+        if r[1] == "/books/书.epub" then doc_moved = true end
+    end
+    T.ok(not doc_moved, "doc_path 不得被移动(原书完好)")
+    T.ok(not e:find("已恢复原书", 1, true) and not e:find("已恢复原注入版", 1, true),
+        "不得谎称已恢复原书: " .. e)
+end)
+
+T.case("clean_source:已有 .orig 时固化取消 → .orig.old 恢复为 .orig(原书未改动)", function()
+    -- 作者意见 #1(2026-08-19):固化被用户取消时同样必须恢复 .orig.old → .orig,
+    -- 取消不能把旧备份丢在非标准路径上。doc_path 未离位,如实提示取消且原书未改动。
+    local EpubInject = require("pickthought.epub_inject")
+    local existing = {["/books/书.epub"] = true, ["/clean/原书.epub"] = true,
+        ["/books/书.epub.orig"] = true}
+    local rec = {renames = {}, removed = {}}
+    local deps, calls = make_deps({
+        clean_source = "/clean/原书.epub",
+        file_exists = function(p) return existing[p] == true end,
+        load_meta = function(p)
+            if p == "/clean/原书.epub" then
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+            end
+            return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+        end,
+        -- 模拟默认 copy_file 包装器复制中途被取消的返回契约
+        copy_file = function(a, b) last_copy = {a, b}; return nil, "已取消复制", "cancelled" end,
+        rename = function(a, b)
+            rec.renames[#rec.renames + 1] = {a, b}
+            if existing[b] then return false, "目标已存在" end
+            existing[a] = nil; existing[b] = true; return true
+        end,
+        remove = function(p) existing[p] = nil; rec.removed[#rec.removed + 1] = p; return true end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil, "应失败(用户取消)")
+    local e = tostring(err)
+    T.ok(e:find("取消", 1, true), "报错应指明取消: " .. e)
+    T.ok(e:find("原书未改动", 1, true), "doc_path 未离位,应如实提示原书未改动: " .. e)
+    local restored = false
+    for _, r in ipairs(rec.renames) do
+        if r[1] == "/books/书.epub.orig.old" and r[2] == "/books/书.epub.orig" then restored = true end
+    end
+    T.ok(restored, "取消后 .orig.old 也应恢复为 .orig")
+    -- 取消后不得执行最终 swap(原书替换)
+    local swapped = false
+    for _, r in ipairs(rec.renames) do
+        if r[1] == "/books/书.epub.pickthought-new" and r[2] == "/books/书.epub" then swapped = true end
+    end
+    T.ok(not swapped, "取消后不得执行最终 swap")
+end)
+
+T.case("clean_source:主文件缺失而 .old 存在(中断残留)→ 恢复 .old 而非删除,重建成功", function()
+    -- 作者意见 #2(2026-08-19):上一进程可能中断在"主书已移入 .old、新书未换回"阶段,
+    -- doc_path 缺失而 .old 存在时,.old 是最后可恢复副本——必须恢复回 doc_path 再重建,
+    -- 绝不能直接删除 .old(否则丢失最后副本,后续重建也因原书路径不存在而失败)。
+    local EpubInject = require("pickthought.epub_inject")
+    local existing = {["/clean/原书.epub"] = true, ["/books/书.epub.old"] = true}  -- 主文件缺失!
+    local rec = {renames = {}, removed = {}}
+    local deps, calls = make_deps({
+        clean_source = "/clean/原书.epub",
+        file_exists = function(p) return existing[p] == true end,
+        load_meta = function(p)
+            if p == "/clean/原书.epub" then
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+            end
+            -- 恢复后的 doc_path 是干净原书(中断时把干净书移入 .old,新书未换回)
+            return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+        end,
+        rename = function(a, b)
+            rec.renames[#rec.renames + 1] = {a, b}
+            if existing[b] then return false, "目标已存在" end
+            existing[a] = nil; existing[b] = true; return true
+        end,
+        remove = function(p) existing[p] = nil; rec.removed[#rec.removed + 1] = p; return true end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "应成功重建(先恢复中断残留): " .. tostring(err))
+    -- 关键:文件操作的第一个动作必须是 .old → doc_path 的恢复 rename(而非删除 .old)
+    T.eq(#rec.renames >= 1, true, "应有 rename 动作")
+    local first = rec.renames[1]
+    T.eq(first[1], "/books/书.epub.old", "第一个文件操作源是 .old")
+    T.eq(first[2], "/books/书.epub", "第一个文件操作目标是 doc_path(恢复而非删除)")
+    T.eq(calls.copied[1], "/clean/原书.epub", "干净源固化到 .orig")
+    T.eq(calls.copied[2], "/books/书.epub.orig", "copy 目标为 .orig")
+    -- 成功后的 .old 清理是暂存(本次运行时)的 .old,不是中断残留那份
+    local removed_during_recovery = false
+    for _, r in ipairs(rec.renames) do
+        if r[1] == "/books/书.epub.old" and r[2] == "/books/书.epub" and _ > 1 then
+            removed_during_recovery = true  -- 除首个恢复外,不应再有 .old→doc_path
+        end
+    end
+    T.ok(not removed_during_recovery, "中断残留 .old 只被恢复一次,不重复处理")
+end)
