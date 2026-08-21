@@ -62,9 +62,11 @@ local function migrate(db, from_version)
             local ok, err = pcall(MIGRATIONS[v], db)
             if not ok then
                 logger.warn("[撷思][ThoughtDB] 迁移 v" .. tostring(v) .. " 失败", tostring(err))
+                return false  -- 迁移失败立即中止,调用方不得推进 user_version(作者第7轮建议)。
             end
         end
     end
+    return true
 end
 
 -- 创建表 + 迁移追踪:user_version 低于当前则在此升级(目前 v1 仅补版本号,无结构性迁移)。
@@ -85,8 +87,10 @@ local function ensure_schema(db)
     if not ok then return false end
     local ver = get_user_version(db)
     if ver < SCHEMA_VERSION then
-        migrate(db, ver)
-        set_user_version(db, SCHEMA_VERSION)
+        -- 迁移失败不得推进 user_version:否则下次打开跳过必要迁移(作者第7轮建议)。
+        if migrate(db, ver) then
+            set_user_version(db, SCHEMA_VERSION)
+        end
     end
     return true
 end
@@ -209,9 +213,24 @@ local function reserve_corrupt_main(base)
             if ATOMIC_OPEN then
                 return nil, tostring(ac_err or "目标占用失败")
             end
-            local probe = io.open(cand, "r")
-            if probe then probe:close(); claimed = false
-            else claimed = true end
+            local probe, probe_err = io.open(cand, "r")
+            if probe then
+                probe:close()
+                claimed = false  -- 目标已存在 → 换名,绝不覆盖。
+            else
+                -- 退化 probe 失败:仅"明确不存在"(ENOENT/No such file)才视为目标空闲、
+                -- 允许继续尝试;权限/磁盘/IO 等其他错误立即返回失败,不进入换名循环
+                -- (与 Linux 原子路径"仅 EEXIST 换名、其他错误立即失败"一致,避免最多
+                -- 100000 次循环长时间阻塞 Kindle)。.isolated 标记由调用方保留阻断建库。
+                local perr = tostring(probe_err or ""):lower()
+                if perr:find("no such file", 1, true)
+                    or perr:find("not exist", 1, true)
+                    or perr:find("enoent", 1, true) then
+                    claimed = true
+                else
+                    return nil, "无法探测损坏备份目标(权限/IO 错误): " .. tostring(probe_err)
+                end
+            end
         end
         if claimed then
             -- cand 已确认空闲:把主库内容移入(原子路径下覆盖我们刚独占的空占位,

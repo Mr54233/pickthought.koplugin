@@ -653,3 +653,34 @@ T.case("open:无 lfs 退化 io.open 遇权限错误 → uncheckable 阻断自动
     T.ok(not file_exists(dir .. "/thoughts.db"), "未自动创建空库")
     rm_tmp(dir)
 end)
+
+
+-- 作者第7轮意见(2026-08-21):FFI 不可用/非 Linux 回退路径的 io.open 探测必须区分
+-- "明确不存在"与"权限/IO 错误"——后者立即失败、不进入换名循环(与 Linux 原子路径
+-- "仅 EEXIST 换名、其他错误立即失败"一致,避免最多 100000 次循环阻塞 Kindle),
+-- 且 .isolated 标记保留阻断自动建库、主库不被移动。
+T.case("隔离回退路径(无 FFI):io.open 权限错误 → 立即失败,只试 1 次,标记保留", function()
+    local dir = tmp_dir()
+    local f = io.open(dir .. "/thoughts.db", "w"); f:write("MAIN"); f:close()
+    -- mock io.open:.isolated 标记读写放行;.corrupt-* 候选探测返回权限错误。
+    local real_io_open = io.open
+    local probe_calls = 0
+    io.open = function(p, mode)
+        if tostring(p):find("%.isolated$") then return real_io_open(p, mode) end
+        if tostring(p):find("%.corrupt%-") then
+            probe_calls = probe_calls + 1
+            return nil, "Permission denied"
+        end
+        return real_io_open(p, mode)
+    end
+    local target, err = ThoughtDB.isolate_corrupt(dir)
+    io.open = real_io_open
+
+    T.ok(target == nil, "权限错误 → 隔离失败")
+    T.ok(tostring(err):find("无法探测") or tostring(err):find("重命名失败"),
+        "错误含失败原因: " .. tostring(err))
+    T.eq(probe_calls, 1, "只尝试 1 次即中止,不进入换名循环(不阻塞 Kindle)")
+    T.ok(file_exists(dir .. "/thoughts.db.isolated"), ".isolated 标记保留(阻断自动重建)")
+    T.ok(file_exists(dir .. "/thoughts.db"), "主库未被移动(保护原库)")
+    rm_tmp(dir)
+end)
