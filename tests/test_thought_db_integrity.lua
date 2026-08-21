@@ -662,6 +662,15 @@ end)
 T.case("隔离回退路径(无 FFI):io.open 权限错误 → 立即失败,只试 1 次,标记保留", function()
     local dir = tmp_dir()
     local f = io.open(dir .. "/thoughts.db", "w"); f:write("MAIN"); f:close()
+    -- 强制走回退路径:CI(Linux + LuaJIT)下 ffi.os=="Linux" 会启用原子路径
+    -- (ffi.C.open),io.open mock 不会触发。注入 fake ffi(os="Windows") 重载模块,
+    -- 使 ATOMIC_OPEN=nil → reserve_corrupt_main 走 io.open 退化探测(作者第7轮边界)。
+    local real_ffi = package.loaded["ffi"]
+    local real_tdb = package.loaded["pickthought.thought_db"]
+    package.loaded["ffi"] = { os = "Windows" }
+    package.loaded["pickthought.thought_db"] = nil
+    local DegradedTDB = require("pickthought.thought_db")
+    package.loaded["ffi"] = real_ffi
     -- mock io.open:.isolated 标记读写放行;.corrupt-* 候选探测返回权限错误。
     local real_io_open = io.open
     local probe_calls = 0
@@ -673,8 +682,9 @@ T.case("隔离回退路径(无 FFI):io.open 权限错误 → 立即失败,只试
         end
         return real_io_open(p, mode)
     end
-    local target, err = ThoughtDB.isolate_corrupt(dir)
+    local target, err = DegradedTDB.isolate_corrupt(dir)
     io.open = real_io_open
+    package.loaded["pickthought.thought_db"] = real_tdb  -- 还原模块缓存
 
     T.ok(target == nil, "权限错误 → 隔离失败")
     T.ok(tostring(err):find("无法探测") or tostring(err):find("重命名失败"),
