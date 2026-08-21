@@ -689,7 +689,9 @@ function Plugin:sync_entry(path,mode,opts)
     opts=opts or {}  -- 多数调用点只传 path/mode,opts 缺省空表(防 .confirmed 访问崩溃)
     if self.sync_task and self.sync_task:busy() then self:_show_active_sync_dialog() return end
     if not tostring(path or ""):lower():match("%.epub$") then self:info("只支持 EPUB 格式的本地书") return end
-    if not self:require_login() then return end
+    -- 仅联网同步模式需要登录:离线重注(reinject)只用本地缓存 + 用户选定的干净原书,
+    -- 不依赖微信读书在线接口,退出登录后 clean_source 逃生舱仍可用(作者第8轮意见)。
+    if mode ~= "reinject" and not self:require_login() then return end
     local EpubReader=require("pickthought.epub_reader")
     local available,gate_err=EpubReader.available()
     if not available then self:info(tostring(gate_err)) return end
