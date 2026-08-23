@@ -47,7 +47,8 @@ local function get_user_version(db)
 end
 
 local function set_user_version(db, v)
-    pcall(function() db:exec("PRAGMA user_version=" .. tostring(v)) end)
+    -- 返回写入是否成功(作者第8轮意见 #4):失败契约统一,杜绝"吞掉写入失败"。
+    return pcall(function() db:exec("PRAGMA user_version=" .. tostring(v)) end)
 end
 
 -- 迁移分发点:目前仅 SCHEMA_VERSION=1,无结构性迁移。未来升级时按 user_version
@@ -59,10 +60,15 @@ local MIGRATIONS = {}  -- 预留:MIGRATIONS[2] = function(db) ... end
 local function migrate(db, from_version)
     for v = (from_version or 0) + 1, SCHEMA_VERSION do
         if MIGRATIONS[v] then
-            local ok, err = pcall(MIGRATIONS[v], db)
+            local ok, ret = pcall(MIGRATIONS[v], db)
             if not ok then
-                logger.warn("[撷思][ThoughtDB] 迁移 v" .. tostring(v) .. " 失败", tostring(err))
-                return false  -- 迁移失败立即中止,调用方不得推进 user_version(作者第7轮建议)。
+                logger.warn("[撷思][ThoughtDB] 迁移 v" .. tostring(v) .. " 抛错", tostring(ret))
+                return false  -- 迁移抛错立即中止,调用方不得推进 user_version(作者第7轮建议)。
+            end
+            -- 迁移函数显式返回 false 也视为失败(作者第8轮意见 #4):不推进 user_version。
+            if ret == false then
+                logger.warn("[撷思][ThoughtDB] 迁移 v" .. tostring(v) .. " 返回 false,中止")
+                return false
             end
         end
     end
@@ -87,10 +93,10 @@ local function ensure_schema(db)
     if not ok then return false end
     local ver = get_user_version(db)
     if ver < SCHEMA_VERSION then
-        -- 迁移失败不得推进 user_version:否则下次打开跳过必要迁移(作者第7轮建议)。
-        if migrate(db, ver) then
-            set_user_version(db, SCHEMA_VERSION)
-        end
+        -- 迁移失败 / user_version 写入失败 → 均返回 false,绝不返回"可用库"
+        -- (作者第8轮意见 #4:迁移未完成时不推进版本号、也不返回可用数据库)。
+        if not migrate(db, ver) then return false end
+        if not set_user_version(db, SCHEMA_VERSION) then return false end
     end
     return true
 end
@@ -239,14 +245,28 @@ local function reserve_corrupt_main(base)
                 if held_fd and ffi and ffi.C.close then pcall(ffi.C.close, held_fd) end
                 return cand
             end
-            -- rename 失败:先关闭 fd,再清理占位——仅删除本流程创建的空占位
-            -- (0 字节),若已被其他进程替换成有内容文件则不动,避免误删他人数据。
+            -- rename 失败:先关闭 fd,再按路径决定"立即失败"或"仅竞态换名重试"
+            -- (作者第8轮意见 #1):绝不盲目循环 100000 次阻塞 Kindle。
+            --   - 原子路径(ATOMIC_OPEN 已设置):目标已由 O_EXCL 独占,rename 失败直接
+            --     返回,清理本流程创建的空占位后中止。
+            --   - 退化路径(无 ffi):仅当目标被明确占用(竞态)才换名重试;其他错误
+            --     (权限/磁盘/IO)立即失败,不进入换名循环。.isolated 由调用方保留阻断。
             if held_fd and ffi and ffi.C.close then pcall(ffi.C.close, held_fd) end
-            local probe = io.open(cand, "r")
-            if probe then
-                local sz = probe:seek("end") or 0
-                probe:close()
-                if sz == 0 then pcall(os.remove, cand) end
+            if ATOMIC_OPEN then
+                local probe = io.open(cand, "r")
+                if probe then
+                    local sz = probe:seek("end") or 0
+                    probe:close()
+                    if sz == 0 then pcall(os.remove, cand) end  -- 仅清理本流程空占位,不碰他人数据
+                end
+                return nil, "损坏主库重命名失败(原子预留路径):目标已被占用或 I/O 错误"
+            end
+            local rp, rpe = io.open(cand, "r")
+            if rp then
+                rp:close()
+                -- 目标被明确占用(竞态)→ 落到循环换名重试,绝不覆盖已有备份。
+            else
+                return nil, "无法重命名损坏主库至备份目标(权限/IO 错误): " .. tostring(rpe or "")
             end
         end
         salt = salt + 1
@@ -277,9 +297,11 @@ local function path_exists_distinct(path)
     if f then f:close(); return true, nil end
     -- 退化路径也要区分"不存在"与"权限/IO 错误",避免把无法检查误判为不存在(第6轮意见 #4)。
     local e = tostring(err or ""):lower()
-    if e:find("no such file") or e:find("不存在") or e == "" then
+    if e:find("no such file") or e:find("不存在") then
         return false, nil
     end
+    -- 空错误文本(err=="")不能证明目标不存在,按 uncheckable 处理(作者第8轮意见 #2):
+    -- 阻止自动创建新数据库,避免异常 I/O 下误建空库。
     return false, "uncheckable"
 end
 
@@ -554,5 +576,8 @@ function ThoughtDB.delete_range(db, chapter_uid, range_str)
     end)
     return ok
 end
+
+-- 暴露迁移表供测试注入(验证失败契约);生产代码不写入(当前 MIGRATIONS 为空)。
+ThoughtDB.MIGRATIONS = MIGRATIONS
 
 return ThoughtDB

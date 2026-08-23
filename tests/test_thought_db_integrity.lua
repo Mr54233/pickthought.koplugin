@@ -694,3 +694,101 @@ T.case("隔离回退路径(无 FFI):io.open 权限错误 → 立即失败,只试
     T.ok(file_exists(dir .. "/thoughts.db"), "主库未被移动(保护原库)")
     rm_tmp(dir)
 end)
+
+-- =====================================================================
+-- 作者第8轮复审 2026-08-22:迁移失败契约 + 残留边界(4 项意见)
+-- =====================================================================
+
+-- 第8轮意见 #1:原子预留路径(os="Linux")下,主库 rename 到备份目标失败(权限/I-O)
+-- 必须立即失败、不进入换名循环(避免最多 100000 次阻塞 Kindle),并清理本流程空占位。
+T.case("隔离(原子路径):主库 rename 失败立即失败,不循环", function()
+    local AtomicTDB, fake, restore_tdb = with_fake_ffi(nil)  -- 走 Linux 原子分支
+    local dir = tmp_dir()
+    local f = io.open(dir .. "/thoughts.db", "w"); f:write("MAIN"); f:close()
+    -- mock os.rename:对 .corrupt-* 目标一律失败(模拟权限/IO 错误)。
+    local o_rn = os.rename
+    os.rename = function(a, b)
+        if tostring(b):find("%.corrupt%-") then return nil, "mock rename fail" end
+        return o_rn(a, b)
+    end
+    local target, err = AtomicTDB.isolate_corrupt(dir)
+    os.rename = o_rn
+    restore_tdb()
+    T.ok(target == nil, "rename 失败 → 隔离失败")
+    T.ok(tostring(err):find("重命名失败"), "错误含'重命名失败': " .. tostring(err))
+    T.ok(file_exists(dir .. "/thoughts.db"), "主库未被移动(失败即中止,保护原库)")
+    -- 标记先行:rename 失败前 .isolated 已写入并保留(阻断后续自动建空库),这是设计意图。
+    T.ok(file_exists(dir .. "/thoughts.db.isolated"), ".isolated 标记保留(标记先行,阻断自动重建)")
+    rm_tmp(dir)
+end)
+
+-- 第8轮意见 #2:path_exists_distinct 退化路径 io.open 返回空错误文本(err=="")
+-- 不能证明目标不存在,必须按 uncheckable 处理,阻断自动建库。
+T.case("open:退化 io.open 返回空错误文本 → uncheckable 阻断,不误判不存在", function()
+    local dir = tmp_dir()
+    -- 移除 lfs,强制 path_exists_distinct 走 io.open 退化分支。
+    local old_loaded = package.loaded["libs/libkoreader-lfs"]
+    local old_preload = package.preload["libs/libkoreader-lfs"]
+    package.loaded["libs/libkoreader-lfs"] = nil
+    package.preload["libs/libkoreader-lfs"] = nil
+    -- mock io.open:.isolated=不存在;主库路径返回 nil 且错误文本为空(异常 I/O 表现)。
+    local real_io_open = io.open
+    io.open = function(p, mode)
+        if tostring(p):find("%.isolated$") then return nil, "No such file or directory" end
+        if tostring(p):find("thoughts%.db$") then return nil, "" end  -- 空错误文本
+        return real_io_open(p, mode)
+    end
+    local c, restore = spy_os()
+    local db, err = ThoughtDB.open(dir)
+    restore()
+    io.open = real_io_open
+    package.loaded["libs/libkoreader-lfs"] = old_loaded
+    package.preload["libs/libkoreader-lfs"] = old_preload
+
+    T.ok(db == nil, "空错误文本 → 无法确认 → open 返回 nil(阻断)")
+    T.ok(tostring(err):find("无法确认"), "错误含'无法确认'(非'不存在'): " .. tostring(err))
+    T.ok(c.rename == 0 and c.remove == 0, "阻断时不隔离不删除")
+    T.ok(not file_exists(dir .. "/thoughts.db"), "未自动创建空库(空错误文本不误判为缺失)")
+    rm_tmp(dir)
+end)
+
+-- 第8轮意见 #4:迁移函数显式返回 false(或抛错)→ open 必须返回 nil、绝不推进
+-- user_version、也不返回"可用库"(防止下次打开跳过必要迁移)。
+T.case("迁移返回 false:open 失败,不推进 user_version,不返回可用库", function()
+    SQ3._reset()
+    local ok_inject, inj_err = pcall(function()
+        ThoughtDB.MIGRATIONS[1] = function(_db) return false end
+    end)
+    T.ok(ok_inject, "可注入 MIGRATIONS[1]: " .. tostring(inj_err))
+    local db, err = ThoughtDB.open("/migfail/false")
+    ThoughtDB.MIGRATIONS[1] = nil
+    T.ok(db == nil, "迁移返回 false → open 返回 nil(不返回可用库)")
+    T.ok(tostring(err):find("迁移") or tostring(err):find("schema"),
+        "错误含迁移/schema 原因: " .. tostring(err))
+    rm_rf("/migfail")
+end)
+
+T.case("迁移抛错:open 失败,不推进 user_version", function()
+    SQ3._reset()
+    local ok_inject, inj_err = pcall(function()
+        ThoughtDB.MIGRATIONS[1] = function(_db) error("mock migration error") end
+    end)
+    T.ok(ok_inject, "可注入 MIGRATIONS[1] 抛错: " .. tostring(inj_err))
+    local db, err = ThoughtDB.open("/migfail/err")
+    ThoughtDB.MIGRATIONS[1] = nil
+    T.ok(db == nil, "迁移抛错 → open 返回 nil")
+    T.ok(tostring(err):find("迁移") or tostring(err):find("schema"), "错误含迁移原因")
+    rm_rf("/migfail")
+end)
+
+-- 第8轮意见 #4 反向验证:无迁移且 schema 完整时,user_version 确实写入 SCHEMA_VERSION。
+T.case("无迁移场景:user_version 正常写入 SCHEMA_VERSION", function()
+    SQ3._reset()
+    local db = ThoughtDB.open("/good/mig")
+    T.ok(db ~= nil, "健康库 open 成功")
+    local store = SQ3._stores[ThoughtDB.db_path("/good/mig")]
+    T.ok(store ~= nil, "store 存在")
+    T.eq(store.user_version, 1, "user_version 写为 SCHEMA_VERSION=1(无迁移路径)")
+    if db then ThoughtDB.close(db) end
+    rm_rf("/good")
+end)
