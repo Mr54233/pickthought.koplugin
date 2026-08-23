@@ -327,6 +327,55 @@ T.case("clean_source 重建:当前书是干净原书(未注入)→ 统一基线,
     T.ok(not staged_as_orig, "当前干净原书不得直接当 .orig(避免版本不一致)")
     T.eq(report.dest, "/books/书.epub", "dest 仍是书架路径")
     T.eq(report.backup, "/books/书.epub.orig", "备份路径为干净源固化结果")
+    -- 作者第8轮回归:成功 swap 后通用清理逻辑不得删除原始干净书(.old)。
+    T.eq(report.kept_original, "/books/书.epub.old", "报告记录原始干净书保留路径")
+    local old_removed = false
+    for _, p in ipairs(calls.removed) do
+        if p == "/books/书.epub.old" then old_removed = true end
+    end
+    T.ok(not old_removed, "成功重建后不得删除原始干净书(.old 保留,供手动恢复)")
+    -- 报告层必须显式提示原始干净书已保留及恢复方式(作者第8轮)。
+    local SyncReport = require("pickthought.sync_report")
+    local lines = SyncReport.build(report)
+    local joined = table.concat(lines, "\n")
+    T.ok(joined:find("原始干净书已保留", 1, true), "报告含原始干净书保留提示")
+    T.ok(joined:find("/books/书.epub.old", 1, true), "报告含保留路径")
+end)
+
+-- 作者第8轮回归:当前书与 clean_source 内容/版本不同(如当前书是另一版原书),
+-- 重建成功后原始干净书(.old)必须保留、且 .orig 固化的是 clean_source 而非当前书,
+-- 杜绝"把当前书版本混入 .orig"或"成功后删除原始干净书"。
+T.case("clean_source 重建:当前书与源版本不同 → 原书保留不删且 .orig 为源", function()
+    local EpubInject = require("pickthought.epub_inject")
+    local deps, calls = make_deps({
+        clean_source = "/clean/原书B.epub",
+        file_exists = function(p) return p == "/clean/原书B.epub" end,
+        load_meta = function(p)
+            if p == "/clean/原书B.epub" then
+                -- clean_source 是另一版本(含不同 spine 顺序,模拟版本差异)
+                return {spine = {{href = "OEBPS/c2.xhtml"}, {href = "OEBPS/c1.xhtml"}}, has = {}}
+            end
+            -- 当前书是版本 A 的干净原书(无 MARKER),与源版本不同
+            return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+        end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "应成功: " .. tostring(err))
+    -- .orig 必须固化自 clean_source(B 版),而非当前书(A 版)
+    T.eq(calls.copied[1], "/clean/原书B.epub", "copy 源为 clean_source(B 版)")
+    T.eq(calls.copied[2], "/books/书.epub.orig", "copy 目标为 .orig")
+    -- 当前书(A 版)暂存为 .old 保留,不被通用清理删除
+    T.eq(report.kept_original, "/books/书.epub.old", "原始干净书(A 版)保留路径记录")
+    local old_removed = false
+    for _, p in ipairs(calls.removed) do
+        if p == "/books/书.epub.old" then old_removed = true end
+    end
+    T.ok(not old_removed, "成功后不得删除原始干净书(A 版,.old 保留)")
+    -- 报告明确提示保留与恢复方式
+    local SyncReport = require("pickthought.sync_report")
+    local joined = table.concat(SyncReport.build(report), "\n")
+    T.ok(joined:find("原始干净书已保留", 1, true), "报告含原始干净书保留提示")
+    T.ok(joined:find("重命名", 1, true), "报告提示手动恢复方式(重命名)")
 end)
 
 T.case("U.copy_file_stream 流式复制(分块/进度/失败)", function()
@@ -792,7 +841,11 @@ end)
 -- 清理失败要在报告中明确提示(残留可能被后续误当有效旧备份)。
 T.case("clean_source:成功收尾暂存清理失败 → 报告带清理警告", function()
     local EpubInject = require("pickthought.epub_inject")
-    local existing = {["/books/书.epub"] = true, ["/clean/原书.epub"] = true}
+    -- 预置 .orig 存在,使成功收尾时走"旧 .orig 暂存为 .orig.old 再清理"路径,
+    -- 验证 .orig.old 清理失败仍入 warnings(作者第7轮意见③)。
+    -- 注意:本场景 doc_path 是干净原书 → 暂存为 .old 的"原始干净书"受第8轮保护,
+    -- 成功收尾不再删除它(不进 warnings);清理警告仅来自 .orig.old。
+    local existing = {["/books/书.epub"] = true, ["/clean/原书.epub"] = true, ["/books/书.epub.orig"] = true}
     local rec = {renames = {}, removed = {}}
     local deps, calls = make_deps({
         clean_source = "/clean/原书.epub",

@@ -540,6 +540,7 @@ function Sync.run(deps)
     end
 
     local backed_up = false
+    local kept_original = nil  -- 作者第8轮:干净原书被暂存为 .old 时记录路径,成功后保留不删
     if src == doc_path and not append then
         -- 首次:原书让位为备份,注入版顶上原路径(进度侧车不动)。
         local ok_backup, backup_err = rename(doc_path, backup)
@@ -687,6 +688,11 @@ function Sync.run(deps)
                     .. tostring(rb_err or "未知") .. ");请手动将 " .. (backup .. ".old")
                     .. " 重命名为 " .. backup .. " 以恢复备份"
             end
+            -- 本分支:当前书是干净原书、指定了外部 clean_source 重建。暂存为 .old 的
+            -- 是用户原本打开的干净原书(可能与 clean_source 版本不同),并非脏注入版临时
+            -- 暂存。成功 swap 后 MUST 保留而非走通用 .old 清理逻辑删除(作者第8轮意见):
+            -- 否则不同版本的原始干净书会被永久销毁。标记 kept_original 跳过清理并提示恢复。
+            kept_original = old_path
             backed_up = true
         end
     end
@@ -743,10 +749,16 @@ function Sync.run(deps)
     local cleanup_warnings = {}
     local old_path = doc_path .. ".old"
     if file_exists(old_path) then
-        local ok_rm = remove(old_path)
-        if not ok_rm then
-            cleanup_warnings[#cleanup_warnings + 1] = "无法清理暂存文件 " .. tostring(old_path)
-            logger.warn("[撷思][Sync] 成功重建后清理 .old 失败", old_path)
+        -- 作者第8轮:本 .old 是原始干净书(kept_original)时保留不删,供用户手动恢复;
+        -- 其余脏暂存 .old(脏注入版临时回滚)才清理。
+        if old_path == kept_original then
+            logger.info("[撷思][Sync] 原始干净书已保留于 " .. tostring(old_path) .. ",不清理(供恢复)")
+        else
+            local ok_rm = remove(old_path)
+            if not ok_rm then
+                cleanup_warnings[#cleanup_warnings + 1] = "无法清理暂存文件 " .. tostring(old_path)
+                logger.warn("[撷思][Sync] 成功重建后清理 .old 失败", old_path)
+            end
         end
     end
     local old_backup = backup .. ".old"
@@ -768,6 +780,8 @@ function Sync.run(deps)
         clean_source = clean_source,
         -- 成功收尾时暂存清理失败的警告(作者 2026-08-20 第7轮意见③),报告层展示。
         cleanup_warnings = #cleanup_warnings > 0 and cleanup_warnings or nil,
+        -- 作者第8轮:原始干净书被暂存为 .old 并保留时,记录路径供报告提示手动恢复。
+        kept_original = kept_original,
         injected = stats.injected,
         marks = stats.marks,
         quote_aligned = stats.quote_aligned,
