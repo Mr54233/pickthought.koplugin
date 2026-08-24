@@ -112,3 +112,27 @@ T.case("Thoughts.group_abstract 取首条摘要", function()
     T.eq(Thoughts.group_abstract(group), "原文摘要", "摘要取自首条")
     T.eq(Thoughts.group_abstract({ texts = { { content = "x", abstract = "" } } }), "", "无摘要返空")
 end)
+
+-- 作者第8轮意见 #3:ThoughtDB.open 的具体错误必须透传到 Thoughts.save/find,
+-- 不得被吃成通用的"想法数据库不可用"(便于真机定位是损坏隔离/权限/迁移失败等)。
+T.case("Thoughts.open_db 透传 ThoughtDB.open 的具体错误(作者第8轮 #3)", function()
+    SQ3._reset()
+    local store = store_with("/t/errprop")
+    -- mock ThoughtDB.open 返回 nil + 具体错误(如损坏隔离/迁移失败描述)。
+    local ThoughtDB = require("pickthought.thought_db")
+    local orig_open = ThoughtDB.open
+    local SPECIFIC = "损坏库已隔离到 .corrupt-*,请重同步(target=...) "
+    ThoughtDB.open = function(_dir) return nil, SPECIFIC end
+
+    local cnt, serr = Thoughts.save(store, "b", "1", {
+        { range = "0-7", texts = { { content = "x", author = "a", review_id = "" } } },
+    })
+    T.ok(cnt == nil, "save 在 open 失败时返回 nil")
+    T.ok(serr == SPECIFIC, "save 透传具体错误(非通用文案): " .. tostring(serr))
+
+    local grp, ferr = Thoughts.find(store, "b", "1", "0-7")
+    T.ok(grp == nil, "find 在 open 失败时返回 nil")
+    T.ok(ferr == SPECIFIC, "find 透传具体错误: " .. tostring(ferr))
+
+    ThoughtDB.open = orig_open
+end)

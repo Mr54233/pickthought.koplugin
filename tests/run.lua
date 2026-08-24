@@ -1,4 +1,5 @@
 -- 用法:luajit tests/run.lua(在仓库根目录)
+io.stdout:setvbuf("no") -- 非 TTY(管道/重定向)下保证汇总即时刷新
 local T = {passed = 0, failed = 0}
 function T.case(name, fn)
     local ok, err = xpcall(fn, debug.traceback)
@@ -30,7 +31,7 @@ local files = {
     "tests.test_web_fetch", "tests.test_power_inhibit", "tests.test_sync_task",
     "tests.test_sync_gate",
     "tests.test_thought_db", "tests.test_thoughts",
-    "tests.test_annotation_compat",
+    "tests.test_annotation_compat", "tests.test_thought_db_integrity",
     "tests.test_thoughts_lru",
     "tests.test_spine_cache",
     "tests.test_thought_popup",
