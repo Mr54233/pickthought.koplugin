@@ -123,9 +123,30 @@ package.preload["json"] = function()
 end
 
 package.preload["libs/libkoreader-lfs"] = function()
+    -- 忠实模拟真实 lfs.attributes 的存在性语义:
+    --   - 文件存在(1 参)→ 返回属性表; (2 参 "mode")→ 返回 "file"
+    --   - 文件不存在 → 返回 nil, "No such file or directory"(供 path_exists_distinct 区分
+    --     "不存在" 与 "权限/IO 不可检查",即作者第3轮意见 #3)。
+    -- 注:本桩仅识别文件,不识别目录(目录检测依赖 lfs.dir);调用方以
+    --   lfs.attributes(p,"mode")=="directory" 判目录时,桩对目录返回 nil,与旧桩一致,
+    --   故不改变既有目录相关测试行为。
+    local function attributes(path, field)
+        local f = io.open(path, "r")
+        local exists = f ~= nil
+        if f then f:close() end
+        if not exists then
+            return nil, "No such file or directory"
+        end
+        if field then
+            if field == "mode" then return "file" end
+            if field == "modification" then return 0 end
+            return nil
+        end
+        return { mode = "file" }
+    end
     return {
-        attributes = function() return nil end,
-        symlinkattributes = function() return nil end,
+        attributes = attributes,
+        symlinkattributes = attributes,
         dir = function() return function() return nil end end,
         mkdir = function() return true end,
         rmdir = function() return true end,
@@ -321,6 +342,17 @@ package.preload["lua-ljsqlite3/init"] = function()
                 if not r then return nil end
                 -- SELECT 顺序:abstract, author, content, likes, review_id
                 return { r.abstract, r.author, r.content, r.likes, r.review_id }
+            elseif sql:find("PRAGMA") then
+                if sql:find("integrity_check") then
+                    if stmt._ic_done then return nil end
+                    stmt._ic_done = true
+                    return { "ok" }
+                end
+                if sql:find("wal_checkpoint") then
+                    return { 0, 0, 0 }  -- total_frames, ckpt_frames, status(0=成功)
+                end
+                if sql:find("user_version") then return { store.user_version or 0 } end
+                return nil
             end
             return nil
         end
@@ -336,6 +368,8 @@ package.preload["lua-ljsqlite3/init"] = function()
             sql = tostring(sql or "")
             if sql:find("CREATE TABLE") then store.schema = true
             elseif sql:find("DROP TABLE") then store.schema = false; store.rows = {}
+            elseif sql:find("user_version=") then
+                store.user_version = tonumber(sql:match("user_version=(%d+)")) or 0
             end
             -- PRAGMA / BEGIN / COMMIT / ROLLBACK:无操作语义,放行。
             return true

@@ -114,8 +114,8 @@ local function open_db(store, book_id)
         db_cache_touch(book_dir)
         return db
     end
-    db = ThoughtDB.open(book_dir)
-    if not db then return nil end
+    db, open_err = ThoughtDB.open(book_dir)
+    if not db then return nil, open_err end  -- 透传 ThoughtDB.open 的具体错误(作者第8轮意见 #3)
     db_cache[book_dir] = db
     db_cache_touch(book_dir)
     db_cache_evict()
@@ -128,8 +128,8 @@ local function open_db(store, book_id)
 end
 
 function Thoughts.save(store, book_id, chapter_uid, groups)
-    local db = open_db(store, book_id)
-    if not db then return nil, "想法数据库不可用" end
+    local db, dberr = open_db(store, book_id)
+    if not db then return nil, dberr or "想法数据库不可用" end
     local count = 0
     for _, g in ipairs(groups or {}) do
         if type(g) == "table" then
@@ -190,7 +190,7 @@ function Thoughts.merge(store, book_id, chapter_uid, from_range, into_range)
     from_range, into_range = tostring(from_range or ""), tostring(into_range or "")
     if from_range == "" or into_range == "" or from_range == into_range then return false end
     local db = open_db(store, book_id)
-    if not db then return false end
+    if not db then return false end  -- 失败静默:merge 上层仅判真/假,无错误通道(保持原契约)
     local uid = tostring(chapter_uid or "")
     local from_texts = ThoughtDB.get_range(db, uid, from_range)
     if not from_texts or #from_texts == 0 then return false end
@@ -207,8 +207,8 @@ function Thoughts.merge(store, book_id, chapter_uid, from_range, into_range)
 end
 
 function Thoughts.find(store, book_id, chapter_uid, range)
-    local db = open_db(store, book_id)
-    if not db then return nil, "想法数据库不可用" end
+    local db, dberr = open_db(store, book_id)
+    if not db then return nil, dberr or "想法数据库不可用" end
     local texts = ThoughtDB.get_range(db, tostring(chapter_uid or ""), tostring(range or ""))
     if not texts or #texts == 0 then return nil, "没有找到该划线对应的想法" end
     return { range = tostring(range), texts = texts }

@@ -3,3 +3,6 @@
 DEV_NOTES.md
 .build/
 __pycache__/
+
+# 测试临时目录(测试运行期创建,由 rm_tmp 清理;失败残留亦忽略)
+tests/_iso_tmp_*/
