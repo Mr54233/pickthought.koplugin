@@ -295,6 +295,61 @@ T.case("clean_source 重建:swap 失败且回滚失败 → 明确告知实际位
     T.ok(not e:find("已恢复原", 1, true), "不得谎称已恢复: " .. e)
 end)
 
+T.case("clean_source:已有 .orig 时最终换位失败 → 当前书与旧 .orig 一起恢复", function()
+    -- 当前书已注入且已有干净 .orig。新源复制成功后若最终 swap 失败,
+    -- 旧实现只恢复 .old,会留下新 .orig 与旧注入书不匹配的危险状态。
+    local EpubInject = require("pickthought.epub_inject")
+    local existing = {
+        ["/books/书.epub"] = "old-injected",
+        ["/books/书.epub.orig"] = "old-clean",
+        ["/clean/原书.epub"] = "new-clean",
+    }
+    local rec = {renames = {}, removed = {}}
+    local deps, calls = make_deps({
+        clean_source = "/clean/原书.epub",
+        file_exists = function(p) return existing[p] ~= nil end,
+        load_meta = function(p)
+            if p == "/clean/原书.epub" then
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+            end
+            return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}},
+                has = {[EpubInject.MARKER] = true}}
+        end,
+        copy_file = function(a, b)
+            rec.copied = {a, b}
+            existing[b] = "new-clean"
+            return true
+        end,
+        rename = function(a, b)
+            rec.renames[#rec.renames + 1] = {a, b}
+            if a == "/books/书.epub.pickthought-new" and b == "/books/书.epub" then
+                return false, "最终换位失败(模拟)"
+            end
+            if existing[b] then return false, "目标已存在" end
+            existing[b] = existing[a]
+            existing[a] = nil
+            return true
+        end,
+        remove = function(p)
+            existing[p] = nil
+            rec.removed[#rec.removed + 1] = p
+            return true
+        end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil, "最终换位失败应返回错误")
+    T.ok(tostring(err):find("无法替换原书", 1, true), "错误应指明最终换位失败: " .. tostring(err))
+    T.eq(existing["/books/书.epub"], "old-injected", "当前书应恢复为原注入版")
+    T.eq(existing["/books/书.epub.orig"], "old-clean", "旧 .orig 内容应恢复到标准路径")
+    T.ok(not existing["/books/书.epub.old"], "回滚成功后不应残留 .old")
+    T.ok(not existing["/books/书.epub.orig.old"], "回滚成功后不应残留 .orig.old")
+    local removed_new_backup = false
+    for _, p in ipairs(rec.removed) do
+        if p == "/books/书.epub.orig" then removed_new_backup = true end
+    end
+    T.ok(removed_new_backup, "应先清理新 .orig 再恢复旧 .orig")
+end)
+
 T.case("clean_source 重建:当前书是干净原书(未注入)→ 统一基线,原书保留为 .old 不丢", function()
     -- 作者意见 #4(2026-08-17):首次注入中途失败后当前书仍是干净原书(有章节缓存但无 MARKER),
     -- 此时若另一份 clean_source 版本不同,绝不能把当前书丢进 .orig 混入错误版本。

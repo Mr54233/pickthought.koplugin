@@ -541,6 +541,9 @@ function Sync.run(deps)
 
     local backed_up = false
     local kept_original = nil  -- 作者第8轮:干净原书被暂存为 .old 时记录路径,成功后保留不删
+    -- clean_source 重建当前注入版时,旧 .orig 也必须纳入同一笔事务:
+    -- 最终换位失败后,当前书可以回滚但备份不能悄悄变成另一版本。
+    local rollback_clean_backup
     if src == doc_path and not append then
         -- 首次:原书让位为备份,注入版顶上原路径(进度侧车不动)。
         local ok_backup, backup_err = rename(doc_path, backup)
@@ -635,30 +638,74 @@ function Sync.run(deps)
                     end
                 end
             end
+            local old_backup = backup .. ".old"
+            local had_backup = file_exists(backup)
+            local backup_staged = false
+            if had_backup then
+                -- 旧 .orig 先离位,避免新源复制成功后覆盖掉唯一可用的干净备份。
+                if file_exists(old_backup) then
+                    local ok_rm, rm_err = remove(old_backup)
+                    if not ok_rm then
+                        remove(temp_dest)
+                        return nil, "无法清理旧备份暂存(" .. tostring(rm_err or "删除失败") .. "),请重试"
+                    end
+                end
+                local ok_stage, stage_err = rename(backup, old_backup)
+                if not ok_stage then
+                    remove(temp_dest)
+                    return nil, "无法暂存旧 .orig 备份(" .. tostring(stage_err or "重命名失败") .. "),请重试"
+                end
+                backup_staged = true
+            end
+            rollback_clean_backup = function()
+                if backup_staged then
+                    return restore_backup_old()
+                end
+                -- 原先没有 .orig 时,失败不能留下新源生成的半成品备份。
+                if file_exists(backup) then
+                    local ok_rm, rm_err = remove(backup)
+                    if not ok_rm then
+                        return nil, "无法清理新 .orig 备份(" .. tostring(rm_err or "删除失败") .. ")"
+                    end
+                end
+                return true
+            end
             if not rename(doc_path, old_path) then
                 remove(temp_dest)
-                return nil, "无法暂存原注入版(请先关闭本书或确认未被占用)"
+                local rb_ok, rb_err = rollback_clean_backup()
+                if rb_ok then
+                    return nil, "无法暂存原注入版(请先关闭本书或确认未被占用)"
+                end
+                return nil, "无法暂存原注入版,且旧 .orig 备份回滚失败(" .. tostring(rb_err or "未知") .. ")"
             end
             local ok_copy, copy_err, copy_status = copy_file(clean_source, backup)
             if not ok_copy then
                 remove(temp_dest)
+                local backup_ok, backup_err = rollback_clean_backup()
+                local function backup_failure_hint()
+                    if backup_ok then return "旧 .orig 备份已恢复" end
+                    return "旧 .orig 备份恢复失败(" .. tostring(backup_err or "未知") .. ")"
+                        .. ";请手动将 " .. old_backup .. " 重命名为 " .. backup
+                end
                 if copy_status == "cancelled" then
-                    -- 复制被用户取消:doc_path 已暂存为 .old,恢复回去;backup 未被改动。
+                    -- 复制被用户取消:doc_path 已暂存为 .old,同时恢复旧 .orig。
                     local ok_restore, restore_err = try_recover(old_path, doc_path)
-                    if ok_restore then
-                        return nil, "已取消干净源固化,已恢复原注入版(.old→doc_path)"
+                    if ok_restore and backup_ok then
+                        return nil, "已取消干净源固化,已恢复原注入版(.old→doc_path)," .. backup_failure_hint()
                     end
-                    return nil, "已取消干净源固化,但无法恢复当前注入版;请手动将 "
+                    return nil, "已取消干净源固化,但回滚未完成;请手动将 "
                         .. old_path .. " 重命名为 " .. doc_path .. " 以恢复原书。(" .. tostring(restore_err or "未知") .. ")"
+                        .. ";" .. backup_failure_hint()
                 end
                 -- 固化失败:尽量回滚 .old → doc_path,恢复结果必须检查(P1#2)。
                 local ok_restore, restore_err = try_recover(old_path, doc_path)
-                if ok_restore then
-                    return nil, "干净源固化到 .orig 失败,已恢复原注入版(.old→doc_path);后续重注需再次指定干净源"
+                if ok_restore and backup_ok then
+                    return nil, "干净源固化到 .orig 失败,已恢复原注入版(.old→doc_path)," .. backup_failure_hint()
                 end
-                -- 恢复失败:保留 .old 作人工恢复入口,明确告知实际位置。
-                return nil, "干净源固化到 .orig 失败,且无法恢复当前注入版;请手动将 "
+                -- 任一回滚失败:保留实际路径,明确告知人工恢复入口。
+                return nil, "干净源固化到 .orig 失败,且回滚未完成;请手动将 "
                     .. old_path .. " 重命名为 " .. doc_path .. " 以恢复原书。(" .. tostring(restore_err or "未知") .. ")"
+                    .. ";" .. backup_failure_hint()
             end
             backed_up = true
         else
@@ -747,6 +794,13 @@ function Sync.run(deps)
                 recovered, rec_err = try_recover(backup, doc_path)
                 recovered_from = "clean"
             end
+            -- 即使原书回滚失败,也要尝试恢复旧 .orig;否则两个文件可能落在不同版本。
+            local rb_ok, rb_err
+            if rollback_clean_backup then
+                rb_ok, rb_err = rollback_clean_backup()
+            else
+                rb_ok, rb_err = restore_backup_old()
+            end
             if not recovered then
                 local msg = "无法替换原书(" .. tostring(swap_err or "rename 失败") .. ")"
                 if file_exists(old_path) then
@@ -755,14 +809,16 @@ function Sync.run(deps)
                     msg = msg .. ";干净原书备份位于 " .. backup .. ",请手动恢复"
                 end
                 if rec_err then msg = msg .. "。恢复动作失败:" .. tostring(rec_err) end
+                if not rb_ok then
+                    msg = msg .. ";旧 .orig 备份恢复失败,请手动将 " .. (backup .. ".old")
+                        .. " 重命名为 " .. backup .. "(" .. tostring(rb_err or "未知") .. ")"
+                end
                 return nil, msg
             end
             -- 恢复成功:提示必须与实际文件状态一致(作者意见 #2)。
-            -- 旧 .orig(.orig.old)同样要还原,否则后续重注误报缺备份(作者 2026-08-19 意见 #1)。
-            local rb_ok, rb_err = restore_backup_old()
             local rb_hint = ""
             if not rb_ok then
-                rb_hint = ";但旧 .orig 备份(.orig.old)未能自动恢复,请手动将 "
+                rb_hint = ";但旧 .orig 备份回滚未能自动完成,请手动将 "
                     .. (backup .. ".old") .. " 重命名为 " .. backup .. " 以恢复备份("
                     .. tostring(rb_err or "未知") .. ")"
             end
