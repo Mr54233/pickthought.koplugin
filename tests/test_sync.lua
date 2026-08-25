@@ -334,6 +334,35 @@ T.case("映射缓存:续批只匹配新章节", function()
     os.remove(cache_file)
 end)
 
+T.case("映射缓存:旧的未匹配结论下一轮仍会重试", function()
+    local cache_file = "tests/.tmp_map_retry.json"
+    os.remove(cache_file)
+    local U = require("pickthought.util")
+    local failed, err1 = Sync.run(make_deps({
+        map_cache_path = cache_file,
+        read_text = function() return "<html><body>暂时无法命中的正文</body></html>" end,
+    }))
+    T.ok(failed == nil and tostring(err1):find("匹配", 1, true), "首次未匹配应结束并提示匹配失败: " .. tostring(err1))
+    local Json = require("pickthought.json")
+    local decoded = Json.decode(U.read_file(cache_file, true))
+    T.ok(decoded and decoded.map and decoded.map["1"] == nil, "新的未匹配结果不得永久写入 false")
+    decoded.map["1"] = false -- 模拟旧版本遗留的永久失败缓存。
+    T.ok(U.atomic_write(cache_file, Json.encode(decoded), true), "写入旧 false 缓存")
+
+    local reads = 0
+    local retried, err2 = Sync.run(make_deps({
+        map_cache_path = cache_file,
+        read_text = function(_, href)
+            reads = reads + 1
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end,
+    }))
+    T.ok(retried, "旧 false 结果不应阻止下一轮重试: " .. tostring(err2))
+    T.ok(reads > 0, "旧 false 结果应重新读取正文")
+    T.eq(retried.injected, 1, "重试后应成功注入")
+    os.remove(cache_file)
+end)
+
 T.case("正文 spine 缓存:冷读落盘,续批暖读不再解压", function()
     local U = require("pickthought.util")
     local SpineCache = require("pickthought.spine_cache")

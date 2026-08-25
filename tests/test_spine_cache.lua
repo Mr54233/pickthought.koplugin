@@ -64,6 +64,45 @@ T.case("SpineCache: 冷捕→暖服 内容一致且指纹作废", function()
     end)
 end)
 
+T.case("SpineCache: 同长度正文损坏触发回源并可修复", function()
+    with_memfs(function(fs)
+        local dir = "tests/.tmp_spine/spine-corrupt_7"
+        local sig = "12345@7"
+        local spine = {{href = "OEBPS/c1.xhtml"}}
+        local cold = SpineCache.open(dir, sig)
+        cold:put("OEBPS/c1.xhtml", CH1)
+        cold:close()
+
+        -- 保持字节数不变,只替换内容,覆盖旧实现仅检查文件存在的漏洞。
+        fs[dir .. "/e1"] = ("X"):rep(#CH1)
+        local warm = SpineCache.open(dir, sig)
+        T.ok(warm:warm(), "manifest 字段完整时仍进入暖模式")
+        T.ok(not warm:covers(spine), "同长度内容损坏必须退出暖路径")
+        T.eq(warm:get("OEBPS/c1.xhtml"), nil, "损坏正文不得返回")
+
+        T.ok(warm:put("OEBPS/c1.xhtml", CH1), "回源正文可补写")
+        T.ok(warm:close(), "修复后的 manifest 可写入")
+        local repaired = SpineCache.open(dir, sig)
+        T.ok(repaired:covers(spine), "修复后重新进入暖路径")
+        T.eq(repaired:get("OEBPS/c1.xhtml"), CH1, "修复正文内容一致")
+    end)
+end)
+
+T.case("SpineCache: 旧 manifest 无完整性字段时冷启动重建", function()
+    with_memfs(function(fs)
+        local dir = "tests/.tmp_spine/spine-legacy_7"
+        local sig = "12345@7"
+        fs[dir] = true
+        fs[dir .. "/manifest.json"] =
+            '{"signature":"12345@7","entries":{"OEBPS/c1.xhtml":"e1"}}'
+        fs[dir .. "/e1"] = CH1
+        local cache = SpineCache.open(dir, sig)
+        T.ok(cache and not cache:warm(), "旧 manifest 必须视为冷缓存")
+        T.ok(fs[dir .. "/manifest.json"] == nil and fs[dir .. "/e1"] == nil,
+            "冷启动应清理旧 manifest 和正文")
+    end)
+end)
+
 T.case("SpineCache: 缓存缺失 get 返回 nil", function()
     with_memfs(function(fs)
         local dir = "tests/.tmp_spine/spine-miss_7"

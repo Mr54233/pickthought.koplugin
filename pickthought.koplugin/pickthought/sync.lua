@@ -305,7 +305,7 @@ function Sync.run(deps)
         -- 指纹 = 源书大小 + 匹配算法版本 + 内容指纹:换书/改算法/改内容都让旧映射作废重建。
         -- 内容指纹取文件头尾采样做 FNV-1a,避免"同体积不同内容"的 EPUB 复用旧章节映射/缓存(P2, 2026-08-15 二轮)。
         -- 指定 clean_source 重建时,映射必须基于干净源本身(而非可能版本不同的 .orig/当前书),
-        -- 故把 clean_source 的规范化路径也纳入签名;并强制废弃旧映射缓存,杜绝复用。
+        -- 故把 clean_source 的规范化路径也纳入签名;签名相同的连续重建可复用缓存。
         local use_clean = (src == clean_source and clean_source) or nil
         local map_source = use_clean or (file_exists(backup) and backup) or doc_path
         -- 作者意见 #6:clean_source 完整路径含分隔符,直接进签名会让分隔符落入缓存目录名,
@@ -314,32 +314,26 @@ function Sync.run(deps)
         local fingerprint = U.content_fingerprint(map_source) or "0"
         map_signature = tostring(U.file_size(map_source) or 0) .. "@"
             .. tostring(ChapterMap.ALGO_VERSION) .. "@" .. fingerprint .. src_sig
-        if use_clean then
-            -- 指定干净源:强制废弃旧映射缓存,避免同体积不同内容复用旧 spine/map(P2)。
-            map_store = {}
-        else
-            local raw = U.read_file(deps.map_cache_path, true)
-            if raw then
-                local ok_decode, decoded = pcall(Json.decode, raw)
-                if ok_decode and type(decoded) == "table"
-                    and tostring(decoded.signature) == map_signature
-                    and type(decoded.map) == "table" then
-                    map_store = decoded.map
-                end
+        local raw = U.read_file(deps.map_cache_path, true)
+        if raw then
+            local ok_decode, decoded = pcall(Json.decode, raw)
+            if ok_decode and type(decoded) == "table"
+                and tostring(decoded.signature) == map_signature
+                and type(decoded.map) == "table" then
+                map_store = decoded.map
             end
-            map_store = map_store or {}
         end
+        map_store = map_store or {}
     end
 
-    -- 缓存值格式:false = 确认无法匹配;{hrefs={...}, num=true|nil} =
-    -- 目标文件列表(拆分章多目标),num 表示单目标强投票、允许数字兜底。
+    -- 缓存值格式:{hrefs={...}, num=true|nil} = 目标文件列表(拆分章多目标),
+    -- num 表示单目标强投票、允许数字兜底。未匹配结果不落盘,后续可重新尝试。
     local known, todo = {}, {}
     for _, ch in ipairs(fetched) do
         local cached = map_store and map_store[tostring(ch.uid)]
-        if cached == nil then
+        if cached == nil or cached == false then
+            -- false 是旧版本写入的"永久未匹配"结果,不能继续信任;重新加入待匹配。
             todo[#todo + 1] = ch
-        elseif cached == false then
-            known[tostring(ch.uid)] = false
         elseif type(cached) == "table" and type(cached.hrefs) == "table" and #cached.hrefs > 0 then
             known[tostring(ch.uid)] = cached
         else
@@ -475,8 +469,6 @@ function Sync.run(deps)
                     quote_only = quote_only,
                 }
             end
-        elseif cached == false then
-            unmatched[#unmatched + 1] = {uid = uid, title = ch.title, reason = "no_hit"}
         elseif new_rows_by_uid[uid] then
             matched_uids[uid] = true
             local hrefs = {}
@@ -490,7 +482,7 @@ function Sync.run(deps)
             end
         elseif unmatched_uid[uid] then
             unmatched[#unmatched + 1] = {uid = uid, title = ch.title, reason = "no_hit"}
-            if map_store then map_store[uid] = false end
+            if map_store then map_store[uid] = nil end
         else
             -- no_data(无划线)章节:不入缓存,下批有数据时再匹配。
             unmatched[#unmatched + 1] = {uid = uid, title = ch.title, reason = "no_data"}
@@ -640,7 +632,9 @@ function Sync.run(deps)
             end
             local old_backup = backup .. ".old"
             local had_backup = file_exists(backup)
-            local backup_staged = false
+            -- 上次中断可能只留下 .orig.old。它仍是唯一可恢复的干净备份,
+            -- 即使标准 .orig 缺失也必须纳入本次事务,失败时恢复回 .orig。
+            local backup_staged = not had_backup and file_exists(old_backup)
             if had_backup then
                 -- 旧 .orig 先离位,避免新源复制成功后覆盖掉唯一可用的干净备份。
                 if file_exists(old_backup) then
@@ -683,7 +677,14 @@ function Sync.run(deps)
                 remove(temp_dest)
                 local backup_ok, backup_err = rollback_clean_backup()
                 local function backup_failure_hint()
-                    if backup_ok then return "旧 .orig 备份已恢复" end
+                    if backup_ok then
+                        if backup_staged then return "旧 .orig 备份已恢复" end
+                        return "未检测到旧 .orig 备份,新 .orig 已清理"
+                    end
+                    if not backup_staged then
+                        return "新 .orig 备份清理失败(" .. tostring(backup_err or "未知") .. ")"
+                            .. ";请检查 " .. backup
+                    end
                     return "旧 .orig 备份恢复失败(" .. tostring(backup_err or "未知") .. ")"
                         .. ";请手动将 " .. old_backup .. " 重命名为 " .. backup
                 end
@@ -717,8 +718,10 @@ function Sync.run(deps)
                 local ok_rm = remove(old_path)
                 if not ok_rm then remove(temp_dest); return nil, "无法清理旧的暂存文件,请重试" end
             end
-            if file_exists(backup) then
-                local old_backup = backup .. ".old"
+            local old_backup = backup .. ".old"
+            local had_backup = file_exists(backup)
+            local backup_staged = not had_backup and file_exists(old_backup)
+            if had_backup then
                 if file_exists(old_backup) then
                     local ok_rm2 = remove(old_backup)
                     if not ok_rm2 then remove(temp_dest); return nil, "无法清理旧备份暂存,请重试" end
@@ -726,6 +729,19 @@ function Sync.run(deps)
                 if not rename(backup, old_backup) then
                     remove(temp_dest); return nil, "无法暂存旧 .orig 备份,请重试"
                 end
+                backup_staged = true
+            end
+            rollback_clean_backup = function()
+                if backup_staged then
+                    return restore_backup_old()
+                end
+                if file_exists(backup) then
+                    local ok_rm, rm_err = remove(backup)
+                    if not ok_rm then
+                        return nil, "无法清理新 .orig 备份(" .. tostring(rm_err or "删除失败") .. ")"
+                    end
+                end
+                return true
             end
             -- 固化注入基线(clean_source)为 .orig,使最终 .orig 与注入源一致(作者意见 #4)。
             local ok_copy, copy_err, copy_status = copy_file(clean_source, backup)
@@ -733,13 +749,22 @@ function Sync.run(deps)
                 remove(temp_dest)
                 -- 旧 .orig(.orig.old)必须还原为标准路径,否则后续直接重注误报缺备份
                 -- (作者 2026-08-19 意见 #1)。此时 doc_path 尚未离位(原书完好)。
-                local rb_ok, rb_err = restore_backup_old()
+                local rb_ok, rb_err = rollback_clean_backup()
                 local rb_hint
                 if rb_ok then
-                    rb_hint = "旧 .orig 备份已恢复(.orig.old→.orig)"
+                    if backup_staged then
+                        rb_hint = "旧 .orig 备份已恢复(.orig.old→.orig)"
+                    else
+                        rb_hint = "未检测到旧 .orig 备份,新 .orig 已清理"
+                    end
                 else
-                    rb_hint = "旧 .orig 备份恢复失败(" .. tostring(rb_err or "未知") .. "),请手动将 "
-                        .. (backup .. ".old") .. " 重命名为 " .. backup .. " 以恢复备份"
+                    if backup_staged then
+                        rb_hint = "旧 .orig 备份恢复失败(" .. tostring(rb_err or "未知") .. "),请手动将 "
+                            .. old_backup .. " 重命名为 " .. backup .. " 以恢复备份"
+                    else
+                        rb_hint = "新 .orig 备份清理失败(" .. tostring(rb_err or "未知")
+                            .. "),请检查 " .. backup
+                    end
                 end
                 if copy_status == "cancelled" then
                     -- 取消发生在固化 .orig 之前:当前干净原书尚未离位(doc_path 仍完好),
@@ -756,14 +781,16 @@ function Sync.run(deps)
                 -- (否则 .orig 已换成新版本而 doc_path 仍是旧版本,后续重注会使用不匹配的
                 -- 备份——作者 2026-08-20 第7轮意见②)。restore_backup_old 内部先移除
                 -- 新副本再恢复旧 .orig(.orig.old → .orig)。
-                local rb_ok, rb_err = restore_backup_old()
+                local rb_ok, rb_err = rollback_clean_backup()
                 if rb_ok then
-                    return nil, "干净源已固化但无法暂存当前书(.old),已回滚旧 .orig 备份并清理新副本;"
+                    local rb_hint = backup_staged and "已回滚旧 .orig 备份并清理新副本" or "已清理新 .orig 备份"
+                    return nil, "干净源已固化但无法暂存当前书(.old)," .. rb_hint .. ";"
                         .. "请关闭本书或确认未被占用后重试"
                 end
-                return nil, "干净源已固化但无法暂存当前书(.old),且旧 .orig 备份回滚失败("
-                    .. tostring(rb_err or "未知") .. ");请手动将 " .. (backup .. ".old")
-                    .. " 重命名为 " .. backup .. " 以恢复备份"
+                local rb_hint = backup_staged and ("且旧 .orig 备份回滚失败(" .. tostring(rb_err or "未知")
+                    .. ");请手动将 " .. old_backup .. " 重命名为 " .. backup .. " 以恢复备份")
+                    or ("且新 .orig 备份清理失败(" .. tostring(rb_err or "未知") .. ");请检查 " .. backup)
+                return nil, "干净源已固化但无法暂存当前书(.old)," .. rb_hint
             end
             -- 本分支:当前书是干净原书、指定了外部 clean_source 重建。暂存为 .old 的
             -- 是用户原本打开的干净原书(可能与 clean_source 版本不同),并非脏注入版临时

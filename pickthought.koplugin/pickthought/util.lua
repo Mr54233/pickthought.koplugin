@@ -132,30 +132,36 @@ function U.copy_file_stream(a, b, on_progress)
     return true
 end
 
--- 轻量内容指纹:对文件头尾各采样 64KB 做 FNV-1a 哈希,用于在不计算完整哈希的前提下
--- 快速区分"同体积不同内容"的 EPUB,避免复用错误的章节映射/缓存(P2, 2026-08-15 二轮)。
-function U.content_fingerprint(path)
+local function fnv1a_update(h, data)
     local bit = require("bit")
+    for i = 1, #data do
+        -- LuaJIT(Lua5.1)无原生按位异或,用 bit 库;乘后取模保持 32 位。
+        h = (bit.bxor(h, data:byte(i)) * 16777619) % 4294967296
+    end
+    return h
+end
+
+-- 对完整字节串做 FNV-1a,供已在内存中的正文复用同一指纹算法。
+function U.content_fingerprint_data(data)
+    if type(data) ~= "string" then return nil end
+    return string.format("%08x", fnv1a_update(2166136261, data))
+end
+
+-- 完整内容指纹:分块流式读取整个文件做 FNV-1a,不把大 EPUB 一次性读入内存。
+-- 用完整内容而不是头尾采样,避免同大小且头尾相同的不同源书误复用映射缓存。
+function U.content_fingerprint(path)
     local f = io.open(path, "rb")
     if not f then return nil end
-    local SAMPLE = 65536
-    local size = U.file_size(path) or 0
-    local buf = {}
-    f:seek("set", 0)
-    local head = f:read(SAMPLE)
-    if head then buf[#buf + 1] = head end
-    if size > SAMPLE * 2 then
-        f:seek("set", size - SAMPLE)
-        local tail = f:read(SAMPLE)
-        if tail then buf[#buf + 1] = tail end
-    end
-    f:close()
     local h = 2166136261
-    for _, s in ipairs(buf) do
-        for i = 1, #s do
-            -- LuaJIT(Lua5.1)无原生按位异或,用 bit 库;乘后取模保持 32 位。
-            h = (bit.bxor(h, s:byte(i)) * 16777619) % 4294967296
+    local chunk_size = 65536
+    while true do
+        local data, err = f:read(chunk_size)
+        if data == nil then
+            f:close()
+            if err then return nil end
+            break
         end
+        h = fnv1a_update(h, data)
     end
     return string.format("%08x", h)
 end
