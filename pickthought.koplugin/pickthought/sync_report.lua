@@ -96,8 +96,23 @@ function M.build(report, options)
         lines[#lines + 1] = string.format("有 %s 章想法缓存写入失败，请检查存储空间",
             integer(report.save_failures))
     end
+    -- 成功收尾时暂存清理失败的警告(作者 2026-08-20 第7轮意见③):残留的 .orig.old
+    -- 可能被后续误当有效旧备份,须明确提示。
+    if type(report.cleanup_warnings) == "table" and #report.cleanup_warnings > 0 then
+        lines[#lines + 1] = string.format("有 %s 项暂存文件清理失败(不影响本次结果):",
+            integer(#report.cleanup_warnings))
+        for _, w in ipairs(report.cleanup_warnings) do
+            lines[#lines + 1] = "· " .. tostring(w)
+        end
+    end
 
     lines[#lines + 1] = ""
+    -- 作者第8轮:原始干净书被暂存为 .old 并保留时,明确提示其位置与恢复方式,
+    -- 避免用户以为原书已被销毁、也防止后续误当脏暂存清理。
+    if report.kept_original then
+        lines[#lines + 1] = "原始干净书已保留(未删除):" .. tostring(report.kept_original)
+        lines[#lines + 1] = "如需恢复原书,请手动将该文件重命名为原书名(.epub)"
+    end
     lines[#lines + 1] = "已替换原书(阅读进度保留)"
     lines[#lines + 1] = "原版备份:" .. tostring(report.backup or "")
     return lines

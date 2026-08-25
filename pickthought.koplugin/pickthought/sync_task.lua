@@ -618,6 +618,9 @@ function SyncTask:start(task, on_progress, on_done)
     -- mode: "sync"=联网增量同步(复用缓存并按游标续传);"reinject"=纯离线,
     -- 只用上次拉取的数据重跑映射+注入,零网络。
     local mode = tostring(task.mode or "sync")
+    -- clean_source:外部干净 .epub 路径,作为注入源绕开脏/缺失的 .orig(逃生舱)。
+    -- 仅离线重注(reinject)用到;由 main.lua 选书后透传,空则走旧逻辑。
+    local clean_source = task.clean_source and tostring(task.clean_source) or nil
     -- 分批风控:每次同步最多拉这么多个新章节,大书分多次完成。
     local preferences = self.store:preferences()
     local batch_limit = tonumber(preferences.sync_batch_limit) or 200
@@ -902,6 +905,7 @@ function SyncTask:start(task, on_progress, on_done)
             local report, sync_err = Sync.run{
                 doc_path = doc_path,
                 book_id = book_id,
+                clean_source = clean_source,
                 api = api_for_sync,
                 annotations = cached_annotations,
                 load_meta = function(p) return EpubReader.load(p) end,

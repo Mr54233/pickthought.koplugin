@@ -57,6 +57,7 @@ package.preload["pickthought.web_fetch"] = function()
 end
 package.preload["pickthought.epub_reader"] = function()
     return {
+        available = function() return true end,
         load = function() return { spine = { { href = "OEBPS/c1.xhtml" } }, has = {} } end,
         -- 章节正文须包含划线的 markText,否则章节匹配失败(Sync.run 在注入前即中止)。
         read = function(_, href)
@@ -125,4 +126,50 @@ T.case("前台 _sync_run 适配器透传 no-op rest,绝不调用 usleep(作者 #
     local PerformanceMode = require("pickthought.performance_mode")
     PerformanceMode.default()._rest()
     T.ok(usleep_spy.calls > 0, "对照:默认 rest(ffi/util.usleep 存在)应触发 usleep(前台必须避免此路径)")
+end)
+
+-- 作者第8轮意见(2026-08-21):sync_entry 仅对联网同步模式执行登录检查;
+-- mode=="reinject"(离线重注)只用本地缓存 + 用户选定的干净原书,不依赖微信读书
+-- 在线接口,退出登录后 clean_source 逃生舱仍可用。同时保留普通 sync 的未登录拦截。
+T.case("sync 模式未登录:require_login 被拦截,不启动任务(登录门禁保留)", function()
+    local self = {}
+    self.info = function(msg) self.last_info = msg end
+    self.require_login = function()
+        self.login_checked = (self.login_checked or 0) + 1
+        return false  -- 未登录
+    end
+    self.store = { get = function() return { ["/tmp/书.epub"] = { book_id = "b001" } } end }
+    self.sync_task = { busy = function() return false end }
+    local started = false
+    self._start_sync_task = function() started = true end
+
+    Plugin.sync_entry(self, "/tmp/书.epub", "sync")
+
+    T.eq(self.login_checked, 1, "sync 模式应检查登录")
+    T.ok(not started, "未登录 → 联网同步被拦截,不启动任务")
+end)
+
+-- 作者第8轮意见:reinject 模式跳过 require_login——未登录 + 本地缓存完整 +
+-- 指定有效 clean_source 时能正常启动离线重注,clean_source 透传给后台任务。
+T.case("reinject 模式未登录:跳过登录检查,离线重注正常启动(clean_source 透传)", function()
+    local self = {}
+    self.info = function(msg) self.last_info = msg end
+    self.require_login = function()
+        self.login_checked = (self.login_checked or 0) + 1
+        return false  -- 未登录(应被 reinject 路径跳过)
+    end
+    self.is_online = function() return true end
+    self.store = { get = function() return { ["/tmp/书.epub"] = { book_id = "b001", title = "测试书" } } end }
+    self.sync_task = { busy = function() return false end, available = function() return true end }
+    local started
+    -- 注意:sync_entry 内以冒号 self:_start_sync_task(...) 调用,自动传 self 为第一参数。
+    self._start_sync_task = function(_, path, bound, mode, opts)
+        started = { mode = mode, clean = opts and opts.clean_source }
+    end
+
+    Plugin.sync_entry(self, "/tmp/书.epub", "reinject", { clean_source = "/clean/原书.epub" })
+
+    T.eq(self.login_checked or 0, 0, "reinject 模式不检查登录(离线重注不依赖网络)")
+    T.ok(started and started.mode == "reinject", "未登录 + 有效 clean_source → 离线重注正常启动")
+    T.eq(started.clean, "/clean/原书.epub", "clean_source 透传给后台任务")
 end)
