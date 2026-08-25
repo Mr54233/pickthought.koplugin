@@ -583,10 +583,19 @@ function Sync.run(deps)
                     return nil, "当前 EPUB 已损坏且存在暂存 " .. old_path .. ",已中止操作(未删除任何文件);"
                         .. "请先处理损坏文件或指定可用干净源"
                 end
-                local ok_rm, rm_err = remove(old_path)
-                if not ok_rm then
-                    remove(temp_dest)
-                    return nil, "无法清理旧的暂存文件,请重试"
+                -- 关键 P1 修复(作者文件保留边界):若 .old 是上一次重建保留的原始干净书
+                -- (无注入 MARKER,来自 kept_original),它不是陈旧残留,绝不能在此删除——
+                -- 否则连续两次 clean_source 重建会销毁用户最初的干净原书。跳过清理,
+                -- 交由下方 is_current_injected 分支改名 .old.kept 保留。
+                local old_meta_ok, old_meta = pcall(function() return deps.load_meta(old_path) end)
+                if old_meta_ok and old_meta and old_meta.has and old_meta.has[EpubInject.MARKER] ~= true then
+                    -- 保留的原始干净书:不在此清理,留待后续分支处理。
+                else
+                    local ok_rm, rm_err = remove(old_path)
+                    if not ok_rm then
+                        remove(temp_dest)
+                        return nil, "无法清理旧的暂存文件,请重试"
+                    end
                 end
             end
         end
@@ -599,10 +608,31 @@ function Sync.run(deps)
             -- 脏注入版先暂存为 .old 以便失败回滚,再把干净源固化为 .orig 备份。
             local old_path = doc_path .. ".old"
             if file_exists(old_path) then
-                local ok_rm, rm_err = remove(old_path)
-                if not ok_rm then
-                    remove(temp_dest)
-                    return nil, "无法清理旧的暂存文件,请重试"
+                -- 关键 P1 修复(作者文件保留边界):若已存在的 .old 是上一次重建保留的
+                -- 原始干净书(无注入 MARKER,来自"当前书是干净原书"分支的 kept_original),
+                -- 绝不能删除或覆盖它——否则连续两次 clean_source 重建会销毁用户最初的干净原书。
+                -- 改为改名 .old.kept 让出 .old 给当前脏注入版作回滚暂存,并记入 kept_original 跳过成功清理。
+                local ok_meta, old_meta = pcall(function() return deps.load_meta(old_path) end)
+                if ok_meta and old_meta and old_meta.has and old_meta.has[EpubInject.MARKER] ~= true then
+                    local kept_path = doc_path .. ".old.kept"
+                    if file_exists(kept_path) then
+                        local ok_rk = remove(kept_path)
+                        if not ok_rk then
+                            remove(temp_dest)
+                            return nil, "无法清理旧的保留干净书,请重试"
+                        end
+                    end
+                    if not rename(old_path, kept_path) then
+                        remove(temp_dest)
+                        return nil, "无法保留原始干净书(.old→.old.kept),请重试"
+                    end
+                    kept_original = kept_path
+                else
+                    local ok_rm, rm_err = remove(old_path)
+                    if not ok_rm then
+                        remove(temp_dest)
+                        return nil, "无法清理旧的暂存文件,请重试"
+                    end
                 end
             end
             if not rename(doc_path, old_path) then
