@@ -378,6 +378,63 @@ T.case("clean_source 重建:当前书与源版本不同 → 原书保留不删�
     T.ok(joined:find("重命名", 1, true), "报告提示手动恢复方式(重命名)")
 end)
 
+-- 作者 P1 文件保留边界(连续使用 clean_source):第一次重建把原始干净书保留为 .old,
+-- 第二次重建(当前书已是被重建出的脏注入版,进入 is_current_injected 分支)不得删除/覆盖
+-- 第一次保留的原始干净书 .old——否则连续重建会销毁用户最初的干净原书。
+T.case("clean_source 连续重建:第二次不得删除第一次保留的原始干净书 .old", function()
+    local EpubInject = require("pickthought.epub_inject")
+    local deps, calls = make_deps({
+        clean_source = "/clean/原书.epub",
+        -- 模拟"第一次重建成功后"的状态:原始干净书被保留为 .old(无 MARKER),
+        -- 且当前 doc_path 已是第一次重建出的脏注入版(有 MARKER)。
+        file_exists = function(p)
+            return p == "/clean/原书.epub" or p == "/books/书.epub.old"
+        end,
+        load_meta = function(p)
+            if p == "/clean/原书.epub" then
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+            end
+            if p == "/books/书.epub.old" then
+                -- 第一次重建保留的原始干净书(无 MARKER)
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+            end
+            -- 当前 doc_path 是第一次重建出的脏注入版(有 MARKER)
+            return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}},
+                has = {[EpubInject.MARKER] = true}}
+        end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "第二次重建应成功: " .. tostring(err))
+    -- 关键:原始干净书 .old 必须改名保留为 .old.kept,而非被删除或覆盖。
+    local old_renamed_to_kept = false
+    for _, r in ipairs(calls.renames) do
+        if r[1] == "/books/书.epub.old" and r[2] == "/books/书.epub.old.kept" then
+            old_renamed_to_kept = true
+        end
+    end
+    T.ok(old_renamed_to_kept, "原始干净书 .old 应改名保留为 .old.kept(不删不覆盖)")
+    -- 报告记录保留路径为 .old.kept
+    T.eq(report.kept_original, "/books/书.epub.old.kept", "报告记录保留路径为 .old.kept")
+    -- 原始干净书 .old.kept(改名保留者)绝不得出现在 removed 列表(未被销毁)。
+    -- 注意:.old 本身是脏注入版回滚暂存,成功清理时移除它属正常行为,不应断言保留。
+    local kept_removed = false
+    for _, p in ipairs(calls.removed) do
+        if p == "/books/书.epub.old.kept" then kept_removed = true end
+    end
+    T.ok(not kept_removed, "成功后不得删除原始干净书(.old.kept 保留,供手动恢复)")
+    -- 当前脏注入版正确暂存为 .old(供回滚),随后由成功清理移除脏暂存
+    local dirty_staged = false
+    for _, r in ipairs(calls.renames) do
+        if r[1] == "/books/书.epub" and r[2] == "/books/书.epub.old" then dirty_staged = true end
+    end
+    T.ok(dirty_staged, "当前脏注入版应暂存为 .old 供回滚")
+    -- 报告明确提示保留与恢复方式
+    local SyncReport = require("pickthought.sync_report")
+    local joined = table.concat(SyncReport.build(report), "\n")
+    T.ok(joined:find("原始干净书已保留", 1, true), "报告含原始干净书保留提示")
+    T.ok(joined:find("/books/书.epub.old.kept", 1, true), "报告含保留路径 .old.kept")
+end)
+
 T.case("U.copy_file_stream 流式复制(分块/进度/失败)", function()
     -- P1#1 —— 干净源复制必须分块读写(避免大书 OOM)并上报进度心跳,且源缺失要报错。
     local src = os.tmpname()
