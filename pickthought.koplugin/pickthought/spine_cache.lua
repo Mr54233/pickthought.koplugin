@@ -12,15 +12,21 @@
 -- 红线安全:缓存的正是 read_text 的原始输出,ChapterMap 照常 normalize
 -- (normalize 幂等),匹配结果与最终注入的 EPUB 字节完全一致;不触碰任何
 -- 匹配逻辑,也不需要改动 ALGO_VERSION。缓存指纹与 map.json 同源(源书大小 @
--- 算法版本),换书或升算法自动整体作废。
+-- 算法版本),换书或升算法自动整体作废。manifest 还记录每个正文的大小和完整
+-- 内容指纹,旧格式或正文损坏时按冷缓存重建/回源。
 local U = require("pickthought.util")
 local Json = require("pickthought.json")
 
 local SpineCache = {}
 
+local function entry_file(entry)
+    return type(entry) == "table" and entry.file or nil
+end
+
 local function next_entry_seq(entries)
     local max_seq = 0
-    for _, fname in pairs(entries or {}) do
+    for _, entry in pairs(entries or {}) do
+        local fname = entry_file(entry)
         local seq = tostring(fname):match("^e(%d+)$")
         if seq then max_seq = math.max(max_seq, tonumber(seq) or 0) end
     end
@@ -54,6 +60,7 @@ function SpineCache.open(dir, signature)
         _seq = 1,
         dir_ready = false,
         dirty = false,
+        _validated = {},
     }
     setmetatable(self, { __index = SpineCache })
 
@@ -77,9 +84,21 @@ function SpineCache.open(dir, signature)
             if ok and type(decoded) == "table"
                 and tostring(decoded.signature) == tostring(signature)
                 and type(decoded.entries) == "table" then
-                self.entries = decoded.entries
-                self._seq = next_entry_seq(self.entries)
-                self.mode = "warm"
+                local valid = true
+                for _, entry in pairs(decoded.entries) do
+                    if type(entry) ~= "table"
+                        or type(entry.file) ~= "string"
+                        or type(entry.size) ~= "number"
+                        or type(entry.fingerprint) ~= "string" then
+                        valid = false
+                        break
+                    end
+                end
+                if valid then
+                    self.entries = decoded.entries
+                    self._seq = next_entry_seq(self.entries)
+                    self.mode = "warm"
+                end
             end
         end
     end
@@ -98,21 +117,35 @@ end
 -- 当前 spine 全部 href 是否都已在缓存里(用于决定是否敢在 read_spine 走暖路径)。
 function SpineCache:covers(spine)
     if self.mode ~= "warm" then return false end
+    self._validated = {}
     for _, item in ipairs(spine or {}) do
         local href = type(item) == "table" and item.href or tostring(item)
-        local fname = self.entries[tostring(href)]
-        if not fname or not U.file_exists(self.dir .. "/" .. tostring(fname)) then return false end
+        if self:get(href) == nil then
+            self._validated = {}
+            return false
+        end
+        self._validated[tostring(href)] = true
     end
     return true
 end
 
--- 取缓存正文;缺失返回 nil(调用方据此回退真实读取并补写)。
+-- 取缓存正文并校验完整性;缺失/大小变化/内容损坏返回 nil(调用方回源补写)。
 function SpineCache:get(href)
     if self.mode ~= "warm" then return nil end
-    local fname = self.entries[tostring(href)]
+    href = tostring(href)
+    local entry = self.entries[href]
+    local fname = entry_file(entry)
     if not fname then return nil end
     local data = U.read_file(self.dir .. "/" .. fname, true)
     if data == nil then return nil end
+    if self._validated[href] then
+        self._validated[href] = nil
+        if #data ~= entry.size then return nil end
+        return data
+    end
+    if #data ~= entry.size or U.content_fingerprint_data(data) ~= entry.fingerprint then
+        return nil
+    end
     return data
 end
 
@@ -121,12 +154,11 @@ end
 function SpineCache:put(href, content)
     if content == nil then return false end
     href = tostring(href)
-    local fname = self.entries[href]
-    local new_entry = false
+    local old_entry = self.entries[href]
+    local fname = entry_file(old_entry)
     if not fname then
         fname = "e" .. tostring(self._seq)
         self._seq = self._seq + 1
-        new_entry = true
     end
     if not self.dir_ready then
         local dir_ok = U.mkdir(self.dir)
@@ -135,7 +167,11 @@ function SpineCache:put(href, content)
     end
     local ok, wrote = pcall(U.atomic_write, self.dir .. "/" .. fname, content, true)
     if ok and wrote == true then
-        if new_entry then self.entries[href] = fname end
+        self.entries[href] = {
+            file = fname,
+            size = #content,
+            fingerprint = U.content_fingerprint_data(content),
+        }
         self.dirty = true
         return true
     end

@@ -718,6 +718,19 @@ T.case("U.content_fingerprint:同体积不同内容 → 不同指纹", function(
     os.remove(a); os.remove(b)
 end)
 
+T.case("U.content_fingerprint:头尾相同但中间内容变化 → 不同指纹", function()
+    local a = os.tmpname(); local b = os.tmpname()
+    local head = ("H"):rep(65536)
+    local tail = ("T"):rep(65536)
+    local fa = io.open(a, "wb"); fa:write(head, ("A"):rep(32), tail); fa:close()
+    local fb = io.open(b, "wb"); fb:write(head, ("B"):rep(32), tail); fb:close()
+    local fp_a = U.content_fingerprint(a)
+    local fp_b = U.content_fingerprint(b)
+    T.eq(U.file_size(a), U.file_size(b), "大小相同")
+    T.ok(fp_a and fp_b and fp_a ~= fp_b, "完整指纹必须识别中间内容变化")
+    os.remove(a); os.remove(b)
+end)
+
 T.case("U.content_fingerprint:损坏/缺失文件返回 nil", function()
     local fp = U.content_fingerprint("/no/such/file.epub")
     T.ok(fp == nil, "缺失文件应返回 nil(调用方回退默认指纹)")
@@ -768,6 +781,128 @@ T.case("clean_source:已有 .orig 时固化失败 → .orig.old 恢复为 .orig(
     T.ok(not doc_moved, "doc_path 不得被移动(原书完好)")
     T.ok(not e:find("已恢复原书", 1, true) and not e:find("已恢复原注入版", 1, true),
         "不得谎称已恢复原书: " .. e)
+end)
+
+T.case("clean_source:仅有 .orig.old 时固化失败 → 恢复为 .orig", function()
+    -- 上一次中断可能已将旧备份移到 .orig.old,但尚未来得及生成新的 .orig。
+    -- 复制失败时仍须恢复这份唯一可用的干净备份,不能让后续同步继续报备份缺失。
+    local EpubInject = require("pickthought.epub_inject")
+    local existing = {
+        ["/books/书.epub"] = "old-injected",
+        ["/books/书.epub.orig.old"] = "old-clean",
+        ["/clean/原书.epub"] = "new-clean",
+    }
+    local rec = {renames = {}, removed = {}}
+    local deps = make_deps({
+        clean_source = "/clean/原书.epub",
+        file_exists = function(p) return existing[p] ~= nil end,
+        load_meta = function(p)
+            if p == "/clean/原书.epub" then
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+            end
+            return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}},
+                has = {[EpubInject.MARKER] = true}}
+        end,
+        copy_file = function() return nil, "复制失败(模拟)" end,
+        rename = function(a, b)
+            rec.renames[#rec.renames + 1] = {a, b}
+            if existing[b] then return false, "目标已存在" end
+            existing[b] = existing[a]
+            existing[a] = nil
+            return true
+        end,
+        remove = function(p)
+            existing[p] = nil
+            rec.removed[#rec.removed + 1] = p
+            return true
+        end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil, "固化失败应返回错误")
+    T.ok(tostring(err):find("旧 .orig 备份已恢复", 1, true), "应说明旧备份已恢复: " .. tostring(err))
+    T.eq(existing["/books/书.epub"], "old-injected", "当前注入书应恢复")
+    T.eq(existing["/books/书.epub.orig"], "old-clean", "唯一旧备份应恢复到 .orig")
+    T.ok(not existing["/books/书.epub.orig.old"], ".orig.old 恢复后不应残留")
+end)
+
+T.case("clean_source:当前书为干净书且最终换位失败 → 清理新 .orig", function()
+    -- 当前书没有旧 .orig 时,换位失败回滚原书的同时也必须清理新生成的 .orig,
+    -- 避免原书与备份版本不一致,下一次同步误用这份备份。
+    local existing = {
+        ["/books/书.epub"] = "original-clean",
+        ["/clean/原书.epub"] = "new-clean",
+    }
+    local deps = make_deps({
+        clean_source = "/clean/原书.epub",
+        file_exists = function(p) return existing[p] ~= nil end,
+        load_meta = function()
+            return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+        end,
+        copy_file = function(_, b)
+            existing[b] = "new-clean"
+            return true
+        end,
+        rename = function(a, b)
+            if a == "/books/书.epub.pickthought-new" and b == "/books/书.epub" then
+                return false, "最终换位失败(模拟)"
+            end
+            if existing[b] then return false, "目标已存在" end
+            existing[b] = existing[a]
+            existing[a] = nil
+            return true
+        end,
+        remove = function(p)
+            existing[p] = nil
+            return true
+        end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil, "最终换位失败应返回错误")
+    T.eq(existing["/books/书.epub"], "original-clean", "原始干净书应恢复")
+    T.ok(not existing["/books/书.epub.orig"], "无旧备份时新 .orig 应清理")
+    T.ok(not existing["/books/书.epub.old"], "回滚后不应残留 .old")
+end)
+
+T.case("clean_source:相同源连续重建复用映射缓存", function()
+    -- clean_source 的路径哈希和内容指纹相同,第二次重建应命中 map.json,
+    -- 不再从头读取正文匹配,避免离线重注重复扫描整本书。
+    local clean = os.tmpname()
+    local map = os.tmpname()
+    local f = io.open(clean, "wb")
+    f:write("clean-source-cache-test")
+    f:close()
+    local reads = 0
+    local function run_once()
+        local deps = make_deps({
+            clean_source = clean,
+            map_cache_path = map,
+            file_exists = function(p)
+                return p == clean or p == "/books/书.epub"
+            end,
+            load_meta = function(p)
+                if p == clean then
+                    return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, has = {}}
+                end
+                local EpubInject = require("pickthought.epub_inject")
+                return {spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}},
+                    has = {[EpubInject.MARKER] = true}}
+            end,
+            read_text = function(_, href)
+                reads = reads + 1
+                return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+            end,
+        })
+        return Sync.run(deps)
+    end
+    local report1, err1 = run_once()
+    T.ok(report1, "首次重建应成功: " .. tostring(err1))
+    local first_reads = reads
+    T.ok(first_reads > 0, "首次重建应读取正文匹配")
+    local report2, err2 = run_once()
+    T.ok(report2, "第二次重建应成功: " .. tostring(err2))
+    T.eq(reads, first_reads, "相同 clean_source 应命中映射缓存,不再读取正文")
+    os.remove(clean)
+    os.remove(map)
 end)
 
 T.case("clean_source:已有 .orig 时固化取消 → .orig.old 恢复为 .orig(原书未改动)", function()
