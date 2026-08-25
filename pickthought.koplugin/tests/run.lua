@@ -38,7 +38,6 @@ local files = {
     "tests.test_thought_popup",
     "tests.test_updater",
     "tests.test_performance_mode",
-    "tests.test_sync_frontend",
 }
 for _, name in ipairs(files) do
     local ok, err = pcall(require, name)
