@@ -174,3 +174,20 @@ T.case("SyncTask fork 失败时也恢复低内存设置", function()
     FFIUtil.runInSubProcess = original
     os.remove(settings_path)
 end)
+
+-- 评审七轮(2026-08-21):限速冷却判定——retry_after 未过期的书本轮暂缓网络请求;
+-- 已过期/缺失的 retry_after 不冷却(下一轮正常拉取),与「按书隔离」语义一致。
+T.case("SyncTask 冷却判定:retry_after 未过期冷却,已过期/缺失不冷却", function()
+    local now = 1700000000
+    local states = {
+        a1 = { retry_after = now + 600 },   -- 未过期 → 冷却
+        a2 = { retry_after = now - 10 },    -- 已过期 → 不冷却
+        a3 = {},                            -- 无 retry_after → 不冷却
+    }
+    local cooldown = SyncTask._cooling_books(states, { "a1", "a2", "a3" }, now)
+    T.eq(cooldown["a1"], true, "未过期 retry_after → 冷却")
+    T.eq(cooldown["a2"], nil, "已过期 retry_after → 不冷却")
+    T.eq(cooldown["a3"], nil, "无 retry_after → 不冷却")
+    local empty = SyncTask._cooling_books({}, { "x" }, now)
+    T.eq(empty["x"], nil, "无上次状态 → 不冷却")
+end)

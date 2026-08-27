@@ -23,22 +23,32 @@ _G.T = T
 _G.STUBS = require("tests.stubs")
 
 local files = {
-    "tests.test_smoke", "tests.test_epub_reader", "tests.test_annotation_style",
+    "tests.test_smoke",
+    "tests.test_epub_reader",
+    "tests.test_annotation_style",
     "tests.test_epub_inject",
-    "tests.test_binding", "tests.test_chapter_map", "tests.test_sync",
+    "tests.test_chapter_map",
     "tests.test_sync_state",
-    "tests.test_sync_clean_source",
-    "tests.test_sync_report", "tests.test_batch_sync",
-    "tests.test_web_fetch", "tests.test_power_inhibit", "tests.test_sync_task",
+    "tests.test_sync_report",
+    "tests.test_batch_sync",
+    "tests.test_power_inhibit",
+    "tests.test_sync_task",
     "tests.test_sync_gate",
-    "tests.test_thought_db", "tests.test_thoughts",
-    "tests.test_annotation_compat", "tests.test_thought_db_integrity",
+    "tests.test_thought_db",
+    "tests.test_thoughts",
+    "tests.test_annotation_compat",
+    "tests.test_thought_db_integrity",
     "tests.test_thoughts_lru",
-    "tests.test_spine_cache",
     "tests.test_thought_popup",
     "tests.test_updater",
     "tests.test_performance_mode",
-}
+    "tests.test_sync",
+    "tests.test_binding",
+    "tests.test_spine_cache",
+    "tests.test_web_fetch",
+    "tests.test_sync_clean_source",
+    "tests.test_sync_frontend",
+  }
 for _, name in ipairs(files) do
     local ok, err = pcall(require, name)
     if not ok and not tostring(err):find("module '" .. name .. "' not found", 1, true) then

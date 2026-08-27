@@ -142,9 +142,11 @@ function Plugin:reader_menu()
     local doc_bound=doc_path and Binding.get(self.store,doc_path)
     if doc_bound then
         items[#items+1]=self:annotation_style_item()
-        local state=self:_sync_state(doc_bound.book_id)
-        if state and (tonumber(state.pending) or 0)>0 then
-            items[#items+1]={text=string.format("继续拉取后续章节(还剩 %d 章)",state.pending),
+        -- 多书聚合:任何一本有待同步章节都提供「继续拉取」,不只看第一本(P1#4);
+        -- 失败书/剩余未知书同样保留入口,不让聚合 0 吞掉失败态(评审五轮 P1#2)。
+        local agg=self:_aggregate_sync_state(doc_path)
+        if agg.pending>0 or agg.books_failed>0 or agg.books_unknown>0 then
+            items[#items+1]={text=self:_continue_sync_label(agg),
                 callback=self:safe("continue_sync",function() self:sync_entry(doc_path,"sync") end)}
         end
     end
@@ -207,13 +209,17 @@ function Plugin:book_actions(path)
         callback=act(function() self:bind_book(path) end)}}
     rows[#rows+1]={{text="同步划线与想法",callback=act(function() self:sync_entry(path) end)}}
     if bound then
+        -- 划线样式入口(上游 v0.3.3 契约:文件管理器书籍操作保留样式入口)。
         rows[#rows+1]={{text="划线样式（"..self:annotation_style_label().."）",
             callback=act(function() self:list("划线样式",self:annotation_style_menu()) end)}}
-        local state=self:_sync_state(bound.book_id)
-        if state and (tonumber(state.pending) or 0)>0 then
-            rows[#rows+1]={{text=string.format("继续拉取后续章节(还剩 %d 章)",state.pending),
+        -- 多书聚合:任何一本有待同步章节都提供「继续拉取」(P1#4);失败书/未知书
+        -- 保留入口(评审五轮 P1#2)。
+        local agg=self:_aggregate_sync_state(path)
+        if agg.pending>0 or agg.books_failed>0 or agg.books_unknown>0 then
+            rows[#rows+1]={{text=self:_continue_sync_label(agg),
                 callback=act(function() self:sync_entry(path,"sync") end)}}
         end
+        rows[#rows+1]={{text="清理本书数据",callback=act(function() self:reset_book_data(path) end)}}
     end
     if self:_has_reinject_cache(path) then
         rows[#rows+1]={{text="重新注入(用上次数据,离线)",callback=act(function() self:reinject_with_clean(path) end)}}
@@ -221,9 +227,20 @@ function Plugin:book_actions(path)
     if bound or U.file_exists(path..".orig") then
         rows[#rows+1]={{text="重置本书(清数据+还原原版)",callback=act(function() self:reset_book_data(path) end)}}
     end
+    if bound then
+        local n=#Binding.list(self.store,path)
+        rows[#rows+1]={{text=string.format("管理已绑定书目(%d)",n),callback=act(function() self:manage_bindings(path) end)}}
+    end
     rows[#rows+1]={{text="取消",callback=function() UIManager:close(dialog) end}}
     local title=self:doc_title_guess(path)
-    if bound then title=title.."\n已绑定:"..tostring(bound.title or bound.book_id) end
+    if bound then
+        local list=Binding.list(self.store,path)
+        if #list>1 then
+            title=title..string.format("\n已绑定 %d 本微信读书书",#list)
+        else
+            title=title.."\n已绑定:"..tostring(bound.title or bound.book_id)
+        end
+    end
     dialog=ButtonDialog:new{title=title,buttons=rows}
     UIManager:show(dialog)
 end
@@ -252,15 +269,49 @@ function Plugin:bind_book(path,on_bound)
     local ButtonDialog=require("ui/widget/buttondialog")
     local display=tostring(current.title or current.book_id or "")
     if tostring(current.author or "")~="" then display=display.." · "..tostring(current.author) end
+    local list=Binding.list(self.store,path)
     local dialog
     dialog=ButtonDialog:new{
         title="当前绑定:\n"..display,
         buttons={
             {{text="重新绑定",callback=function() UIManager:close(dialog); self:bind_search(path,on_bound) end}},
-            {{text="解除绑定",callback=function() UIManager:close(dialog); Binding.clear(self.store,path); self:toast("已解除绑定") end}},
+            {{text=string.format("管理已绑定书目(%d)",#list),callback=function() UIManager:close(dialog); self:manage_bindings(path,on_bound) end}},
+            {{text="解除绑定",callback=function() UIManager:close(dialog); Binding.clear(self.store,path); self:toast("已解除绑定"); self:_rebuild_from_orig(path) end}},
             {{text="取消",callback=function() UIManager:close(dialog) end}},
         },
     }
+    UIManager:show(dialog)
+end
+
+-- 多书绑定管理:查看已绑定的全部微信读书书,可逐本移除或追加,亦可一键解绑全部。
+function Plugin:manage_bindings(path,on_bound)
+    path=path or self:current_doc_path()
+    if not path then return end
+    local ButtonDialog=require("ui/widget/buttondialog")
+    local list=Binding.list(self.store,path)
+    local dialog
+    local function act(fn) return function() UIManager:close(dialog); fn() end end
+    local rows={}
+    for _,rec in ipairs(list) do
+        local label=tostring(rec.title or rec.book_id)
+        if tostring(rec.author or "")~="" then label=label.." · "..tostring(rec.author) end
+        rows[#rows+1]={{text="移除:"..label,callback=act(function()
+            Binding.remove(self.store,path,rec.book_id)
+            self:toast("已移除:"..label)
+            -- 从 .orig 按剩余绑定重建,移除被解绑书的内容残留(P2#7)。
+            self:_rebuild_from_orig(path)
+            self:manage_bindings(path,on_bound)
+        end)}}
+    end
+    rows[#rows+1]={{text="添加另一本微信读书书",callback=act(function() self:bind_search(path,on_bound) end)}}
+    if #list>0 then
+        rows[#rows+1]={{text="解除全部绑定",callback=act(function()
+            Binding.clear(self.store,path); self:toast("已解除全部绑定"); self:_rebuild_from_orig(path)
+        end)}}
+    end
+    rows[#rows+1]={{text="取消",callback=function() UIManager:close(dialog) end}}
+    local title=#list>0 and string.format("已绑定 %d 本微信读书书:",#list) or "尚未绑定任何微信读书书"
+    dialog=ButtonDialog:new{title=title,buttons=rows}
     UIManager:show(dialog)
 end
 
@@ -689,8 +740,9 @@ function Plugin:sync_entry(path,mode,opts)
     opts=opts or {}  -- 多数调用点只传 path/mode,opts 缺省空表(防 .confirmed 访问崩溃)
     if self.sync_task and self.sync_task:busy() then self:_show_active_sync_dialog() return end
     if not tostring(path or ""):lower():match("%.epub$") then self:info("只支持 EPUB 格式的本地书") return end
-    -- 仅联网同步模式需要登录:离线重注(reinject)只用本地缓存 + 用户选定的干净原书,
-    -- 不依赖微信读书在线接口,退出登录后 clean_source 逃生舱仍可用(作者第8轮意见)。
+    -- 离线重注(reinject,含解绑后按剩余绑定重建)只用本地缓存 + 用户选定的干净原书,
+    -- 不碰网络、无需登录;联网同步(sync)仍须登录。clean_source 逃生舱在退出登录后
+    -- 仍可用(作者第8轮意见),登录失效却本地有缓存时重建也不再被拦截(评审三轮 P1#2)。
     if mode ~= "reinject" and not self:require_login() then return end
     local EpubReader=require("pickthought.epub_reader")
     local available,gate_err=EpubReader.available()
@@ -710,13 +762,31 @@ function Plugin:sync_entry(path,mode,opts)
     -- 已有完整缓存(.completed)时,弹窗说明行为(从缓存继续,非清缓存重拉)。
     -- 用户确认后才同步;要全新重拉引导走「重置本书」。opts.confirmed 避免重复弹窗。
     if not opts.confirmed and mode~="reinject" then
-        local completed=self.store:book_cache_path(bound.book_id).."/sync-cache/.completed"
-        if U.file_exists(completed) then
-            local state=self:_sync_state(bound.book_id) or {}
-            local processed=tonumber(state.total) or math.max(0,(tonumber(state.next_index) or 1)-1)
-            UIManager:show(ConfirmBox:new{
+        -- 多书绑定:任何一本书已有完整缓存即视为「可续传」。
+        local completed=false
+        for _, bid in ipairs(self:_book_ids(path)) do
+            if U.file_exists(self.store:book_cache_path(bid).."/sync-cache/.completed") then completed=true; break end
+        end
+        if completed then
+            -- 多书聚合:已处理章数 = 各书总量 - 各书待处理之和,不只看第一本(P1#4)。
+            local agg=self:_aggregate_sync_state(path)
+            local processed=math.max(0,(tonumber(agg.total) or 0)-(tonumber(agg.pending) or 0))
+            local text
+            if #self:_book_ids(path)>1 then
+                -- 多书:不同远程书章节坐标独立,不推导单一连续章节范围(评审五轮 P1#1),
+                -- 只展示聚合数量 + 失败/未知提示。
+                local extra={}
+                if agg.books_failed>0 then extra[#extra+1]=string.format("%d 本上次同步失败",agg.books_failed) end
+                if agg.books_unknown>0 then extra[#extra+1]=string.format("%d 本剩余章节未知",agg.books_unknown) end
+                local note=#extra>0 and ("\n"..table.concat(extra,"；")..",本次将重新尝试") or ""
+                text=string.format("检测到本书已有完整同步缓存\n\n多书聚合:已处理 %d 章,还剩 %d 章\n本次从各书各自的续传位置开始检查新增章节\n结束章节需获取最新目录后确定\n同时补齐缓存中拉取失败的章节%s\n\n如需全部重新拉取,请先使用「重置本书」选项。",
+                    processed,tonumber(agg.pending) or 0,note)
+            else
                 text=string.format("检测到本书已有完整同步缓存\n\n当前已处理到第 %d 章\n本次将从第 %d 章开始检查新增章节\n结束章节需获取最新目录后确定\n同时补齐缓存中拉取失败的章节\n\n如需全部重新拉取,请先使用「重置本书」选项。",
-                    processed,processed+1),
+                    processed,processed+1)
+            end
+            UIManager:show(ConfirmBox:new{
+                text=text,
                 ok_text="继续",
                 ok_callback=function()
                     opts.confirmed=true
@@ -727,7 +797,8 @@ function Plugin:sync_entry(path,mode,opts)
             return
         end
         local limit=tonumber(self.store:preferences().sync_batch_limit) or 200
-        local plan=BatchSync.plan(self:_sync_state(bound.book_id),limit)
+        -- 多书:用聚合状态生成续拉提示(实际同步按每本书各自的 state.json 续传,P1#4)。
+        local plan=BatchSync.plan(#self:_book_ids(path)>1 and self:_aggregate_sync_state(path) or self:_sync_state(bound.book_id),limit)
         if plan then
             UIManager:show(ConfirmBox:new{
                 text=BatchSync.prompt_text(plan,opts.background==true),
@@ -756,18 +827,29 @@ end
 function Plugin:_has_reinject_cache(path)
     local bound = path and Binding.get(self.store, path)
     if not bound then return false end
-    -- 当前书含注入标记 → 提供"重新注入"入口(即使 .orig 丢失也能进 clean_source 逃生舱);
-    -- 干净原书(无标记)则默认隐藏,避免把干净原书当注入版误删(P1, 2026-08-15 二轮)。
+    -- 多书:所有绑定书都必须已有 chapters.json 缓存,否则后台重注必然失败(评审四轮 P1#5)。
+    local ids = self:_book_ids(path)
+    if #ids == 0 then return false end
+    local all_cached = true
+    for _, bid in ipairs(ids) do
+        if not U.file_exists(self.store:book_cache_path(bid) .. "/sync-cache/chapters.json") then
+            all_cached = false
+            break
+        end
+    end
+    if all_cached then
+        -- 全部绑定书已缓存(含干净原书已同步),提供离线重注入口。
+        return true
+    end
+    -- clean_source 逃生舱:当前书含注入标记 -> 直接提供;干净原书(无标记)但章节缓存
+    -- (map.json)已存在仍保留入口,把"能否安全重建"交给同步层决定(作者意见 #3 / 2026-08-15 二轮)。
     local EpubReader = require("pickthought.epub_reader")
     local EpubInject = require("pickthought.epub_inject")
     local ok, meta = pcall(EpubReader.load, path)
     if not ok or not meta then return false end
     local has_inject = meta.has and meta.has[EpubInject.MARKER] == true
     if has_inject then return true end
-    -- 作者意见 #3(2026-08-17):首次同步在章节缓存已写入、但首次注入失败时,
-    -- 当前书仍是干净原书,用户反而无法从菜单进入离线恢复流程。
-    -- 若章节缓存(map.json)已存在,仍保留重注入口,把"能否安全重建"交给同步层决定。
-    local has_cache = U.file_exists(self.store:book_cache_path(bound.book_id) .. "/sync-cache/map.json")
+    local has_cache = U.file_exists(self.store:book_cache_path(ids[1]) .. "/sync-cache/map.json")
     return Binding.offer_reinject(has_inject, has_cache)
 end
 
@@ -808,6 +890,76 @@ function Plugin:_sync_state(book_id)
     return state
 end
 
+-- 聚合某本地书绑定的全部微信读书书的同步状态(P1#4):继续拉取 / 自动拉取 /
+-- 报告不应只读取第一本绑定书,否则第二本有待同步内容时状态与范围会错。
+-- 返回 {pending,total,next_index,completed,books_with_pending,books_failed,
+--       books_unknown,multi_book,per_book={[bid]=state}}。
+-- next_index 取「有待同步书里最早的续传位置」,使 BatchSync.plan 的起始章合理。
+-- pending=nil(章节列表失败/为空)= 剩余未知:不得当作 0,单独计数 books_unknown,
+-- 失败书不因聚合而消失(评审五轮 P1#2)。
+function Plugin:_aggregate_sync_state(path)
+    local ids=self:_book_ids(path)
+    local agg={pending=0,total=0,next_index=0,completed=false,books_with_pending=0,
+        books_failed=0,books_unknown=0,multi_book=#ids>1,per_book={}}
+    if #ids==0 then return agg end
+    local min_next=nil
+    for _, bid in ipairs(ids) do
+        local st=self:_sync_state(bid) or {}
+        agg.per_book[tostring(bid)]=st
+        if st.failed then agg.books_failed=agg.books_failed+1 end
+        local p=tonumber(st.pending)
+        if p==nil then
+            agg.books_unknown=agg.books_unknown+1
+        else
+            agg.pending=agg.pending+p
+            if p>0 then
+                agg.books_with_pending=agg.books_with_pending+1
+                local nidx=tonumber(st.next_index) or 0
+                if min_next==nil or nidx<min_next then min_next=nidx end
+            end
+        end
+        agg.total=agg.total+(tonumber(st.total) or 0)
+        agg.next_index=math.max(agg.next_index,tonumber(st.next_index) or 0)
+        if U.file_exists(self.store:book_cache_path(bid).."/sync-cache/.completed") then agg.completed=true end
+    end
+    if min_next~=nil then agg.next_index=min_next end
+    return agg
+end
+
+-- 「继续拉取」菜单标签(多书聚合,评审五轮 P1#2):待同步章数之外,失败书/未知书
+-- 也要在入口可见,不能因聚合 pending 为 0 而让「继续拉取」入口凭空消失。
+function Plugin:_continue_sync_label(agg)
+    local label
+    if (agg.pending or 0) > 0 then
+        label=string.format("继续拉取后续章节(还剩 %d 章)",agg.pending)
+    else
+        label="继续拉取后续章节(重试失败书)"
+    end
+    local extra={}
+    if agg.books_with_pending>1 then extra[#extra+1]=string.format("%d 本待同步",agg.books_with_pending) end
+    if agg.books_failed>0 then extra[#extra+1]=string.format("%d 本失败",agg.books_failed) end
+    if agg.books_unknown>0 then extra[#extra+1]=string.format("%d 本剩余未知",agg.books_unknown) end
+    if #extra>0 then label=label.."（"..table.concat(extra,"、").."）" end
+    return label
+end
+
+-- 该本地书绑定的全部微信读书书 id(数组,按绑定时间升序),供多书同步入口统一
+-- 传 book_ids(1:N 合集场景)。无绑定时回退到主绑定单元素列表,单绑定与旧行为一致。
+function Plugin:_book_ids(path)
+    local list = Binding.list(self.store, path)
+    local ids = {}
+    for _, rec in ipairs(list) do
+        if type(rec) == "table" and type(rec.book_id) == "string" and rec.book_id ~= "" then
+            ids[#ids + 1] = rec.book_id
+        end
+    end
+    if #ids == 0 then
+        local b = Binding.get(self.store, path)
+        if b and type(b.book_id) == "string" and b.book_id ~= "" then ids[#ids + 1] = b.book_id end
+    end
+    return ids
+end
+
 function Plugin:_batch_prompt_path(book_id)
     return self.store:book_cache_path(book_id).."/sync-cache/prompt.json"
 end
@@ -838,8 +990,10 @@ function Plugin:_start_sync_task(path,bound,mode,opts)
     opts=opts or {}
     local title=U.trim(tostring(bound.title or ""))
     if title=="" then title=self:doc_title_guess(path) end
-    local runtime={doc_path=path,book_id=bound.book_id,title=title,mode=mode,started_at=os.time(),dialog=nil,background=false}
-    local ok,err=self.sync_task:start({doc_path=path,book_id=bound.book_id,title=title,mode=mode,
+    -- 多书绑定:统一把全部绑定书 id 传给后台任务,各书独立续传/注入(1:N 合集)。
+    local book_ids=self:_book_ids(path)
+    local runtime={doc_path=path,book_id=bound.book_id,book_ids=book_ids,title=title,mode=mode,started_at=os.time(),dialog=nil,background=false}
+    local ok,err=self.sync_task:start({doc_path=path,book_id=bound.book_id,book_ids=book_ids,title=title,mode=mode,
             clean_source=opts.clean_source,allow_memory_retry=opts.background ~= true},
         function(state) self:_on_sync_progress(runtime,state) end,
         function(result) self:_finish_sync(runtime,result) end)
@@ -948,9 +1102,19 @@ function Plugin:_maybe_auto_batch(page)
     if not path or not tostring(path):lower():match("%.epub$") then return end
     local bound=Binding.get(self.store,path)
     if not bound then return end
+    -- 捕获当前阅读上下文,供下方 _resolve_sync_context 校验「仍是同一本书」;
+    -- 此前该函数引用了未定义的 operation_context(=nil),onPageUpdate 的 pcall 会把
+    -- 自动/确认同步的启动错误吞掉,表现为静默失效(评审四轮 P1#2)。切书后该上下文
+    -- 不再匹配当前文档,resolve 返回 nil 触发过期提示。
     local operation_context=self:_capture_sync_context(path,bound)
-    local state=self:_sync_state(bound.book_id)
-    if not state or (tonumber(state.pending) or 0)<=0 then return end
+    -- 多书聚合坐标与本地 EPUB 物理章节无可靠偏移映射,基于聚合 next_index/pending
+    -- 的自动触发会误拉/漏拉(评审三轮 P1#3);多书场景暂禁用自动触发,用户仍可
+    -- 手动「继续拉取」(走每本书各自的 state.json 续传)。
+    if #self:_book_ids(path) > 1 then return end
+    -- 多书聚合:任何一本有待同步章节都应触发自动/询问拉取,不只看第一本(P1#4)。
+    local agg=self:_aggregate_sync_state(path)
+    if agg.pending<=0 then return end
+    local state=agg
     local doc=self.ui and self.ui.document
     if not doc then return end
     local ok_pages,total_pages=pcall(function() return doc:getPageCount() end)
@@ -958,7 +1122,9 @@ function Plugin:_maybe_auto_batch(page)
     local fragment,fragment_total=self:_batch_fragment_position(doc,page,total_pages)
     local preferences=self.store:preferences()
     local auto=BatchSync.auto_enabled(preferences)
-    local position_key=table.concat({tostring(bound.book_id),tostring(fragment),
+    -- 多书:以绑定书集合为去重/忽略键,避免第一本忽略状态误伤其他书(P1#4)。
+    local book_key=table.concat(self:_book_ids(path),",")
+    local position_key=table.concat({book_key,tostring(fragment),
         tostring(fragment_total),tostring(state.next_index)},":")
     if self._batch_position_log_key~=position_key then
         self._batch_position_log_key=position_key
@@ -971,7 +1137,7 @@ function Plugin:_maybe_auto_batch(page)
         state=state, batch_limit=preferences.sync_batch_limit,
         page=page, total_pages=total_pages,
         fragment=fragment, fragment_total=fragment_total,
-        dismissed=not auto and self:_batch_prompt_state(bound.book_id) or nil,
+        dismissed=not auto and self:_batch_prompt_state(book_key) or nil,
     }
     if not should_offer then return end
     if not self:logged_in() or not self:is_online() then return end
@@ -1011,7 +1177,7 @@ function Plugin:_maybe_auto_batch(page)
         cancel_callback=function()
             self._batch_prompt_open=nil
             local dismissal=BatchSync.dismissal(context)
-            if dismissal then self:_save_batch_prompt_state(bound.book_id,dismissal) end
+            if dismissal then self:_save_batch_prompt_state(book_key,dismissal) end
         end,
     })
 end
@@ -1132,6 +1298,7 @@ function Plugin:_sync_run(path,bound)
         return Sync.run{
             doc_path=path,
             book_id=bound.book_id,
+            book_ids=self:_book_ids(path),
             api=self.api,
             annotations=WebFetch:new(self.api),
             load_meta=function(p) return EpubReader.load(p) end,
@@ -1139,11 +1306,14 @@ function Plugin:_sync_run(path,bound)
             read_spine=function(m,callback) return EpubReader.each_spine(m,callback) end,
             save_thoughts=function(book_id,uid,groups) return Thoughts.save(self.store,book_id,uid,groups) end,
             merge_thoughts=function(book_id,uid,from,into) return Thoughts.merge(self.store,book_id,uid,from,into) end,
-            map_cache_path=self.store:book_dir(bound.book_id).."/sync-cache/map.json",
+            -- P1#2:前台也用函数式 map_cache_path,与后台一致(每书独立 map.json)。
+            map_cache_path=function(bid) return self.store:book_dir(bid).."/sync-cache/map.json" end,
             inject=function(src,book_id,mapped,dest,options)
                 return EpubInject.inject_copy(src,book_id,mapped,
                     {dest=dest,append=options and options.append==true,
                      meta=options and options.meta,
+                     -- 多书:透传全部绑定书 id,marker 记录完整来源(P1#4)。
+                     book_ids=options and options.book_ids,
                      -- 前台 Trapper 回退路径:降级让出必须用非阻塞方式。本路径 Sync.run
                      -- 处于 xpcall 内,Lua 5.1 无法跨 C 调用 yield,故不能用 coroutine.yield,
                      -- 也不能用 fu.usleep(会阻塞前台协程、不交还 UIManager)。这里显式传入
@@ -1190,8 +1360,17 @@ function Plugin:_sync_report(report)
         end
         return
     end
+    -- 逐书明细标题(P1#4):从当前书的绑定记录取每本书的显示名。
+    local titles={}
+    local p=self:current_doc_path()
+    if p then
+        for _, rec in ipairs(Binding.list(self.store,p)) do
+            if rec.book_id then titles[tostring(rec.book_id)]=rec.title or rec.book_id end
+        end
+    end
     local lines=SyncReport.build(report,{
         auto_batch=BatchSync.auto_enabled(self.store:preferences()),
+        titles=titles,
     })
     logger.info("[撷思][Sync] report",
         "chapters=",tostring(report.chapters_with_data),"/",tostring(report.chapters_total),
@@ -1212,7 +1391,7 @@ function Plugin:_sync_report(report)
     })
 end
 
-function Plugin:restore_original(path)
+function Plugin:restore_original(path, confirmed)
     path=path or self:current_doc_path()
     if not path then self:info("请先打开一本本地书") return end
     if self.sync_task and self.sync_task:busy() then
@@ -1223,6 +1402,20 @@ function Plugin:restore_original(path)
     if not U.file_exists(backup) then self:info("没有找到原书备份("..backup..")") return end
     -- 书正开着时,reloadDocument 会自动重载原版;文管里还原则下次打开即原版。
     local is_open=path==self:current_doc_path()
+    local function do_restore()
+        os.remove(path)
+        local ok,err=os.rename(backup,path)
+        if not ok then self:info("还原失败:\n"..tostring(err or "重命名失败")); return end
+        if is_open and self.ui and type(self.ui.reloadDocument)=="function" then
+            -- 自动重载:丢弃注入版缓存,重读已替换的原版文件,免得用户手动关闭再开。
+            local reload_ok=pcall(function() self.ui:reloadDocument(nil, true) end)
+            self:toast(reload_ok and "已还原原书" or "已还原原书,请重新打开本书",3)
+        else
+            self:toast("已还原原书",3)
+        end
+    end
+    -- confirmed=true 时静默还原(解绑后重建用,避免二次确认),否则弹确认框。
+    if confirmed then do_restore(); return end
     UIManager:show(ConfirmBox:new{
         text="将用原书备份覆盖当前划线版,书内注入的划线与想法会移除(想法缓存保留)。",
         ok_text="还原原书",
@@ -1247,6 +1440,25 @@ function Plugin:restore_original(path)
     })
 end
 
+-- 绑定集合变化(移除/解绑)后,从 .orig 按剩余绑定重建注入版,移除已解绑书的内容残留(P2#7)。
+-- 无剩余绑定则直接还原原版(移除全部注入内容);原书备份缺失则提示无法重建。
+function Plugin:_rebuild_from_orig(path)
+    local orig = path..".orig"
+    if not U.file_exists(orig) then
+        self:toast("未找到原书备份,无法重建(已解绑,注入内容可能残留)")
+        return
+    end
+    local ids = self:_book_ids(path)
+    if #ids == 0 then
+        -- 全部解绑:还原原版,移除所有注入内容。
+        self:restore_original(path, true)
+        return
+    end
+    -- 仍有绑定:离线重建(用各书本地缓存),不重新联网拉取;重建后只含剩余书内容。
+    self:toast("正在按剩余绑定重建注入版…")
+    self:sync_entry(path, "reinject")
+end
+
 -- 重置本书:清该书所有同步缓存/想法/映射 + 还原原书(若有注入)。
 -- 双重确认(破坏性)。回到"未同步+原版书"状态,保留绑定关系。重新同步即可恢复。
 local RESET_TARGETS = {"sync-cache", "thoughts", "thoughts.db", "thoughts.db-wal", "thoughts.db-shm"}
@@ -1257,11 +1469,16 @@ function Plugin:reset_book_data(path)
     if not path then self:info("请先选择一本书"); return end
     local bound = Binding.get(self.store, path)
     local has_orig = U.file_exists(path..".orig")
-    if not bound and not has_orig then self:info("这本书无撷思数据,也无原书备份"); return end
+    -- 多书绑定:每本书有独立 sync-cache,重置需逐本清理。
+    local book_ids = self:_book_ids(path)
+    local book_dirs = {}
+    for _, bid in ipairs(book_ids) do book_dirs[#book_dirs+1] = self.store:book_dir(bid) end
+    if #book_dirs == 0 and not has_orig then self:info("这本书无撷思数据,也无原书备份"); return end
     local title = self:doc_title_guess(path)
-    local book_dir = bound and self.store:book_dir(bound.book_id) or nil
     local lines = {}
-    if book_dir then lines[#lines+1] = "• 清同步缓存/想法数据库/章节映射" end
+    if #book_dirs > 0 then
+        lines[#lines+1] = "• 清同步缓存/想法数据库/章节映射" .. (#book_dirs > 1 and string.format("(%d 本)", #book_dirs) or "")
+    end
     if has_orig then lines[#lines+1] = "• 还原原书(移除书内划线)" end
     UIManager:show(ConfirmBox:new{
         text = string.format("将重置《%s》:\n\n%s\n\n保留绑定关系,重新同步即可恢复。", title, table.concat(lines, "\n")),
@@ -1273,7 +1490,7 @@ function Plugin:reset_book_data(path)
                 ok_text = "确认重置",
                 ok_callback = function()
                     if self:_sync_mutation_blocked("同步任务已开始,本次重置已取消") then return end
-                    self:_do_reset_book_data(book_dir, path, title)
+                    self:_do_reset_book_data(book_dirs, path, title)
                 end,
                 cancel_text = "取消",
             })
@@ -1310,11 +1527,10 @@ function Plugin:_restore_original_file(path)
     return ok == true
 end
 
-function Plugin:_do_reset_book_data(book_dir, path, title)
-    if self:_sync_mutation_blocked("同步任务进行中,暂不能重置本书") then return end
+function Plugin:_do_reset_book_data(book_dirs, path, title)
     local cleared, size_bytes = 0, 0
-    if book_dir then
-        size_bytes = self:_dir_size(book_dir)
+    for _, book_dir in ipairs(book_dirs) do
+        size_bytes = size_bytes + self:_dir_size(book_dir)
         for _, name in ipairs(RESET_TARGETS) do
             if U.remove_tree(book_dir .. "/" .. name) then cleared = cleared + 1 end
         end
