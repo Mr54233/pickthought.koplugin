@@ -196,8 +196,9 @@ function Api:web_chapter_reviews(id, uid)
 end
 function Api:book(id) return self:call("/book/info", {bookId=tostring(id)}) end
 
--- 章节列表走原版实测过的 web 端点(Cookie 鉴权,响应为书记录嵌套形状
--- {data=[{bookId, updated=[...]}]});网关的 /book/chapterinfo 无历史消费者,
+-- 章节列表走原版实测过的 web 端点(Cookie 鉴权,响应为
+-- {bookId?, synckey?, chapters:[{chapterUid,title,chapterIdx,...}]}
+-- 顶层 chapters 数组,注意不是 data);网关的 /book/chapterinfo 无历史消费者,
 -- 真机返回 HTTP 403,仅保留为兜底。
 function Api:web_chapters(id)
     id = tostring(id or "")
@@ -260,6 +261,25 @@ local AGENT_ANNOTATION_OPTIONS = {
     rate_limit_cooldown = 900,
 }
 
+-- 按书隔离限速/节流 scope(评审八轮 P1#2):基础 scope 固定为 annotations-web/
+-- annotations-agent,但实际请求须把 book_id 并入 scope,使 A 书触发的 429 冷却锁
+-- 只阻塞 A 书自身、不 fail-fast 掉 B 书的同接口请求(Http 层按 scope 生成独立
+-- 锁文件 _rate_limit_path/_pacing_path)。基础表保持不变,仅此处构建含 book_id 的副本。
+local function annotation_options_with_book(base, book_id)
+    return {
+        auth = base.auth,
+        retries = base.retries,
+        timeout = base.timeout,
+        pacing_scope = base.pacing_scope .. "-" .. tostring(book_id or "global"),
+        min_interval = base.min_interval,
+        pacing_jitter = base.pacing_jitter,
+        shared_pacing = base.shared_pacing,
+        rate_limit_scope = base.rate_limit_scope .. "-" .. tostring(book_id or "global"),
+        rate_limit_fail_fast = base.rate_limit_fail_fast,
+        rate_limit_cooldown = base.rate_limit_cooldown,
+    }
+end
+
 local function annotation_batch_error(value)
     local text = tostring(value or ""):lower()
     return text:find("params error", 1, true) ~= nil
@@ -306,11 +326,11 @@ function Api:underlines(id, chapter_uid)
                     return self.http:get_json(url, {
                         auth = true, retries = WEB_ANNOTATION_OPTIONS.retries,
                         timeout = WEB_ANNOTATION_OPTIONS.timeout,
-                        pacing_scope = WEB_ANNOTATION_OPTIONS.pacing_scope,
+                        pacing_scope = WEB_ANNOTATION_OPTIONS.pacing_scope .. "-" .. tostring(id),
                         min_interval = WEB_ANNOTATION_OPTIONS.min_interval,
                         pacing_jitter = WEB_ANNOTATION_OPTIONS.pacing_jitter,
                         shared_pacing = WEB_ANNOTATION_OPTIONS.shared_pacing,
-                        rate_limit_scope = WEB_ANNOTATION_OPTIONS.rate_limit_scope,
+                        rate_limit_scope = WEB_ANNOTATION_OPTIONS.rate_limit_scope .. "-" .. tostring(id),
                         rate_limit_fail_fast = WEB_ANNOTATION_OPTIONS.rate_limit_fail_fast,
                         rate_limit_cooldown = WEB_ANNOTATION_OPTIONS.rate_limit_cooldown,
                         headers = annotation_headers(id, uid),
@@ -329,7 +349,8 @@ function Api:underlines(id, chapter_uid)
     end
     logger.warn("[撷思][Api] web underlines unavailable; using Skill Gateway",
         "book=", tostring(id), "chapter=", tostring(chapter_uid), "error=", tostring(value))
-    local result = self:_chapter_call("/book/underlines", id, chapter_uid, nil, AGENT_ANNOTATION_OPTIONS)
+    local result = self:_chapter_call("/book/underlines", id, chapter_uid, nil,
+        annotation_options_with_book(AGENT_ANNOTATION_OPTIONS, id))
     if type(result) == "table" then result._annotation_source = "agent" end
     return result
 end
@@ -360,11 +381,11 @@ function Api:readreviews(id, chapter_uid, batch)
                     }, {
                         auth = true, retries = WEB_ANNOTATION_OPTIONS.retries,
                         timeout = WEB_ANNOTATION_OPTIONS.timeout,
-                        pacing_scope = WEB_ANNOTATION_OPTIONS.pacing_scope,
+                        pacing_scope = WEB_ANNOTATION_OPTIONS.pacing_scope .. "-" .. tostring(id),
                         min_interval = WEB_ANNOTATION_OPTIONS.min_interval,
                         pacing_jitter = WEB_ANNOTATION_OPTIONS.pacing_jitter,
                         shared_pacing = WEB_ANNOTATION_OPTIONS.shared_pacing,
-                        rate_limit_scope = WEB_ANNOTATION_OPTIONS.rate_limit_scope,
+                        rate_limit_scope = WEB_ANNOTATION_OPTIONS.rate_limit_scope .. "-" .. tostring(id),
                         rate_limit_fail_fast = WEB_ANNOTATION_OPTIONS.rate_limit_fail_fast,
                         rate_limit_cooldown = WEB_ANNOTATION_OPTIONS.rate_limit_cooldown,
                         headers = annotation_headers(id, uid),
@@ -386,7 +407,7 @@ function Api:readreviews(id, chapter_uid, batch)
         "book=", tostring(id), "chapter=", tostring(chapter_uid),
         "ranges=", tostring(#payload_batch), "error=", tostring(value))
     local result = self:_chapter_call("/book/readreviews", id, chapter_uid,
-        {reviews = payload_batch}, AGENT_ANNOTATION_OPTIONS)
+        {reviews = payload_batch}, annotation_options_with_book(AGENT_ANNOTATION_OPTIONS, id))
     if type(result) == "table" then result._annotation_source = "agent" end
     return result
 end

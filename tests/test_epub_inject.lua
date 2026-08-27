@@ -465,6 +465,8 @@ T.case("大字体/媒体(woff2/mp3)同样走磁盘中转", function()
     T.eq(by_path["OEBPS/Audio/clip.mp3"].content, blob, "大媒体逐字节原样")
 end)
 
+-- 上游 455bd4c:磁盘中转写入完成但 addPath 返回 EOF false(未设 err)时,
+-- 不应误判失败并回退重复 addPath,导致大媒体在副本中重复出现。
 T.case("磁盘中转写入完成但返回 EOF false,不重复写入", function()
     local big = string.rep("E", 600 * 1024)
     local files = book_files()
@@ -514,6 +516,40 @@ T.case("磁盘写入失败直接终止,不回退也不 rename", function()
     end
 end)
 
+T.case("多书同 uid 不串书:复合键聚合 + marker 记录 book_id (P1#3)", function()
+    -- 两本书各自章节,chapter_uid 同为 "42"(不同书常出现相同 uid),
+    -- 分别落在不同 spine 文件,避免同文件二次 apply 互相干扰;重点验证聚合层不串书。
+    local chapters = {
+        {book_id = "b001", chapter_uid = "42", href = "Text/ch1.xhtml",
+         underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+         review_map = {["0-7"] = {{content = "甲书想法", author = "A"}}}},
+        {book_id = "b002", chapter_uid = "42", href = "Text/ch2.xhtml",
+         underlines = {{range = "0-7", markText = "滟滟随波千万里"}},
+         review_map = {["0-7"] = {{content = "乙书想法", author = "B"}}}},
+    }
+    local stats, err, Arc = run_inject(book_files(), chapters, nil, {book_ids = {"b001", "b002"}})
+    T.ok(stats, "多书 inject_copy 应成功: " .. tostring(err))
+    T.eq(stats.injected, 2, "两本书各注入 1 章(同 uid 不互相吞计数)")
+    T.eq(stats.underlines_resolved, 2, "两书划线各自计入,不合并去重")
+    T.eq(stats.thoughts_linked, 2, "两书想法各自计入,不被同 uid 合并")
+    T.eq(stats.thoughts_linked_by_uid["b001/42"], 1, "b001 想法按复合键 book_id/uid")
+    T.eq(stats.thoughts_linked_by_uid["b002/42"], 1, "b002 想法按复合键 book_id/uid")
+
+    -- MARKER 每条章节记录带 book_id,可追溯归属;顶层兼容字段保留首本。
+    local entries = STUBS.written(Arc._last_writer)
+    local marker_entry
+    for _, e in ipairs(entries) do if e.path == EpubInject.MARKER then marker_entry = e end end
+    T.ok(marker_entry, "副本含 MARKER 文件(" .. tostring(EpubInject.MARKER) .. ")")
+    local ok_m, marker = pcall(Json.decode, marker_entry.content)
+    T.ok(ok_m and type(marker) == "table", "MARKER 可解码")
+    T.eq(#marker.chapters, 2, "MARKER 记录 2 章(两书各一,未因同 uid 合并)")
+    T.eq(marker.chapters[1].book_id, "b001", "首条记录归属 b001")
+    T.eq(marker.chapters[2].book_id, "b002", "次条记录归属 b002")
+    T.eq(marker.book_id, "b001", "顶层 book_id 兼容字段=首本")
+    T.ok(marker.book_ids and marker.book_ids[1] == "b001" and marker.book_ids[2] == "b002",
+        "顶层 book_ids 含全部绑定书")
+end)
+
 -- fix #1:降级让出与 opts.progress 解耦。前台注入路径(main.lua 的 inject 包装)不传
 -- progress,但慢条目仍须触发降级并让出 CPU,否则"注入热路径降级"形同虚设。
 T.case("降级让出不依赖 opts.progress(慢条目驱动)", function()
@@ -539,6 +575,3 @@ T.case("降级让出不依赖 opts.progress(预置降级)", function()
     T.ok(stats, "未传 progress 时 inject_copy 仍应成功: " .. tostring(err))
     T.ok(rest_calls > 0, "已降级时即使无 progress 也应让出")
 end)
-
--- 前台禁用阻塞式 usleep 的集成测试已迁移至 tests/test_sync_frontend.lua:
--- 经 main.lua:_sync_run 真实适配器驱动(作者 #17 收尾复核),而非此处手动构造 no-op PerformanceMode。

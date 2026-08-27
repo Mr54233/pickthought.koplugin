@@ -26,6 +26,21 @@ function M.plan(state, batch_limit)
     local pending = tonumber(state.pending)
     if total and pending and pending <= 0 then return nil end
 
+    -- 多书:不同远程书的章节坐标是彼此独立的序列,不能推导单一连续章节范围
+    -- (评审五轮 P1#1:伪范围「从第 1 章拉到第 7 章」不属于任何一本书)。
+    -- 只返回聚合数量 + 逐书明细,start/end 置空,展示层不得生成跨书区间。
+    if state.multi_book == true then
+        if (total or 0) == 0 and (pending or 0) == 0 then return nil end
+        return {
+            multi = true,
+            total = total,
+            pending = pending and math.max(0, integer(pending)) or nil,
+            batch_limit = batch_limit,
+            books_with_pending = positive(state.books_with_pending),
+            per_book = type(state.per_book) == "table" and state.per_book or nil,
+        }
+    end
+
     local start_index = positive(state.next_index)
     if not start_index and total and pending then
         start_index = math.max(1, total - math.max(0, integer(pending)) + 1)
@@ -48,6 +63,48 @@ end
 
 function M.prompt_text(plan, background)
     if not plan then return nil end
+    if plan.multi then
+        -- 多书:只展示聚合数量 + 逐书明细,绝不生成跨书伪范围(评审五轮 P1#1)。
+        local lines = {"继续同步划线与想法", ""}
+        if plan.pending and plan.pending > 0 then
+            lines[#lines + 1] = string.format("剩余共 %s 章（跨 %s 本书）",
+                format_integer(plan.pending), format_integer(plan.books_with_pending or 1))
+        else
+            lines[#lines + 1] = "剩余章节数量未知"
+        end
+        lines[#lines + 1] = "本批按每本书各自的续传位置分批拉取"
+        local pb = plan.per_book
+        if type(pb) == "table" then
+            local bids = {}
+            for bid in pairs(pb) do bids[#bids + 1] = bid end
+            table.sort(bids)
+            if #bids > 0 then
+                lines[#lines + 1] = ""
+                lines[#lines + 1] = "逐书明细"
+                for _, bid in ipairs(bids) do
+                    local st = pb[bid]
+                    local label = tostring((st and st.title) or bid)
+                    local p = tonumber(st and st.pending)
+                    if st and st.failed then
+                        lines[#lines + 1] = string.format("· %s：上次失败（%s）",
+                            label, tostring(st.error or "未知错误"))
+                    elseif p and p > 0 then
+                        lines[#lines + 1] = string.format("· %s：还剩 %s 章（续传第 %s 章）",
+                            label, format_integer(p), format_integer(tonumber(st.next_index) or 1))
+                    elseif p == 0 then
+                        lines[#lines + 1] = string.format("· %s：已同步完成", label)
+                    else
+                        lines[#lines + 1] = string.format("· %s：剩余未知", label)
+                    end
+                end
+            end
+        end
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = background
+            and "同步将在后台进行，不影响继续阅读。"
+            or "开始后将显示同步进度，也可转入后台继续阅读。"
+        return table.concat(lines, "\n")
+    end
     local lines = {plan.start_index == 1 and "同步划线与想法" or "继续同步划线与想法", ""}
     if plan.processed_to > 0 then
         lines[#lines + 1] = string.format("当前已处理到第 %s 章", format_integer(plan.processed_to))
@@ -72,6 +129,13 @@ end
 
 function M.background_text(plan)
     if not plan then return "正在后台拉取后续章节…" end
+    if plan.multi then
+        -- 多书:不生成跨书「第 X–Y 章」伪范围,只报聚合数量(评审五轮 P1#1)。
+        if plan.pending and plan.pending > 0 then
+            return string.format("正在后台拉取剩余 %s 章（多书聚合）…", format_integer(plan.pending))
+        end
+        return "正在后台拉取后续章节（多书聚合）…"
+    end
     return string.format("正在后台拉取并注入第 %s–%s 章…",
         format_integer(plan.start_index), format_integer(plan.end_index))
 end

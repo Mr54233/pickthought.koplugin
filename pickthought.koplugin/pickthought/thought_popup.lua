@@ -204,7 +204,17 @@ function NativeThoughtPopup:init(reinit)
     self.buttons_table = self:_build_buttons()
     self:_update_page()
     TextViewer.init(self, reinit)
-    self:_bind_key_navigation()
+    -- 翻页键(PgBack/PgFwd)绑定到上一条/下一条想法;TextViewer 默认事件名是
+    -- ScrollOrPrev/ScrollOrNext,这里改写为 PreviousThought/NextThought,
+    -- 由 onPreviousThought/onNextThought 驱动 change_page(P2#7 关联:想法弹窗导航)。
+    if self.key_events then
+        if self.key_events.ScrollOrPrev then
+            self.key_events.ScrollOrPrev.event = "PreviousThought"
+        end
+        if self.key_events.ScrollOrNext then
+            self.key_events.ScrollOrNext.event = "NextThought"
+        end
+    end
     -- 点按由弹窗处理为上一条/下一条,正文上下滑动仍由 ScrollTextWidget 滚动。
     local scroll = self:_text_widgets()
     if scroll and scroll.setTapScrollEnabled then
@@ -273,19 +283,14 @@ function NativeThoughtPopup:change_page(delta)
     if next_index < 1 or next_index > #self.display_pages then return end
     self.page_index = next_index
     self:_update_page()
+    -- 切换想法不重设顶部摘录(顶部是书摘要,跨想法恒定),只重绘正文区域。
     if not self:_replace_text() then
         self:init(true)
         local scroll = self:_text_widgets()
         if scroll and scroll.scrollToTop then scroll:scrollToTop() end
     end
     self:_sync_buttons()
-    -- 标题栏是固定的原文摘录,切换想法只刷新正文区域;按钮由各自的
-    -- refresh() 处理,避免整块弹窗重绘导致标题栏闪屏。
-    if self.textw and self.textw.dimen then
-        UIManager:setDirty(self, "partial", self.textw.dimen)
-    elseif self.frame and self.frame.dimen then
-        UIManager:setDirty(self, "partial", self.frame.dimen)
-    end
+    UIManager:setDirty(self, "partial", self.textw.dimen)
 end
 
 function NativeThoughtPopup:onClose()
