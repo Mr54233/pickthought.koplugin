@@ -135,3 +135,42 @@ T.case("自动模式提示也明确本批范围", function()
     }, 200))
     T.eq(text, "正在后台拉取并注入第 201–400 章…", "自动启动短提示范围明确")
 end)
+
+
+-- 评审五轮 P1#1:多书聚合不推导单一连续章节范围,只展示聚合数量 + 逐书明细。
+T.case("多书 plan 不生成跨书伪范围(prompt_text 只报聚合+逐书)", function()
+    local plan = BatchSync.plan({
+        multi_book = true,
+        total = 12, pending = 5, books_with_pending = 2,
+        per_book = {
+            b1 = {title = "书一", total = 8, pending = 3, next_index = 4},
+            b2 = {title = "书二", total = 4, pending = 2, next_index = 2},
+        },
+    }, 200)
+    T.ok(plan and plan.multi == true, "多书 plan 带 multi 标志")
+    T.eq(plan.start_index, nil, "不推导单一起始章")
+    T.eq(plan.end_index, nil, "不推导单一结束章")
+    local text = BatchSync.prompt_text(plan, false)
+    T.ok(text:find("剩余共 5 章（跨 2 本书）", 1, true), "聚合数量: " .. text)
+    T.ok(text:find("· 书一：还剩 3 章（续传第 4 章）", 1, true), "逐书明细: " .. text)
+    T.ok(text:find("· 书二：还剩 2 章（续传第 2 章）", 1, true), "逐书明细: " .. text)
+    T.ok(not text:find("从第", 1, true), "不得出现跨书伪范围: " .. text)
+    T.ok(not text:find("拉取并注入到第", 1, true), "不得出现跨书伪范围: " .. text)
+end)
+
+-- 评审五轮 P1#2:失败书/未知书在逐书明细中可见,不因聚合而消失。
+T.case("多书 plan:失败书/未知书在逐书明细中可见", function()
+    local plan = BatchSync.plan({
+        multi_book = true,
+        total = 8, pending = 2, books_with_pending = 1,
+        per_book = {
+            b1 = {title = "书一", failed = true, error = "微信读书返回的章节列表为空", total = 0, pending = nil},
+            b2 = {title = "书二", total = 8, pending = 2, next_index = 5},
+        },
+    }, 200)
+    local text = BatchSync.prompt_text(plan, true)
+    T.ok(text:find("· 书一：上次失败（微信读书返回的章节列表为空）", 1, true), "失败书可见: " .. text)
+    T.ok(text:find("· 书二：还剩 2 章（续传第 5 章）", 1, true), "正常书明细: " .. text)
+    local bg = BatchSync.background_text(plan)
+    T.ok(bg:find("剩余 2 章", 1, true) and not bg:find("第 0", 1, true), "后台文案无伪范围: " .. bg)
+end)

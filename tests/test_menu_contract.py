@@ -25,6 +25,18 @@ class MenuContractTests(unittest.TestCase):
             "文件管理器的书籍更多操作应保留样式入口",
         )
 
+    def test_bind_entry_not_duplicated_in_book_actions(self):
+        # 作者 2026-08-20 第6轮意见:文件管理器操作菜单重复添加「重新绑定微信读书」入口。
+        source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
+        book_actions = source.split("function Plugin:book_actions(", 1)[1].split(
+            "function Plugin:doc_title_guess", 1
+        )[0]
+        self.assertEqual(
+            book_actions.count('text=bound and "重新绑定微信读书" or "绑定微信读书"'),
+            1,
+            "文件管理器操作菜单只应有一个绑定/重新绑定入口",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

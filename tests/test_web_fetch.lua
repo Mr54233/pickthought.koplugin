@@ -288,7 +288,7 @@ T.case("Web 接口失败时回退 Agent Gateway", function()
     T.ok(calls[2]:find("api/agent/gateway", 1, true), "underlines 回退 Gateway")
     T.ok(calls[3]:find("/web/book/readReviews", 1, true), "先尝试 Web readReviews")
     T.ok(calls[4]:find("api/agent/gateway", 1, true), "readReviews 回退 Gateway")
-    T.eq(agent_options.rate_limit_scope, "annotations-agent", "Agent 使用独立限流域")
+    T.eq(agent_options.rate_limit_scope, "annotations-agent-b1", "Agent 按书隔离限流域(含 book_id)")
     T.eq(agent_options.rate_limit_fail_fast, true, "Agent 冷却期直接停止请求")
     T.eq(agent_options.rate_limit_cooldown, 900, "Agent 冷却时间为 900 秒")
 end)
@@ -311,11 +311,51 @@ T.case("Web 接口成功时不调用 Agent Gateway", function()
     T.eq(api:readreviews("b1", 116, {{range = "0-7"}})._annotation_source, "web",
         "Web readReviews 成功优先")
     T.eq(#calls, 2, "Web 成功不触发 Agent")
-    T.eq(calls[1].options.pacing_scope, "annotations-web", "Web 使用独立节流域")
+    T.eq(calls[1].options.pacing_scope, "annotations-web-b1", "Web 节流域按书隔离(含 book_id)")
     T.eq(calls[2].options.shared_pacing, true, "Web 使用共享节流")
-    T.eq(calls[1].options.rate_limit_scope, "annotations-web", "Web 使用独立限流域")
+    T.eq(calls[1].options.rate_limit_scope, "annotations-web-b1", "Web 限流域按书隔离(含 book_id)")
     T.eq(calls[2].options.rate_limit_fail_fast, true, "Web 冷却期直接停止请求")
     T.eq(calls[2].options.rate_limit_cooldown, 300, "Web 冷却时间为 300 秒")
+end)
+
+T.case("按书限速在真实 Http 层隔离:A 书 429 不 fail-fast 掉 B 书(评审八轮 P1#2)", function()
+    -- 真实 Http(与线上一致):A 书触发 429 后,其冷却锁只落在 annotations-web-<A>
+    -- scope;同接口的 B 书请求使用 annotations-web-<B> scope,不被 A 的冷却 fail-fast。
+    -- 这补齐了「任务层按书保存 retry_after、但 Http 层共享 scope 无 book_id」导致
+    -- B 书被 A 的限速误伤的链路短板(见 Api 层 annotation_options_with_book)。
+    local base = "tests/.tmp_rl_perbook.json"
+    local http = Http:new({})
+    http.shared_rate_limit_path = base
+    local pathA = http:_rate_limit_path("annotations-web-A")
+    local pathB = http:_rate_limit_path("annotations-web-B")
+    os.remove(pathA); os.remove(pathB)
+
+    -- 模拟 A 书请求打到 429(A 的 scope 必定含 book_id,见 Api 层构建)。
+    http:_set_shared_rate_limit(300, 429, "https://weread.qq.com/web/book/underlines?bookId=A",
+        "annotations-web-A")
+    T.ok(http:_shared_rate_limit("annotations-web-A") > 0, "A 书冷却生效")
+    T.eq(http:_shared_rate_limit("annotations-web-B"), 0, "B 书同接口不被 A 的冷却阻塞(按书隔离)")
+    T.eq(http:_shared_rate_limit("annotations-web"), 0, "旧基础 scope 不受影响(命名空间已分离)")
+
+    -- 真实请求链路验证:B 书请求在 A 冷却期间仍能发出(不 fail-fast)。
+    local transport_calls = 0
+    http._request_once = function(_, opt)
+        transport_calls = transport_calls + 1
+        if opt.rate_limit_scope == "annotations-web-A" then
+            return "busy", 429, {}, opt.url
+        end
+        return "{}", 200, {}, opt.url
+    end
+    local okB = pcall(function()
+        return http:request({
+            url = "https://weread.qq.com/web/book/underlines?bookId=B",
+            rate_limit_scope = "annotations-web-B", rate_limit_fail_fast = true,
+        })
+    end)
+    T.ok(okB, "B 书请求在 A 冷却期间仍成功发出(未被 fail-fast)")
+    T.eq(transport_calls, 1, "B 书请求真实发出(按书 scope 隔离生效)")
+
+    os.remove(pathA); os.remove(pathB)
 end)
 
 T.case("大批次参数错误时二分拆分,不逐条盲重试", function()

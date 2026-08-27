@@ -197,6 +197,8 @@ local function count_marks(rendered, underlines, base)
 end
 
 local function chapter_data(book_id, ch)
+    -- 多书合并注入时,每个 mapped 章节自带 ch.book_id;单书场景回退到入参 book_id。
+    book_id = ch.book_id or book_id
     local underlines = ch.underlines or {}
     local review_map = ch.review_map or {}
     local thought_count = 0
@@ -216,8 +218,7 @@ local function get_archiver(archiver)
 end
 
 -- 非目标大条目走磁盘拷贝:extractToPath 抽到临时文件 → addPath 写回,全程不进 Lua 堆,
--- 灭大图/字库/媒体造成的 OOM 尖峰。抽取失败返回 false,调用方回退内存路径;
--- addPath 正常读到 EOF 时可能返回 false 但不设置 err,此时不能重复写入。
+-- 灭大图/字库/媒体造成的 OOM 尖峰。失败返回 false,调用方回退内存路径(行为不变)。
 -- 注意 addPath 恒按 entry_root/rel 拼 zip 路径,顶层无斜杠条目(如 mimetype,已单独处理)
 -- 无法用其正确表示,故 first 缺失时直接回退。
 local function copy_entry_via_disk(reader, writer, entry, mtime, disk_tmp_base)
@@ -236,9 +237,10 @@ local function copy_entry_via_disk(reader, writer, entry, mtime, disk_tmp_base)
     -- KOReader 的 addPath(entry_root, root, recursive, mtime):第一个参数是
     -- ZIP 内目标路径,第二个才是刚抽出的本地源文件。
     local ok_add = writer:addPath(entry.path, source_path, true, mtime)
-    local add_err = writer.err
     pcall(U.remove_tree, sub)
-    if not ok_add and add_err then return nil, "addPath" end
+    -- KOReader 的 ZipWriter.addPath 在到达 ZIP 末尾时可能返回 false 但 writer.err 为空,
+    -- 这属于正常 EOF,不应误报失败;只有 writer.err 真正置位才是写入错误。
+    if not ok_add and writer.err then return nil, "addPath" end
     return true
 end
 
@@ -272,16 +274,23 @@ function M.inject_copy(src, book_id, chapters, opts)
     }
     local groups, group_count = {}, 0
     local total_underlines = 0
+    -- 多书:聚合/去重/统计按 book_id+chapter_uid 复合键,避免不同书相同 uid 串书;
+    -- 单书退化为纯 uid,统计语义与旧版完全一致(与 sync.lua 的 ck 对齐)。
+    local multi_book = type(opts) == "table" and type(opts.book_ids) == "table" and #opts.book_ids > 1
+    local function ckey(bid, uid)
+        return multi_book and (tostring(bid) .. "/" .. tostring(uid)) or tostring(uid)
+    end
     -- 同一微信章可能映射到多个本地文件。按 uid + range 预先去重，任一目标
     -- 落锚（含重叠合并）就算该划线及其想法注入成功。
-    local uid_track = {} -- [uid] = {total={}, resolved={}, thoughts={}}
+    local uid_track = {} -- [ckey] = {total={}, resolved={}, thoughts={}}
     for _, ch in ipairs(chapters or {}) do
         total_underlines = total_underlines + #(ch.underlines or {})
         local uid = tostring(ch.chapter_uid or "")
-        local track = uid_track[uid]
+        local bid = ch.book_id or book_id
+        local track = uid_track[ckey(bid, uid)]
         if not track then
             track = {total = {}, resolved = {}, thoughts = {}}
-            uid_track[uid] = track
+            uid_track[ckey(bid, uid)] = track
         end
         for _, row in ipairs(ch.underlines or {}) do
             local key = range_of(row)
@@ -416,7 +425,7 @@ function M.inject_copy(src, book_id, chapters, opts)
                             if injected_before or ch.quote_only then data.no_numeric_fallback = true end
                             local rendered, _, ch_stats = Annotations:new(nil):apply(content, data)
                             local mark_count, hit_keys = count_marks(rendered, data.underlines, content)
-                            local track = uid_track[data.chapter_uid]
+                            local track = uid_track[ckey(data.book_id, data.chapter_uid)]
                             for key in pairs(hit_keys) do track.resolved[key] = true end
                             for _, key in ipairs(ch_stats.overlapped_keys or {}) do
                                 track.resolved[tostring(key)] = true
@@ -428,19 +437,22 @@ function M.inject_copy(src, book_id, chapters, opts)
                             for _, merge in ipairs(ch_stats.merged or {}) do
                                 stats.merges[#stats.merges + 1] = {
                                     uid = data.chapter_uid, from = merge.from, into = merge.into,
+                                    book_id = merge.book_id or data.book_id,
                                 }
                             end
                             if mark_count > 0 then
                                 content = ensure_style(rendered)
                                 injected_before = true
                                 -- 拆分章会产生同 uid 多行,injected 按「有锚点落书的微信章」去重计数。
-                                if not injected_uids[data.chapter_uid] then
-                                    injected_uids[data.chapter_uid] = true
+                                -- 多书按 book_id+uid 复合键,不同书同 uid 不互相吞掉计数。
+                                if not injected_uids[ckey(data.book_id, data.chapter_uid)] then
+                                    injected_uids[ckey(data.book_id, data.chapter_uid)] = true
                                     stats.injected = stats.injected + 1
                                 end
                                 stats.marks = stats.marks + mark_count
                                 marker_chapters[#marker_chapters + 1] = {
                                     uid = data.chapter_uid, href = entry.path, marks = mark_count,
+                                    book_id = data.book_id,
                                 }
                             end
                         end
@@ -491,9 +503,15 @@ function M.inject_copy(src, book_id, chapters, opts)
     end
 
     if compression ~= "deflate" then writer:setZipCompression("deflate") end
+    -- 多书合并注入时记录 book_ids 列表;单书场景退化为 [book_id]。
+    -- 保留顶层 book_id(首本)字段以兼容旧版读取已注入书的 MARKER。
+    local book_ids = opts.book_ids
+    if type(book_ids) ~= "table" or #book_ids == 0 then
+        book_ids = { tostring(book_id or "") }
+    end
     if not writer:addFileFromMemory(M.MARKER, Json.encode({
-        version = 1, book_id = tostring(book_id or ""), created = mtime,
-        source = src, chapters = marker_chapters,
+        version = 1, book_id = tostring(book_ids[1] or ""), book_ids = book_ids,
+        created = mtime, source = src, chapters = marker_chapters,
     }), mtime) then
         return fail("写入副本失败:" .. M.MARKER)
     end

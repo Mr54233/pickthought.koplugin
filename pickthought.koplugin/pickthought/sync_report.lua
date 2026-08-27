@@ -42,29 +42,39 @@ function M.build(report, options)
         "同步完成",
         "",
         "本批章节",
-        string.format("拉取范围：第 %s–%s 章", integer(batch_start), integer(batch_end)),
-        string.format("拉取成功：%s/%s 章（%s）",
-            integer(report.chapters_fetch_succeeded), integer(batch_count),
-            percent(report.chapters_fetch_succeeded, batch_count, 1, true)),
-        string.format("注入进度：已处理到第 %s 章", integer(batch_end)),
-        "",
-        "本批数据",
-        string.format("拉取到：划线 %s 条，想法 %s 条",
-            integer(total_underlines), integer(total_thoughts)),
-        string.format("注入成功：划线 %s 条，想法 %s 条",
-            integer(underlines_injected), integer(thoughts_injected)),
-        string.format("注入失败：划线 %s 条，想法 %s 条",
-            integer(underlines_failed), integer(thoughts_failed)),
-        string.format("注入成功率：划线 %s，想法 %s",
-            percent(underlines_injected, total_underlines, 2),
-            percent(thoughts_injected, total_thoughts, 2)),
-        "",
-        "全书进度",
-        string.format("已处理：%s/%s 章（%s）",
-            integer(processed_total), integer(total), percent(processed_total, total, 1, true)),
-        string.format("未拉取：%s 章（%s）",
-            integer(pending), percent(pending, total, 1, true)),
     }
+    -- 多书:不同远程书章节坐标独立,不推导单一连续范围(评审五轮 P1#1),
+    -- 只展示聚合数量;逐书真实 range/pending/next_index 见下方「逐书明细」。
+    if report.multi_book then
+        lines[#lines + 1] = string.format("本批共 %s 章（多书聚合）", integer(batch_count))
+        lines[#lines + 1] = string.format("拉取成功：%s/%s 章（%s）",
+            integer(report.chapters_fetch_succeeded), integer(batch_count),
+            percent(report.chapters_fetch_succeeded, batch_count, 1, true))
+        lines[#lines + 1] = string.format("注入进度：已处理 %s 章（聚合）", integer(processed_total))
+    else
+        lines[#lines + 1] = string.format("拉取范围：第 %s–%s 章", integer(batch_start), integer(batch_end))
+        lines[#lines + 1] = string.format("拉取成功：%s/%s 章（%s）",
+            integer(report.chapters_fetch_succeeded), integer(batch_count),
+            percent(report.chapters_fetch_succeeded, batch_count, 1, true))
+        lines[#lines + 1] = string.format("注入进度：已处理到第 %s 章", integer(batch_end))
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "本批数据"
+    lines[#lines + 1] = string.format("拉取到：划线 %s 条，想法 %s 条",
+        integer(total_underlines), integer(total_thoughts))
+    lines[#lines + 1] = string.format("注入成功：划线 %s 条，想法 %s 条",
+        integer(underlines_injected), integer(thoughts_injected))
+    lines[#lines + 1] = string.format("注入失败：划线 %s 条，想法 %s 条",
+        integer(underlines_failed), integer(thoughts_failed))
+    lines[#lines + 1] = string.format("注入成功率：划线 %s，想法 %s",
+        percent(underlines_injected, total_underlines, 2),
+        percent(thoughts_injected, total_thoughts, 2))
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "全书进度"
+    lines[#lines + 1] = string.format("已处理：%s/%s 章（%s）",
+        integer(processed_total), integer(total), percent(processed_total, total, 1, true))
+    lines[#lines + 1] = string.format("未拉取：%s 章（%s）",
+        integer(pending), percent(pending, total, 1, true))
 
     if pending > 0 then
         local next_start = number(report.next_index)
@@ -72,15 +82,70 @@ function M.build(report, options)
         local batch_limit = number(report.batch_limit)
         if batch_limit == 0 then batch_limit = 200 end
         local next_count = math.min(pending, batch_limit)
-        local next_end = next_start + next_count - 1
-        lines[#lines + 1] = string.format("下一批：第 %s–%s 章，共 %s 章",
-            integer(next_start), integer(next_end), integer(next_count))
+        if report.multi_book then
+            -- 多书:续传位置逐书独立,不生成跨书「第 a–b 章」伪范围(评审五轮 P1#1)。
+            lines[#lines + 1] = string.format("下一批：共 %s 章（逐书续传位置见明细）", integer(next_count))
+        else
+            local next_end = next_start + next_count - 1
+            lines[#lines + 1] = string.format("下一批：第 %s–%s 章，共 %s 章",
+                integer(next_start), integer(next_end), integer(next_count))
+        end
         lines[#lines + 1] = ""
         lines[#lines + 1] = options.auto_batch == false
             and "菜单「继续拉取后续章节」手动拉，或阅读到边界时按提示后台补"
             or "菜单「继续拉取后续章节」手动拉，或继续阅读时自动补"
+    elseif report.failed_books and #report.failed_books > 0 then
+        -- 存在失败书/剩余未知书:不得显示「全部章节已处理完成」(评审六轮 P1#2)——否则
+        -- 与逐书明细里「某本书同步失败」前后矛盾。明确列出失败书。
+        local f = {}
+        for _, bid in ipairs(report.failed_books) do
+            f[#f + 1] = tostring(bid)
+        end
+        lines[#lines + 1] = "有书同步失败/剩余未知：" .. table.concat(f, "、")
+    elseif report.deferred_books and #report.deferred_books > 0 then
+        -- 冷却书部分缓存命中、剩余章 deferred(评审八轮 P1#1):非失败但非真正完成,
+        -- 明确标「暂缓」,不得显示「全部章节已处理完成」。
+        local f = {}
+        for _, bid in ipairs(report.deferred_books) do
+            f[#f + 1] = tostring(bid)
+        end
+        lines[#lines + 1] = "有书同步暂缓：" .. table.concat(f, "、")
     else
         lines[#lines + 1] = "全部章节已处理完成"
+    end
+
+    -- 逐书明细(P1#4):多书绑定时,聚合状态之外再列出每本书的进度与失败,
+    -- 避免只显示第一本而漏掉其他书的待同步内容。单书不重复展示。
+    local per_book = report.per_book
+    if type(per_book) == "table" then
+        local bids = {}
+        for bid in pairs(per_book) do bids[#bids + 1] = bid end
+        table.sort(bids)
+        if #bids > 1 then
+            lines[#lines + 1] = ""
+            lines[#lines + 1] = "逐书明细"
+            for _, bid in ipairs(bids) do
+                local pb = per_book[bid] or {}
+                local label = (options.titles and options.titles[tostring(bid)]) or tostring(bid)
+                local p = number(pb.pending)
+                local t = number(pb.total)
+                local nx = number(pb.next_index)
+                if pb.failed then
+                    lines[#lines + 1] = string.format("· %s：同步失败（%s）", label,
+                        tostring(pb.error or "未知错误"))
+                elseif pb.deferred then
+                    -- 冷却书部分缓存命中、剩余章 deferred(评审八轮 P1#1):明确标「暂缓」,
+                    -- 不显示为「还剩 N 章」的普通待拉取,也不与「已完成」混淆。
+                    lines[#lines + 1] = string.format("· %s：限速冷却中，暂缓 %s 章（续传第 %s 章）",
+                        label, integer(p), integer(nx))
+                elseif p > 0 then
+                    lines[#lines + 1] = string.format("· %s：已处理 %s/%s 章，还剩 %s 章（续传第 %s 章）",
+                        label, integer(t - p), integer(t), integer(p), integer(nx))
+                else
+                    lines[#lines + 1] = string.format("· %s：%s/%s 章已完成", label, integer(t), integer(t))
+                end
+            end
+        end
     end
 
     if #(report.unmatched or {}) > 0 then

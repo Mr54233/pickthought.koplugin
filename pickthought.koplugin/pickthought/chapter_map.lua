@@ -248,11 +248,12 @@ local function build_with_scanner(spine, chapters, scan)
                     mapped[#mapped + 1] = {
                         chapter_uid = tostring(ch.uid or ""), href = href,
                         underlines = underlines, review_map = ch.review_map or {},
-                        quote_only = quote_only,
+                        quote_only = quote_only, book_id = ch.book_id,
                     }
                 end
             else
-                unmatched[#unmatched + 1] = {uid = tostring(ch.uid or ""), title = ch.title, reason = "no_hit"}
+                unmatched[#unmatched + 1] = {uid = tostring(ch.uid or ""), title = ch.title,
+                    reason = "no_hit", book_id = ch.book_id}
             end
         end
     end
