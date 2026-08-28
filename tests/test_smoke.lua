@@ -41,6 +41,49 @@ T.case("atomic_write 可覆盖已存在文件", function()
     os.remove(p)
 end)
 
+T.case("atomic_write 检查 flush/close 失败", function()
+    local U = require("pickthought.util")
+    local real_open = io.open
+    local function run_failed(method, expected)
+        io.open = function(path, mode)
+            local file, err = real_open(path, mode)
+            if mode == "wb" and tostring(path):find("%.tmp%-", 1, false) then
+                return {
+                    write = function() return true end,
+                    flush = function() return method ~= "flush", expected end,
+                    close = function() return method ~= "close", expected end,
+                }
+            end
+            return file, err
+        end
+        local ok, err = U.atomic_write("tests/.tmp_atomic_failure", "x", true)
+        io.open = real_open
+        T.ok(not ok and tostring(err):find(expected, 1, true), method .. "失败应返回错误")
+    end
+    run_failed("flush", "flush 失败")
+    run_failed("close", "close 失败")
+    os.remove("tests/.tmp_atomic_failure")
+end)
+
+T.case("atomic_write 替换失败会恢复旧文件", function()
+    local U = require("pickthought.util")
+    local p = "tests/.tmp_atomic_rollback"
+    T.ok(U.atomic_write(p, "old", true), "准备旧文件")
+    local real_rename = os.rename
+    local calls = 0
+    os.rename = function(from, to)
+        calls = calls + 1
+        if calls == 1 then return nil, "目标已存在" end
+        if calls == 3 then return nil, "模拟替换失败" end
+        return real_rename(from, to)
+    end
+    local ok, err = U.atomic_write(p, "new", true)
+    os.rename = real_rename
+    T.ok(not ok and tostring(err):find("模拟替换失败", 1, true), "替换失败应返回错误")
+    T.eq(U.read_file(p, true), "old", "替换失败恢复旧内容")
+    os.remove(p)
+end)
+
 T.case("archiver mock 与真实 API 同语义", function()
     local Arc = STUBS.archiver_mock({{path = "mimetype", content = "application/epub+zip"}})
     local r = Arc.Reader:new()

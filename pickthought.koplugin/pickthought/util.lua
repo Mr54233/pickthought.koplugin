@@ -25,13 +25,40 @@ function U.mkdir(p)
 end
 function U.atomic_write(p,d,b)
     local parent=p:match("^(.*)/[^/]+$"); if parent then U.mkdir(parent) end
-    local t=p..".tmp-"..tostring(os.time()).."-"..tostring(math.random(1000,9999)); local f,e=io.open(t,b and "wb" or "w"); if not f then return nil,e end
-    local ok,er=f:write(d or ""); f:flush(); f:close(); if not ok then os.remove(t); return nil,er end
-    -- 先试原子改名(POSIX 直接覆盖);仅在失败时(Windows 目标已存在)删除旧文件重试,
-    -- 避免无条件先删——改名失败时至少不弄丢已有文件。
+    local nonce=tostring(os.time()).."-"..tostring(math.random(1000,9999))
+    local t=p..".tmp-"..nonce
+    local f,e=io.open(t,b and "wb" or "w"); if not f then return nil,e end
+    local write_call,ok,er=pcall(f.write,f,d or "")
+    if not write_call or not ok then pcall(f.close,f); pcall(os.remove,t); return nil,er or ok end
+    local flush_call,flushed,flush_err=pcall(f.flush,f)
+    if not flush_call or not flushed then
+        pcall(f.close,f); pcall(os.remove,t); return nil,flush_err or flushed or "刷新失败"
+    end
+    local close_call,closed,close_err=pcall(f.close,f)
+    if not close_call or not closed then
+        pcall(os.remove,t); return nil,close_err or closed or "关闭失败"
+    end
+
+    -- POSIX 可以直接覆盖;Windows 目标已存在时先把旧文件移到同目录暂存位,
+    -- 新文件替换失败则恢复旧文件,避免先删目标造成状态文件丢失。
     local r,re=os.rename(t,p)
-    if not r then os.remove(p); r,re=os.rename(t,p) end
-    if not r then os.remove(t); return nil,re end; return true
+    if r then return true end
+    if not U.file_exists(p) then pcall(os.remove,t); return nil,re end
+    local prev=p..".replace-"..nonce
+    local staged,stage_err=os.rename(p,prev)
+    if not staged then pcall(os.remove,t); return nil,"无法暂存旧文件:"..tostring(stage_err or re) end
+    local replaced,replace_err=os.rename(t,p)
+    if not replaced then
+        local restored,restore_err=os.rename(prev,p)
+        pcall(os.remove,t)
+        if restored then return nil,replace_err or "替换失败" end
+        return nil,"替换失败且旧文件回滚失败:"..tostring(restore_err or replace_err or "未知错误")
+    end
+    local removed,remove_err=os.remove(prev)
+    if not removed and U.file_exists(prev) then
+        return nil,"新文件已写入但旧文件清理失败:"..tostring(remove_err or prev)
+    end
+    return true
 end
 function U.remove_tree(p)
     p=tostring(p or "")
