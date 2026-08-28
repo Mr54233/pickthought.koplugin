@@ -1,7 +1,7 @@
 -- 本地书 ↔ 微信读书书目的绑定:搜索/章节响应规范化 + 按文档路径持久化。
 --
 -- 绑定模型(2026-08 起支持「一本本地书绑定多本微信读书书」,用于合集/套装 EPUB):
---   all[doc_path] 是一个 map:{ [book_id] = {book_id, title, author, bound_at} }
+--   all[doc_path] 是一个 map:{ [book_id] = {book_id, title, author, bound_at, bound_order} }
 -- 旧版本是单条记录(all[doc_path] = record),读取时自动迁移为单元素 map 并落盘。
 -- 对外保持向后兼容:Binding.get 仍返回「主绑定」(最近绑定的一本)单记录,
 -- 因此单绑定场景与旧代码、旧测试行为完全一致。
@@ -13,6 +13,38 @@ local KEY = "bindings"
 
 local function is_record(v)
     return type(v) == "table" and type(v.book_id) == "string" and v.book_id ~= ""
+end
+
+-- ffi/util 提供秒+微秒;没有 KOReader 运行时(桌面测试/旧环境)时回退到 os.time。
+-- bound_order 仍作为同一时刻的持久化并列裁决,避免 map 的 pairs 顺序泄漏到 UI。
+local function precise_now()
+    local ok, fu = pcall(require, "ffi/util")
+    if ok and fu and type(fu.gettime) == "function" then
+        local called, sec, usec = pcall(fu.gettime)
+        sec, usec = tonumber(sec), tonumber(usec) or 0
+        if called and sec then return sec + usec / 1000000 end
+    end
+    return os.time()
+end
+
+local function next_order(map)
+    local last = 0
+    for _, rec in pairs(map or {}) do
+        local order = tonumber(type(rec) == "table" and rec.bound_order)
+        if order and order > last then last = order end
+    end
+    return last + 1
+end
+
+local function compare_records(a, b)
+    local at_a, at_b = tonumber(a.bound_at) or 0, tonumber(b.bound_at) or 0
+    if at_a ~= at_b then return at_a < at_b and -1 or 1 end
+    local order_a = tonumber(a.bound_order) or 0
+    local order_b = tonumber(b.bound_order) or 0
+    if order_a ~= order_b then return order_a < order_b and -1 or 1 end
+    local id_a, id_b = tostring(a.book_id or ""), tostring(b.book_id or "")
+    if id_a == id_b then return 0 end
+    return id_a < id_b and -1 or 1
 end
 
 -- 把存储值规范成 map {[book_id]=record}。旧单键记录在此迁移并落盘(仅迁移时写一次)。
@@ -54,11 +86,10 @@ end
 -- 向后兼容:返回「主绑定」单记录(最近 bound_at 的一本)。单绑定场景即那一本。
 function Binding.get(store, doc_path)
     local map = normalize(store, doc_path)
-    local primary, primary_at
+    local primary
     for _, rec in pairs(map) do
-        local at = tonumber(rec.bound_at) or 0
-        if not primary or at > (primary_at or 0) then
-            primary, primary_at = rec, at
+        if not primary or compare_records(rec, primary) > 0 then
+            primary = rec
         end
     end
     return primary
@@ -69,9 +100,7 @@ function Binding.list(store, doc_path)
     local map = normalize(store, doc_path)
     local out = {}
     for _, rec in pairs(map) do out[#out + 1] = rec end
-    table.sort(out, function(a, b)
-        return (tonumber(a.bound_at) or 0) < (tonumber(b.bound_at) or 0)
-    end)
+    table.sort(out, function(a, b) return compare_records(a, b) < 0 end)
     return out
 end
 
@@ -79,9 +108,10 @@ end
 function Binding.add(store, doc_path, record)
     record = record or {}
     if not is_record(record) then return nil, "record 缺少有效的 book_id" end
-    if not record.bound_at then record.bound_at = os.time() end
     local all = load_all(store)
     local map = normalize(store, doc_path)
+    if not record.bound_at then record.bound_at = precise_now() end
+    record.bound_order = next_order(map)
     map[tostring(record.book_id)] = record
     all[tostring(doc_path or "")] = map
     store:set(KEY, all)

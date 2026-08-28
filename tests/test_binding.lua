@@ -183,6 +183,24 @@ T.case("Binding.get 返回最近绑定的主书,list 按时间升序", function(
     T.eq(list[2].book_id, "second", "list 末尾最近")
 end)
 
+T.case("Binding 同一时间绑定按持久化顺序稳定裁决", function()
+    local kv = {}
+    local store = {
+        get = function(_, k, d) return kv[k] ~= nil and kv[k] or d end,
+        set = function(_, k, v) kv[k] = v end,
+    }
+    local path = "/books/same-second.epub"
+    Binding.save(store, path, {book_id = "first", bound_at = 100})
+    Binding.save(store, path, {book_id = "second", bound_at = 100})
+    local records = Binding.records(store, path)
+    T.eq(records.first.bound_order, 1, "首条绑定顺序")
+    T.eq(records.second.bound_order, 2, "后绑定顺序")
+    T.eq(Binding.get(store, path).book_id, "second", "同一时间最近绑定为主")
+    local list = Binding.list(store, path)
+    T.eq(list[1].book_id, "first", "同一时间列表首项稳定")
+    T.eq(list[2].book_id, "second", "同一时间列表末项稳定")
+end)
+
 T.case("normalize_chapters 兼容旧字段 chapterId/uid (P2#6)", function()
     -- 旧网关章节响应用 chapterId 或 uid 而非 chapterUid,归一化不得丢章。
     local with_chapterId = {{chapterId = 11, title = "旧Id章", chapterIdx = 1}}
