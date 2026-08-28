@@ -8,6 +8,37 @@
 
 local usleep_spy = { calls = 0 }
 
+local IS_WINDOWS = package.config:sub(1, 1) == "\\"
+local function shell_ok(command, label)
+    local status = os.execute(command)
+    if status ~= true and status ~= 0 then
+        error((label or "测试环境命令失败") .. ": " .. command)
+    end
+end
+local function rm_dir(d)
+    if IS_WINDOWS then
+        shell_ok('if exist "' .. d .. '" rd /s /q "' .. d .. '"', "清理测试目录失败")
+        shell_ok('if exist "' .. d .. '" (exit /b 1)', "测试目录清理后仍存在")
+    else
+        shell_ok('rm -rf -- "' .. d .. '"', "清理测试目录失败")
+    end
+end
+local function rm_glob(glob)
+    if IS_WINDOWS then
+        shell_ok('if exist "' .. glob .. '" del /q "' .. glob .. '"', "清理测试文件失败")
+    else
+        shell_ok('rm -f -- ' .. glob, "清理测试文件失败")
+    end
+end
+local function mkdirs(d)
+    if IS_WINDOWS then
+        shell_ok('if not exist "' .. d .. '" mkdir "' .. d .. '"', "创建测试目录失败")
+        shell_ok('if not exist "' .. d .. '" (exit /b 1)', "测试目录创建后不存在")
+    else
+        shell_ok('mkdir -p -- "' .. d .. '"', "创建测试目录失败")
+    end
+end
+
 -- 桩掉 KOReader 专属模块,使 pickthought.main 可在桌面 LuaJIT 环境加载。
 -- 需要特殊行为的两个:WidgetContainer:extend 仅返回表;ui/trapper 的 info/clear 被 _sync_run 调用。
 package.preload["ui/widget/container/widgetcontainer"] = function()
@@ -123,7 +154,16 @@ T.case("前台 _sync_run 适配器透传 no-op rest,绝不调用 usleep(作者 #
     }
 
     -- 关键:走真实 _sync_run 适配器(而非手动构造 perf)。
+    -- 该用例只验证前台适配器,映射缓存路径是虚拟路径;显式模拟缓存写成功,
+    -- 避免把「虚拟目录不存在」误测成同步提前退出。
+    local U = require("pickthought.util")
+    local original_atomic_write = U.atomic_write
+    U.atomic_write = function(cache_path, data, binary)
+        if tostring(cache_path):find("/sync%-cache/map%.json$") then return true end
+        return original_atomic_write(cache_path, data, binary)
+    end
     Plugin._sync_run(self, "/tmp/书.epub", { book_id = "b001" })
+    U.atomic_write = original_atomic_write
 
     T.ok(captured.inject_called, "前台 _sync_run 应调用 inject 适配器")
     T.ok(captured.perf ~= nil, "_sync_run 应为 inject 传入 perf")
@@ -150,25 +190,6 @@ end)
 T.case("多书限速冷却:A 冷却只读缓存不发网络,B 正常完成,无全局等待", function()
     local dir = "tests/.tmp_cooldown"
     -- 平台适配(CI 是 Linux,本地是 Windows):目录/临时文件操作按平台分支。
-    local IS_WINDOWS = package.config:sub(1, 1) == "\\"
-    local function rm_dir(d)
-        if IS_WINDOWS then os.execute('rd /s /q "' .. d .. '" 2>nul')
-        else os.execute('rm -rf "' .. d .. '" 2>/dev/null') end
-    end
-    local function rm_glob(glob)
-        if IS_WINDOWS then
-            os.execute('del /q "' .. glob .. '" 2>nul')
-        else
-            os.execute('rm -f ' .. glob .. ' 2>/dev/null')
-        end
-    end
-    local function mkdirs(d)
-        if IS_WINDOWS then
-            os.execute('mkdir "' .. d .. '" 2>nul')
-        else
-            os.execute('mkdir -p "' .. d .. '"')
-        end
-    end
     -- 开头清理上次残留(断言失败时清理代码不执行,残留的 .orig 会让 src 取错、
     -- 干扰本次运行;每次运行必须从干净状态开始)。
     rm_dir(dir)
