@@ -394,6 +394,26 @@ T.case("映射缓存:旧的未匹配结论下一轮仍会重试", function()
     os.remove(cache_file)
 end)
 
+T.case("映射缓存写入失败时同步不得继续注入", function()
+    local U = require("pickthought.util")
+    local cache_file = "tests/.tmp_map_cache_write_failure.json"
+    local report, err
+    with_memfs(function()
+        U.atomic_write = function(path)
+            if tostring(path) == cache_file then return nil, "磁盘满" end
+            return true
+        end
+        local deps, calls = make_deps({map_cache_path = cache_file})
+        report, err = Sync.run(deps)
+        T.eq(calls.injected, nil, "映射缓存保存失败后不得进入注入")
+    end)
+    T.ok(report == nil, "映射缓存保存失败应终止同步")
+    T.ok(tostring(err):find("映射缓存保存失败", 1, true),
+        "错误应明确指出映射缓存保存失败: " .. tostring(err))
+    T.ok(tostring(err):find("磁盘满", 1, true),
+        "错误应保留底层写入原因: " .. tostring(err))
+end)
+
 T.case("正文 spine 缓存:冷读落盘,续批暖读不再解压", function()
     local U = require("pickthought.util")
     local SpineCache = require("pickthought.spine_cache")

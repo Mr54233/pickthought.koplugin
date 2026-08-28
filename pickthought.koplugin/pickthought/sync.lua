@@ -786,7 +786,15 @@ function Sync.run(deps)
         for bid, m in pairs(by_book) do
             local cp = cache_path_for(bid)
             local ok_encode, encoded = pcall(Json.encode, {signature = map_signature, map = m})
-            if ok_encode then U.atomic_write(cp, encoded, true) end
+            if not ok_encode then
+                return nil, "映射缓存序列化失败(" .. tostring(cp) .. "):" .. tostring(encoded)
+            end
+            local write_call, written, write_error = pcall(U.atomic_write, cp, encoded, true)
+            if not write_call or not written then
+                local detail = write_call and write_error or written
+                return nil, "映射缓存保存失败(" .. tostring(cp) .. "):"
+                    .. tostring(detail or "写入失败")
+            end
         end
     end
     -- 未匹配章节连带损失的划线数(报告要能说清"失败带走了多少")。

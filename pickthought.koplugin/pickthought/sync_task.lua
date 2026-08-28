@@ -734,7 +734,9 @@ function SyncTask:start(task, on_progress, on_done)
             local function write_json(path, value)
                 local encoded_ok, encoded = pcall(JsonChild.encode, value)
                 if not encoded_ok then return nil, tostring(encoded) end
-                local written, write_error = UChild.atomic_write(path, encoded, true)
+                local write_call, written, write_error = pcall(
+                    UChild.atomic_write, path, encoded, true)
+                if not write_call then return nil, tostring(written) end
                 if not written then return nil, tostring(write_error or "写入失败") end
                 return true
             end
@@ -869,8 +871,10 @@ function SyncTask:start(task, on_progress, on_done)
                         return decoded
                     end
                     local data = api:chapters(bid)
-                    local ok_encode, encoded = pcall(JsonChild.encode, serializable_copy(data))
-                    if ok_encode then UChild.atomic_write(chapters_cache_path, encoded, true) end
+                    local saved, save_error = write_json(chapters_cache_path, serializable_copy(data))
+                    if not saved then
+                        error("章节列表缓存保存失败(" .. tostring(bid) .. "):" .. tostring(save_error))
+                    end
                     return data
                 end,
             }
@@ -976,8 +980,12 @@ function SyncTask:start(task, on_progress, on_done)
                             thought_entry_count = data.thought_entry_count,
                             errors = {}, underline_request_ok = true,
                         })
-                        local enc_ok, encoded = pcall(JsonChild.encode, slim)
-                        if enc_ok then UChild.atomic_write(cache_path_for(bid, uid), encoded, true) end
+                        local cache_path = cache_path_for(bid, uid)
+                        local saved, save_error = write_json(cache_path, slim)
+                        if not saved then
+                            error("章节缓存保存失败(" .. tostring(bid) .. ",第"
+                                .. tostring(uid) .. "章):" .. tostring(save_error))
+                        end
                     end
                     -- 礼貌间隔:章与章之间随机停 200~400ms,请求速率贴近真人翻章。
                     FFIUtil.usleep((200 + math.random(0, 200)) * 1000)
@@ -1099,9 +1107,9 @@ function SyncTask:start(task, on_progress, on_done)
                 local failure_status = cancelled() and "cancelled" or "failed"
                 for _, bid in ipairs(book_ids) do
                     local ps = previous_states[bid] or {}
-                    local ok_call, ok_write = pcall(function()
-                        return UChild.atomic_write(cache_for(bid) .. "/state.json",
-                            JsonChild.encode({
+                    local state_path = cache_for(bid) .. "/state.json"
+                    local ok_call, state_saved, state_error = pcall(function()
+                        return write_json(state_path, {
                                 status = failure_status,
                                 total = ps.total,
                                 pending = ps.pending,
@@ -1109,11 +1117,13 @@ function SyncTask:start(task, on_progress, on_done)
                                 failed = true,
                                 error = tostring(sync_err or "同步失败"),
                                 updated_at = os.time(),
-                            }), true)
+                            })
                     end)
-                    if not ok_call or not ok_write then
+                    if not ok_call or not state_saved then
+                        local detail = ok_call and state_error or state_saved
                         LoggerChild.warn("[撷思][SyncTask] failure state save failed",
-                            "book=", tostring(bid))
+                            "book=", tostring(bid), "path=", state_path,
+                            "error=", tostring(detail or "写入失败"))
                     end
                     -- 本次失败/取消:必须清除旧 .completed,否则下次同步因旧完成标记
                     -- 开启 skip_resumed,把本次已拉取未注入的缓存跳过(评审六轮 P1#1)。
@@ -1184,8 +1194,21 @@ function SyncTask:start(task, on_progress, on_done)
             emit{stage = was_cancelled and "cancelled" or "error", message = display_error}
             payload = {ok = false, cancelled = was_cancelled or nil, error = display_error}
         end
-        local encoded = JsonChild.encode(payload)
-        UChild.atomic_write(result_path, encoded, true)
+        local encoded_ok, encoded = pcall(JsonChild.encode, payload)
+        if not encoded_ok then
+            LoggerChild.err("[撷思][SyncTask] result encode failed",
+                "path=", result_path, "error=", tostring(encoded))
+            error("同步结果序列化失败(" .. tostring(result_path) .. "):" .. tostring(encoded))
+        end
+        local write_call, written, write_error = pcall(
+            UChild.atomic_write, result_path, encoded, true)
+        if not write_call or not written then
+            local detail = write_call and write_error or written
+            LoggerChild.err("[撷思][SyncTask] result save failed",
+                "path=", result_path, "error=", tostring(detail or "写入失败"))
+            error("同步结果保存失败(" .. tostring(result_path) .. "):"
+                .. tostring(detail or "写入失败"))
+        end
     end
 
     local prepared, prepare_error = self:_prepare_worker_memory()

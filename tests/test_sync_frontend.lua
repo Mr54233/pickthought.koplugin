@@ -123,7 +123,16 @@ T.case("前台 _sync_run 适配器透传 no-op rest,绝不调用 usleep(作者 #
     }
 
     -- 关键:走真实 _sync_run 适配器(而非手动构造 perf)。
+    -- 该用例只验证前台适配器,映射缓存路径是虚拟路径;显式模拟缓存写成功,
+    -- 避免把「虚拟目录不存在」误测成同步提前退出。
+    local U = require("pickthought.util")
+    local original_atomic_write = U.atomic_write
+    U.atomic_write = function(cache_path, data, binary)
+        if tostring(cache_path):find("/sync%-cache/map%.json$") then return true end
+        return original_atomic_write(cache_path, data, binary)
+    end
     Plugin._sync_run(self, "/tmp/书.epub", { book_id = "b001" })
+    U.atomic_write = original_atomic_write
 
     T.ok(captured.inject_called, "前台 _sync_run 应调用 inject 适配器")
     T.ok(captured.perf ~= nil, "_sync_run 应为 inject 传入 perf")
