@@ -274,8 +274,13 @@ function M.archiver_mock(files, mock_opts)
         return true
     end
     function Writer:close()
-        self.err = nil
         self.closed = true
+        if mock_opts.fail_close then
+            self.err = mock_opts.close_error or "mock 收尾失败"
+            return false
+        end
+        self.err = nil
+        return mock_opts.close_result
     end
 
     mod.Reader, mod.Writer = Reader, Writer

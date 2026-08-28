@@ -333,6 +333,15 @@ function M.inject_copy(src, book_id, chapters, opts)
     if not writer:open(tmp, "epub") then
         return nil, "无法创建副本:" .. tostring(writer.err or tmp)
     end
+    local function close_writer()
+        local ok, result = pcall(function() return writer:close() end)
+        if not ok then return nil, tostring(result) end
+        if result == false then
+            return nil, tostring(writer.err or "EPUB writer 收尾失败")
+        end
+        if writer.err then return nil, tostring(writer.err) end
+        return true
+    end
     -- 非目标大条目走磁盘拷贝的临时根目录:本批同步一个,失败/结束统一清理。
     local disk_tmp = dest .. ".spine-" .. tostring(mtime)
     U.mkdir(disk_tmp)
@@ -341,10 +350,13 @@ function M.inject_copy(src, book_id, chapters, opts)
     -- 非目标大条目走磁盘的临时根,失败/结束统一清理(见上方 disk_tmp 定义)
     local function fail(message)
         local detail = writer.err
-        writer:close()
+        local closed, close_error = close_writer()
         if reader then reader:close() end
         pcall(U.remove_tree, disk_tmp)
         os.remove(tmp)
+        if not closed then
+            detail = (detail and (detail .. ";") or "") .. "writer close: " .. tostring(close_error)
+        end
         return nil, message .. (detail and ("(" .. detail .. ")") or "")
     end
 
@@ -506,7 +518,7 @@ function M.inject_copy(src, book_id, chapters, opts)
 
     if stats.injected == 0 then
         pcall(U.remove_tree, disk_tmp)
-        writer:close()
+        close_writer()
         os.remove(tmp)
         return nil, string.format("没有可注入的章节(未匹配 %d 章,定位失败 %d 条划线)",
             #stats.unmatched, stats.dropped)
@@ -525,7 +537,11 @@ function M.inject_copy(src, book_id, chapters, opts)
     }), mtime) then
         return fail("写入副本失败:" .. M.MARKER)
     end
-    writer:close()
+    local closed, close_error = close_writer()
+    if not closed then
+        os.remove(tmp)
+        return nil, "关闭 EPUB 副本失败:" .. tostring(close_error)
+    end
 
     local ok, rename_err = rename(tmp, dest)
     if not ok then

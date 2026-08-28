@@ -108,6 +108,15 @@ T.case("注入进度回调取消后丢弃临时副本", function()
     T.ok(Arc._last_writer.closed, "取消后应关闭 writer")
 end)
 
+T.case("EPUB writer 收尾失败时不得 rename 副本", function()
+    local stats, err, _, renames = run_inject(book_files(), CHAPTERS,
+        {fail_close = true, close_error = "ZIP 中央目录写入失败"})
+    T.ok(stats == nil and tostring(err):find("关闭 EPUB 副本失败", 1, true),
+        "收尾失败应返回明确错误")
+    T.ok(tostring(err):find("中央目录", 1, true), "保留 writer 收尾错误")
+    T.eq(#renames, 0, "收尾失败不得替换正式副本")
+end)
+
 T.case("拒绝二次注入(is_copy)", function()
     local files = book_files()
     files[#files + 1] = {path = EpubInject.MARKER, content = "{}"}
