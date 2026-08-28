@@ -827,12 +827,49 @@ end
 function Plugin:_has_reinject_cache(path)
     local bound = path and Binding.get(self.store, path)
     if not bound then return false end
-    -- 多书:所有绑定书都必须已有 chapters.json 缓存,否则后台重注必然失败(评审四轮 P1#5)。
+    -- 后台重注的硬前提是每本绑定书都有可解析的章节缓存;只看文件存在会把
+    -- 空文件/损坏 JSON 误报成可重注,用户点进去才在子进程里失败。
+    local Json = require("pickthought.json")
     local ids = self:_book_ids(path)
     if #ids == 0 then return false end
+    local function read_json(cache_path)
+        local raw = U.read_file(cache_path, true)
+        if not raw then return nil end
+        local ok, decoded = pcall(Json.decode, raw)
+        return ok and type(decoded) == "table" and decoded or nil
+    end
+    local function valid_chapters(bid)
+        local cache_path = self.store:book_cache_path(bid) .. "/sync-cache/chapters.json"
+        local decoded = read_json(cache_path)
+        if not decoded then return false end
+        local ok, rows = pcall(Binding.normalize_chapters, decoded, bid)
+        return ok and type(rows) == "table" and #rows > 0
+    end
+    local function valid_map(bid)
+        local cache_path = self.store:book_cache_path(bid) .. "/sync-cache/map.json"
+        if not U.file_exists(cache_path) then return true end
+        local decoded = read_json(cache_path)
+        if not decoded or type(decoded.signature) ~= "string"
+            or decoded.signature == "" or type(decoded.map) ~= "table" then
+            return false
+        end
+        local entries = 0
+        for _, value in pairs(decoded.map) do
+            if type(value) ~= "table" or type(value.hrefs) ~= "table"
+                or #value.hrefs == 0 then
+                return false
+            end
+            for _, href in ipairs(value.hrefs) do
+                if type(href) ~= "string" or href == "" then return false end
+            end
+            entries = entries + 1
+        end
+        return entries > 0
+    end
+
     local all_cached = true
     for _, bid in ipairs(ids) do
-        if not U.file_exists(self.store:book_cache_path(bid) .. "/sync-cache/chapters.json") then
+        if not valid_chapters(bid) or not valid_map(bid) then
             all_cached = false
             break
         end
@@ -841,16 +878,9 @@ function Plugin:_has_reinject_cache(path)
         -- 全部绑定书已缓存(含干净原书已同步),提供离线重注入口。
         return true
     end
-    -- clean_source 逃生舱:当前书含注入标记 -> 直接提供;干净原书(无标记)但章节缓存
-    -- (map.json)已存在仍保留入口,把"能否安全重建"交给同步层决定(作者意见 #3 / 2026-08-15 二轮)。
-    local EpubReader = require("pickthought.epub_reader")
-    local EpubInject = require("pickthought.epub_inject")
-    local ok, meta = pcall(EpubReader.load, path)
-    if not ok or not meta then return false end
-    local has_inject = meta.has and meta.has[EpubInject.MARKER] == true
-    if has_inject then return true end
-    local has_cache = U.file_exists(self.store:book_cache_path(ids[1]) .. "/sync-cache/map.json")
-    return Binding.offer_reinject(has_inject, has_cache)
+    -- 任一本绑定书的章节缓存缺失/损坏时,后台重注必然无法读取该书的目录;
+    -- 即使当前 EPUB 带注入标记或 map.json 看起来存在,也不能提前显示入口。
+    return false
 end
 
 -- 离线重注入口:先让用户决定是否提供一份干净原书作为注入源。

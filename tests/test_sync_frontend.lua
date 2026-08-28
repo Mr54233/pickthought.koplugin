@@ -152,6 +152,49 @@ T.case("前台 _sync_run 适配器透传 no-op rest,绝不调用 usleep(作者 #
 end)
 
 
+T.case("离线重注入口只接受有效的章节与映射缓存", function()
+    local U = require("pickthought.util")
+    local path = "/books/离线重注.epub"
+    local cache_root = "/cache/b001/sync-cache/"
+    local files = {}
+    local saved_read_file, saved_file_exists = U.read_file, U.file_exists
+    U.read_file = function(cache_path) return files[tostring(cache_path)] end
+    U.file_exists = function(cache_path) return files[tostring(cache_path)] ~= nil end
+
+    local self = {
+        store = {
+            get = function(_, key, default)
+                if key == "bindings" then
+                    return {[path] = {b001 = {book_id = "b001", bound_at = 1}}}
+                end
+                return default
+            end,
+            set = function() end,
+            book_cache_path = function() return "/cache/b001" end,
+        },
+    }
+    self._book_ids = function() return {"b001"} end
+
+    local chapters_path = cache_root .. "chapters.json"
+    local map_path = cache_root .. "map.json"
+    local ok, err = xpcall(function()
+        files[chapters_path] = '{"data":[{"chapterUid":1,"title":"第一章","chapterIdx":1}]}'
+        files[map_path] = '{"signature":"sig","map":{"1":{"hrefs":["OEBPS/c1.xhtml"]}}}'
+        T.ok(Plugin._has_reinject_cache(self, path), "有效缓存应显示离线重注入口")
+
+        files[chapters_path] = "{}"
+        T.ok(not Plugin._has_reinject_cache(self, path), "章节 JSON 结构无效时隐藏入口")
+        files[chapters_path] = '{"data":[{"chapterUid":1,"title":"第一章","chapterIdx":1}]}'
+        files[map_path] = '{"signature":"sig","map":{"1":{"hrefs":[]}}}'
+        T.ok(not Plugin._has_reinject_cache(self, path), "映射目标为空时隐藏入口")
+        files[map_path] = "not-json"
+        T.ok(not Plugin._has_reinject_cache(self, path), "映射 JSON 损坏时隐藏入口")
+    end, debug.traceback)
+
+    U.read_file, U.file_exists = saved_read_file, saved_file_exists
+    if not ok then error(err, 0) end
+end)
+
 -- 评审七轮(2026-08-21):多书限速冷却调度——A 书 retry_after 未过期(限速冷却)、
 -- B 书正常:任务不再按全部书 max retry_after 做启动前全局 usleep;冷却书 A 的
 -- 章节列表与章节数据都只读本地缓存(绝不发网络)、保留原状态且不生成 .completed;
