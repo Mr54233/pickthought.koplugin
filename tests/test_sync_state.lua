@@ -108,3 +108,21 @@ T.case("旧版无 status 时仍兼容完成标记", function()
     T.ok(not SyncState.is_complete({status = "partial"}, true), "部分状态覆盖旧标记")
     T.ok(SyncState.is_complete({status = "complete"}, false), "状态可独立恢复完成")
 end)
+
+T.case("未知剩余量与失败元数据不得被折算成完成", function()
+    local state = SyncState.commit({
+        chapters_total = 20, chapters_pending = nil, next_index = 7,
+        fetch_errors = 1, failed = true, error = "章节列表失败",
+    }, {
+        now = 123,
+        write_state = function(value)
+            T.eq(value.status, "partial", "未知剩余量应为部分状态")
+            T.eq(value.pending, nil, "未知剩余量保持 nil")
+            T.eq(value.failed, true, "保留失败标志")
+            T.eq(value.error, "章节列表失败", "保留失败原因")
+            return true
+        end,
+        marker_exists = function() return false end,
+    })
+    T.eq(state.status, "partial", "未知剩余量不能完成")
+end)

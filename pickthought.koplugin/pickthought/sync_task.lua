@@ -648,6 +648,7 @@ function SyncTask:start(task, on_progress, on_done)
         local Api = require("pickthought.api")
         local WebFetch = require("pickthought.web_fetch")
         local Sync = require("pickthought.sync")
+        local SyncState = require("pickthought.sync_state")
         local EpubReader = require("pickthought.epub_reader")
         local EpubInject = require("pickthought.epub_inject")
         local Thoughts = require("pickthought.thoughts")
@@ -724,17 +725,117 @@ function SyncTask:start(task, on_progress, on_done)
             local function cache_path_for(bid, uid)
                 return cache_for(bid) .. "/" .. UChild.id_name(uid) .. ".json"
             end
+            local function read_json(path)
+                local raw = UChild.read_file(path, true)
+                if not raw then return nil end
+                local decoded_ok, decoded = pcall(JsonChild.decode, raw)
+                return decoded_ok and type(decoded) == "table" and decoded or nil
+            end
+            local function write_json(path, value)
+                local encoded_ok, encoded = pcall(JsonChild.encode, value)
+                if not encoded_ok then return nil, tostring(encoded) end
+                local written, write_error = UChild.atomic_write(path, encoded, true)
+                if not written then return nil, tostring(write_error or "写入失败") end
+                return true
+            end
+            local function state_path_for(bid)
+                return cache_for(bid) .. "/state.json"
+            end
+            local function commit_path_for(bid)
+                return cache_for(bid) .. "/commit.json"
+            end
+            local function write_sync_state(bid, value)
+                return write_json(state_path_for(bid), value)
+            end
+            local function report_for_book(report, bid, previous)
+                report = type(report) == "table" and report or {}
+                local per_book = type(report.per_book) == "table" and report.per_book[tostring(bid)]
+                local source = type(per_book) == "table" and per_book or report
+                local retry_wait = tonumber(source.rate_limit_wait)
+                if source.deferred and not retry_wait and type(previous) == "table" then
+                    local retry_after = tonumber(previous.retry_after)
+                    if retry_after then retry_wait = math.max(0, retry_after - os.time()) end
+                end
+                return {
+                    chapters_total = tonumber(source.total) or tonumber(source.chapters_total)
+                        or tonumber(report.chapters_total) or 0,
+                    chapters_pending = tonumber(source.pending),
+                    next_index = tonumber(source.next_index) or tonumber(report.next_index),
+                    batch_start = tonumber(source.batch_start),
+                    batch_end = tonumber(source.batch_end),
+                    fetch_errors = source.failed and 1 or tonumber(source.fetch_errors)
+                        or (not per_book and tonumber(report.fetch_errors)) or 0,
+                    save_failures = source.thought_save_incomplete and 1
+                        or tonumber(source.save_failures) or (not per_book and tonumber(report.save_failures)) or 0,
+                    rate_limited = source.deferred == true or source.rate_limited == true
+                        or (not per_book and report.rate_limited == true),
+                    rate_limit_wait = retry_wait,
+                    failed = source.failed or nil,
+                    error = source.error,
+                    deferred = source.deferred or nil,
+                }
+            end
+            local function sync_state_options(bid)
+                local marker = cache_for(bid) .. "/.completed"
+                return {
+                    now = os.time(),
+                    write_state = function(value) return write_sync_state(bid, value) end,
+                    write_marker = function(value)
+                        return UChild.atomic_write(marker, value, true)
+                    end,
+                    marker_exists = function() return UChild.file_exists(marker) end,
+                    remove_marker = function()
+                        local removed, remove_error = os.remove(marker)
+                        if removed then return true end
+                        if not UChild.file_exists(marker) then return true end
+                        return nil, remove_error or "删除失败"
+                    end,
+                }
+            end
             -- 多书:每本书独立读上次状态与完成标记(各自 sync-cache),避免聚合值
             -- 互相覆盖导致续传位置错乱 / .completed 误判(P1#5)。
+            local incremental = mode == "sync"
             local previous_states = {}
             local completed_markers = {}
+            local completed_states = {}
             for _, bid in ipairs(book_ids) do
-                local bid_state_raw = UChild.read_file(cache_for(bid) .. "/state.json", true)
-                if bid_state_raw then
-                    local ok_s, dec = pcall(JsonChild.decode, bid_state_raw)
-                    if ok_s and type(dec) == "table" then previous_states[bid] = dec end
+                previous_states[bid] = read_json(state_path_for(bid)) or {}
+                if incremental then
+                    local pending_commit = read_json(commit_path_for(bid))
+                    if pending_commit and type(pending_commit.report) == "table" then
+                        local recovered, recover_error = SyncState.commit(
+                            report_for_book(pending_commit.report, bid, previous_states[bid]),
+                            sync_state_options(bid))
+                        if not recovered then
+                            error("上次同步提交未完成:" .. tostring(recover_error))
+                        end
+                        local commit_path = commit_path_for(bid)
+                        local removed, remove_error = os.remove(commit_path)
+                        if not removed and UChild.file_exists(commit_path) then
+                            error("上次同步提交记录无法清理:" .. tostring(remove_error or "删除失败"))
+                        end
+                        previous_states[bid] = recovered
+                    end
                 end
                 completed_markers[bid] = UChild.file_exists(cache_for(bid) .. "/.completed")
+                completed_states[bid] = incremental and SyncState.is_complete(
+                    previous_states[bid], completed_markers[bid]) or false
+            end
+            if incremental then
+                for _, bid in ipairs(book_ids) do
+                    local previous = previous_states[bid] or {}
+                    local running_ok, running_error = write_sync_state(bid, {
+                        status = SyncState.RUNNING,
+                        total = previous.total,
+                        pending = previous.pending,
+                        next_index = tonumber(previous.next_index) or 1,
+                        updated_at = os.time(),
+                    })
+                    if not running_ok then
+                        error("无法记录同步开始状态(" .. tostring(bid) .. "):"
+                            .. tostring(running_error))
+                    end
+                end
             end
             -- 限速冷却(评审七轮):retry_after 未过期的书本轮不发网络、只读缓存,
             -- 已缓存章节照常参与注入;未限速书正常拉取。不再做任务启动前的全局
@@ -787,7 +888,6 @@ function SyncTask:start(task, on_progress, on_done)
                 return true
             end
             local previous_state = previous_states[book_id] or {}
-            local incremental = mode == "sync"
             -- 续传位置按书计算(P1#5):每本书从其上次 next_index / 剩余章节继续;
             -- 单书时与旧逻辑等价(仅读主绑定),多书时各自独立。
             local chapter_starts = {}
@@ -796,14 +896,14 @@ function SyncTask:start(task, on_progress, on_done)
             for _, bid in ipairs(book_ids) do
                 local ps = previous_states[bid] or {}
                 local cs = 1
-                if incremental and not completed_markers[bid] then
+                if incremental and not completed_states[bid] then
                     cs = tonumber(ps.next_index)
                         or ((tonumber(ps.total) or 0) - (tonumber(ps.pending) or 0) + 1)
                     cs = math.max(1, cs)
                 end
                 chapter_starts[bid] = cs
-                if cs > 1 or completed_markers[bid] then resume_any = true end
-                if not completed_markers[bid] then all_completed = false end
+                if cs > 1 or completed_states[bid] then resume_any = true end
+                if not completed_states[bid] then all_completed = false end
             end
             -- 限速等待不再做任务启动前的全局 usleep(评审七轮):此前取全部书的
             -- max retry_after 统一等待,一本书限速冷却会让未限速书一起暂停;现在
@@ -1024,71 +1124,39 @@ function SyncTask:start(task, on_progress, on_done)
             -- 离线重注不写:它不碰网络,pending 恒为 0,写进去会把「还剩 N 章」
             -- 的真实批次状态抹掉(真机翻车:重注后续拉菜单消失)。
             if mode ~= "reinject" then
-                -- 每本书独立写状态/完成标记(各自保留离线重注缓存)。
-                -- 多书时严格按 report.per_book[bid] 落盘,不再把聚合值写入每本书(P1#5):
-                -- 否则末本游标会覆盖他本,导致重复拉取或跳过章节、.completed 误判。
+                -- EPUB 已完成换位后先给每本书写提交日志,再提交状态/完成标记。
+                -- 任一步骤失败都保留 commit.json,下次 worker 启动先恢复状态。
                 for _, bid in ipairs(book_ids) do
-                    if cooldown[bid] then
-                        -- 限速冷却(评审七轮 + 八轮 P1#1):冷却书本轮无网络产出,默认保留
-                        -- 上次 state.json 原样(不写、不生成 .completed)。但若本书部分缓存
-                        -- 命中、剩余章 deferred(Sync.run 标记 per_book.deferred),则更新
-                        -- 续传游标与 pending、显式标记 deferred、保留原有 retry_after,
-                        -- 绝不写 .completed——报告据此展示「暂缓/剩余待同步」,不显示完成。
-                        local pb = (report.per_book and report.per_book[tostring(bid)]) or {}
-                        if pb.deferred then
-                            local prev = previous_states[bid] or {}
-                            local def_state = {
-                                total = tonumber(pb.total) or tonumber(report.chapters_total) or 0,
-                                pending = tonumber(pb.pending),
-                                next_index = tonumber(pb.next_index) or 1,
-                                deferred = true,
-                                -- 保留原有 retry_after(冷却结束后再补拉);仅当无旧值且本轮
-                                -- 真触发限速时才用 rate_limit_wait 兜底。
-                                retry_after = tonumber(prev.retry_after)
-                                    or (rate_limit_wait and (os.time() + rate_limit_wait)) or nil,
-                                updated_at = os.time(),
-                            }
-                            local dsok, dsjson = pcall(JsonChild.encode, def_state)
-                            if dsok then
-                                UChild.atomic_write(cache_for(bid) .. "/state.json", dsjson, true)
-                            end
-                            -- 不写 .completed(deferred 书未真正完成)
-                        end
-                        -- 完全冷却且非 deferred:保留原状态,不写入。
-                    else
-                    local pb = (report.per_book and report.per_book[tostring(bid)]) or {}
-                    -- pending=nil(章节列表失败/为空)= 剩余未知:不落 0,序列化省略该键,
-                    -- 阅读端聚合时按「未知」处理,不得隐式当 0 吞掉失败书(评审五轮 P1#2)。
-                    local pending = tonumber(pb.pending)
-                    -- 限速等待按书隔离(评审六轮 P2#3):retry_after 只写入实际触发限速的书,
-                    -- 下一轮不再让未限速的书一起等待。
-                    local rate_limit_wait = tonumber(pb.rate_limit_wait)
-                    local state_data = {
-                        total = tonumber(pb.total) or tonumber(report.chapters_total) or 0,
-                        pending = pending,
-                        next_index = tonumber(pb.next_index) or 1,
-                        -- 失败书状态与原因落盘:主界面聚合据此保留失败态并显示原因与续传位。
-                        failed = pb.failed or nil,
-                        error = pb.failed and tostring(pb.error or "同步失败") or nil,
-                        retry_after = rate_limit_wait and (os.time() + rate_limit_wait) or nil,
-                        updated_at = os.time(),
-                    }
-                    local state_ok, state_json = pcall(JsonChild.encode, state_data)
-                    if state_ok then UChild.atomic_write(cache_for(bid) .. "/state.json", state_json, true) end
-                    -- 仅在该书确实完成(无失败标记且 pending==0)时才打 .completed 标记;
-                    -- 失败书(pb.failed)即使 pending 巧合为 0 也绝不标记「完成」,否则失败书
-                    -- 被当成已完成、下次无法续传(评审三轮 P1#1)。分批未完/取消/失败不打标记=续传。
-                    if (not pb.failed) and pending == 0 then
-                        UChild.atomic_write(cache_for(bid) .. "/.completed", tostring(os.time()), true)
-                    else
-                        -- 本次没有明确完成(失败/取消/剩余未知/还有待处理):必须清除旧的
-                        -- .completed 标记,否则下次同步仍会因旧完成标记开启 skip_resumed,
-                        -- 把本次已拉取但尚未注入的章节缓存当成已处理内容跳过,新章节一直
-                        -- 进不了 EPUB(评审六轮 P1#1)。
-                        local marker = cache_for(bid) .. "/.completed"
-                        if UChild.file_exists(marker) then pcall(os.remove, marker) end
+                    local journal_ok, journal_error = write_json(commit_path_for(bid), {
+                        version = 1, book_id = tostring(bid),
+                        report = serializable_copy(report), created_at = os.time(),
+                    })
+                    if not journal_ok then
+                        error("同步内容已生成,但提交记录保存失败(" .. tostring(bid) .. "):"
+                            .. tostring(journal_error))
                     end
-                    end  -- cooldown else 结束:冷却书保留原状态
+                end
+                for _, bid in ipairs(book_ids) do
+                    local pb = report.per_book and report.per_book[tostring(bid)] or nil
+                    -- 完全处于冷却且本轮没有新的 deferred 游标时,保留旧状态与
+                    -- retry_after;本轮只是把已有缓存参与了其他书的重建。
+                    if not (cooldown[bid] and not (type(pb) == "table" and pb.deferred)) then
+                        local previous = previous_states[bid] or {}
+                        local state, state_error = SyncState.commit(
+                            report_for_book(report, bid, previous),
+                            sync_state_options(bid))
+                        if not state then
+                            error("同步状态提交失败(" .. tostring(bid) .. "):" .. tostring(state_error))
+                        end
+                    end
+                end
+                for _, bid in ipairs(book_ids) do
+                    local commit_path = commit_path_for(bid)
+                    local removed, remove_error = os.remove(commit_path)
+                    if not removed and UChild.file_exists(commit_path) then
+                        error("同步状态已提交,但提交记录无法清理(" .. tostring(bid) .. "):"
+                            .. tostring(remove_error or "删除失败"))
+                    end
                 end
             end
             return {report = report, auth = store:auth()}

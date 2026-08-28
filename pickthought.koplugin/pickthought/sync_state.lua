@@ -13,8 +13,8 @@ end
 
 function M.finalize(report, now)
     report = type(report) == "table" and report or {}
-    local pending = tonumber(report.chapters_pending) or 0
-    local complete = pending == 0
+    local pending = tonumber(report.chapters_pending)
+    local complete = pending ~= nil and pending == 0
         and (tonumber(report.fetch_errors) or 0) == 0
         and (tonumber(report.save_failures) or 0) == 0
         and not report.rate_limited
@@ -28,6 +28,9 @@ function M.finalize(report, now)
             retry_after = report.rate_limit_wait and (os.time() + report.rate_limit_wait) or nil,
             batch_start = report.batch_start,
             batch_end = report.batch_end,
+            failed = report.failed or nil,
+            error = report.error and tostring(report.error) or nil,
+            deferred = report.deferred or nil,
             updated_at = now or os.time(),
         },
     }
