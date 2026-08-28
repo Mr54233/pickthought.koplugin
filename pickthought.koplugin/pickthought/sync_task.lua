@@ -823,26 +823,30 @@ function SyncTask:start(task, on_progress, on_done)
                 completed_states[bid] = incremental and SyncState.is_complete(
                     previous_states[bid], completed_markers[bid]) or false
             end
+            -- 限速冷却书只读已有缓存;不能先写 running 再在收尾阶段跳过提交,
+            -- 否则会把旧的 retry_after 覆盖掉,冷却结束前再次发起网络请求。
+            local cooldown = cooling_books(previous_states, book_ids)
             if incremental then
                 for _, bid in ipairs(book_ids) do
-                    local previous = previous_states[bid] or {}
-                    local running_ok, running_error = write_sync_state(bid, {
-                        status = SyncState.RUNNING,
-                        total = previous.total,
-                        pending = previous.pending,
-                        next_index = tonumber(previous.next_index) or 1,
-                        updated_at = os.time(),
-                    })
-                    if not running_ok then
-                        error("无法记录同步开始状态(" .. tostring(bid) .. "):"
-                            .. tostring(running_error))
+                    if not cooldown[bid] then
+                        local previous = previous_states[bid] or {}
+                        local running_ok, running_error = write_sync_state(bid, {
+                            status = SyncState.RUNNING,
+                            total = previous.total,
+                            pending = previous.pending,
+                            next_index = tonumber(previous.next_index) or 1,
+                            updated_at = os.time(),
+                        })
+                        if not running_ok then
+                            error("无法记录同步开始状态(" .. tostring(bid) .. "):"
+                                .. tostring(running_error))
+                        end
                     end
                 end
             end
             -- 限速冷却(评审七轮):retry_after 未过期的书本轮不发网络、只读缓存,
             -- 已缓存章节照常参与注入;未限速书正常拉取。不再做任务启动前的全局
             -- 等待(此前取全部书 max retry_after 统一 usleep,一本书限速拖累整批)。
-            local cooldown = cooling_books(previous_states, book_ids)
             -- 不再清 .completed 缓存:已缓存的章节 resumed 跳过(免费),失败的(缓存
             -- 损坏/不存在)重拉。用户想全新重拉走「重置本书」。之前清缓存导致用户
             -- 点「同步」补齐失败章节时缓存全没(issue #2 评论)。
