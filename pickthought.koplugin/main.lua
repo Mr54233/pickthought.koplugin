@@ -1111,6 +1111,29 @@ function Plugin:_book_ids(path)
     return ids
 end
 
+-- 绑定书名快照:同步任务可能在后台运行期间切换文档或修改绑定,
+-- 报告必须使用本次任务启动时的书名,不能依赖结束时的当前文档。
+function Plugin:_binding_titles(path)
+    local titles = {}
+    for _, rec in ipairs(Binding.list(self.store, path)) do
+        if type(rec) == "table" and type(rec.book_id) == "string" and rec.book_id ~= "" then
+            local title = U.trim(tostring(rec.title or ""))
+            if title ~= "" then titles[rec.book_id] = title end
+        end
+    end
+    return titles
+end
+
+function Plugin:_sync_display_title(path, bound, book_ids)
+    local count = type(book_ids) == "table" and #book_ids or 0
+    if count > 1 then
+        return self:doc_title_guess(path)
+            .. string.format("（多书同步，共 %d 个绑定书目）", count)
+    end
+    local title = U.trim(tostring(bound and bound.title or ""))
+    return title ~= "" and title or self:doc_title_guess(path)
+end
+
 function Plugin:_batch_prompt_path(book_id)
     return self.store:book_cache_path(book_id).."/sync-cache/prompt.json"
 end
@@ -1131,6 +1154,7 @@ end
 function Plugin:_persist_sync_state(runtime)
     self.store:set("sync_runtime",{
         status="active",doc_path=runtime.doc_path,book_id=runtime.book_id,title=runtime.title,
+        book_ids=U.copy(runtime.book_ids or {}),titles=U.copy(runtime.titles or {}),
         task=runtime.task,started_at=runtime.started_at,
     })
 end
@@ -1139,11 +1163,12 @@ function Plugin:_clear_sync_state() self.store:set("sync_runtime",{}) end
 
 function Plugin:_start_sync_task(path,bound,mode,opts)
     opts=opts or {}
-    local title=U.trim(tostring(bound.title or ""))
-    if title=="" then title=self:doc_title_guess(path) end
     -- 多书绑定:统一把全部绑定书 id 传给后台任务,各书独立续传/注入(1:N 合集)。
     local book_ids=self:_book_ids(path)
-    local runtime={doc_path=path,book_id=bound.book_id,book_ids=book_ids,title=title,mode=mode,started_at=os.time(),dialog=nil,background=false}
+    local titles=self:_binding_titles(path)
+    local title=self:_sync_display_title(path,bound,book_ids)
+    local runtime={doc_path=path,book_id=bound.book_id,book_ids=book_ids,titles=titles,
+        title=title,mode=mode,started_at=os.time(),dialog=nil,background=false}
     local ok,err=self.sync_task:start({doc_path=path,book_id=bound.book_id,book_ids=book_ids,title=title,mode=mode,
             clean_source=opts.clean_source,allow_memory_retry=opts.background ~= true},
         function(state) self:_on_sync_progress(runtime,state) end,
@@ -1362,7 +1387,7 @@ function Plugin:_finish_sync(runtime,result)
     self:_merge_sync_auth(result)
     if result.ok==true and type(result.report)=="table" then
         Thoughts.clear_memory_cache()
-        self:_sync_report(result.report)
+        self:_sync_report(result.report,runtime)
         return
     end
     local err=tostring(result.error or "未知错误")
@@ -1410,8 +1435,11 @@ function Plugin:_recover_sync_state()
         self.sync_task:clear_stale_awake()
         return
     end
-    local runtime={doc_path=state.doc_path,book_id=state.book_id,title=state.title,
-        started_at=state.started_at,task=state.task,dialog=nil,background=true}
+    local book_ids=type(state.book_ids)=="table" and state.book_ids or {}
+    if #book_ids==0 and state.book_id then book_ids={tostring(state.book_id)} end
+    local titles=type(state.titles)=="table" and state.titles or {}
+    local runtime={doc_path=state.doc_path,book_id=state.book_id,book_ids=book_ids,titles=titles,
+        title=state.title,started_at=state.started_at,task=state.task,dialog=nil,background=true}
     self._sync_runtime=runtime
     local ok,err=self.sync_task:attach(state.task,
         function(progress) self:_on_sync_progress(runtime,progress) end,
@@ -1499,7 +1527,7 @@ function Plugin:_sync_run(path,bound)
     self:_sync_report(report)
 end
 
-function Plugin:_sync_report(report)
+function Plugin:_sync_report(report,runtime)
     if report.no_changes then
         local pending = tonumber(report.chapters_pending) or 0
         local reason = report.rate_limited
@@ -1511,13 +1539,11 @@ function Plugin:_sync_report(report)
         end
         return
     end
-    -- 逐书明细标题(P1#4):从当前书的绑定记录取每本书的显示名。
-    local titles={}
-    local p=self:current_doc_path()
-    if p then
-        for _, rec in ipairs(Binding.list(self.store,p)) do
-            if rec.book_id then titles[tostring(rec.book_id)]=rec.title or rec.book_id end
-        end
+    -- 后台任务优先使用启动时快照,避免任务结束后当前文档/绑定变化导致明细串书。
+    local titles=runtime and runtime.titles
+    if type(titles)~="table" or next(titles)==nil then
+        local p=runtime and runtime.doc_path or self:current_doc_path()
+        titles=p and self:_binding_titles(p) or {}
     end
     local lines=SyncReport.build(report,{
         auto_batch=BatchSync.auto_enabled(self.store:preferences()),

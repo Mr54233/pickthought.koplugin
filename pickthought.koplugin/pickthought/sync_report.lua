@@ -43,14 +43,24 @@ function M.build(report, options)
         "",
         "本批章节",
     }
+    local function book_label(bid)
+        local label = options.titles and options.titles[tostring(bid)]
+        label = type(label) == "string" and label:gsub("^%s+", ""):gsub("%s+$", "") or ""
+        return label ~= "" and label or "绑定书目"
+    end
+    local book_count = number(report.book_count)
+    if book_count == 0 and type(report.per_book) == "table" then
+        for _ in pairs(report.per_book) do book_count = book_count + 1 end
+    end
     -- 多书:不同远程书章节坐标独立,不推导单一连续范围(评审五轮 P1#1),
     -- 只展示聚合数量;逐书真实 range/pending/next_index 见下方「逐书明细」。
     if report.multi_book then
-        lines[#lines + 1] = string.format("本批共 %s 章（多书聚合）", integer(batch_count))
+        lines[#lines + 1] = string.format("本批共 %s 章（%s 个绑定书目合计）",
+            integer(batch_count), integer(book_count))
         lines[#lines + 1] = string.format("拉取成功：%s/%s 章（%s）",
             integer(report.chapters_fetch_succeeded), integer(batch_count),
             percent(report.chapters_fetch_succeeded, batch_count, 1, true))
-        lines[#lines + 1] = string.format("注入进度：已处理 %s 章（聚合）", integer(processed_total))
+        lines[#lines + 1] = string.format("注入进度：已处理 %s 章（绑定书目合计）", integer(processed_total))
     else
         lines[#lines + 1] = string.format("拉取范围：第 %s–%s 章", integer(batch_start), integer(batch_end))
         lines[#lines + 1] = string.format("拉取成功：%s/%s 章（%s）",
@@ -70,7 +80,7 @@ function M.build(report, options)
         percent(underlines_injected, total_underlines, 2),
         percent(thoughts_injected, total_thoughts, 2))
     lines[#lines + 1] = ""
-    lines[#lines + 1] = "全书进度"
+    lines[#lines + 1] = report.multi_book and "已绑定书目进度" or "全书进度"
     lines[#lines + 1] = string.format("已处理：%s/%s 章（%s）",
         integer(processed_total), integer(total), percent(processed_total, total, 1, true))
     lines[#lines + 1] = string.format("未拉取：%s 章（%s）",
@@ -99,7 +109,7 @@ function M.build(report, options)
         -- 与逐书明细里「某本书同步失败」前后矛盾。明确列出失败书。
         local f = {}
         for _, bid in ipairs(report.failed_books) do
-            f[#f + 1] = tostring(bid)
+            f[#f + 1] = book_label(bid)
         end
         lines[#lines + 1] = "有书同步失败/剩余未知：" .. table.concat(f, "、")
     elseif report.deferred_books and #report.deferred_books > 0 then
@@ -107,11 +117,11 @@ function M.build(report, options)
         -- 明确标「暂缓」,不得显示「全部章节已处理完成」。
         local f = {}
         for _, bid in ipairs(report.deferred_books) do
-            f[#f + 1] = tostring(bid)
+            f[#f + 1] = book_label(bid)
         end
         lines[#lines + 1] = "有书同步暂缓：" .. table.concat(f, "、")
     else
-        lines[#lines + 1] = "全部章节已处理完成"
+        lines[#lines + 1] = report.multi_book and "全部已绑定书目章节已处理完成" or "全部章节已处理完成"
     end
 
     -- 逐书明细(P1#4):多书绑定时,聚合状态之外再列出每本书的进度与失败,
@@ -126,7 +136,7 @@ function M.build(report, options)
             lines[#lines + 1] = "逐书明细"
             for _, bid in ipairs(bids) do
                 local pb = per_book[bid] or {}
-                local label = (options.titles and options.titles[tostring(bid)]) or tostring(bid)
+                local label = book_label(bid)
                 local p = number(pb.pending)
                 local t = number(pb.total)
                 local nx = number(pb.next_index)

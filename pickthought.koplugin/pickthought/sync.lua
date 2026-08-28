@@ -502,6 +502,7 @@ function Sync.run(deps)
         report.batch_limit = chapter_budget or fetch_budget or chapters_total_all
         -- 多书标志:报告/弹窗层据此不推导单一连续章节范围(评审五轮 P1#1)。
         report.multi_book = multi_book or nil
+        report.book_count = #book_ids
         -- 失败书列表:报告层据此不得显示「全部章节已处理完成」(评审六轮 P1#2)。
         report.failed_books = #failed_books > 0 and failed_books or nil
         -- 暂缓书:冷却书部分缓存命中、剩余章 deferred,非失败但非真正完成(评审八轮 P1#1)。

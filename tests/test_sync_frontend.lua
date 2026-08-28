@@ -103,6 +103,51 @@ end
 local chunk = assert(loadfile("pickthought.koplugin/main.lua"))
 local Plugin = chunk()
 
+T.case("多书同步使用本地书名和绑定书名快照", function()
+    local path = "tests/剑来.epub"
+    local persisted
+    local started
+    local self = {
+        store = {
+            get = function(_, key, default)
+                if key == "bindings" then
+                    return {[path] = {
+                        b1 = {book_id = "b1", title = "剑来1", bound_at = 1},
+                        b2 = {book_id = "b2", title = "剑来2", bound_at = 2},
+                        b3 = {book_id = "b3", title = "剑来3", bound_at = 3},
+                    }}
+                end
+                return default
+            end,
+            set = function(_, key, value)
+                if key == "sync_runtime" then persisted = value end
+            end,
+        },
+        sync_task = {
+            start = function(_, options)
+                started = options
+                return true
+            end,
+            descriptor = function() return {pid = 123} end,
+            set_backgrounded = function() end,
+        },
+    }
+    function self:doc_title_guess() return "剑来" end
+    function self:current_doc_path() return nil end
+
+    local bound = {book_id = "b3", title = "剑来3"}
+    T.ok(Plugin._start_sync_task(self, path, bound, "sync", {background = true}),
+        "多书同步任务应成功启动")
+    T.eq(started.title, "剑来（多书同步，共 3 个绑定书目）",
+        "同步任务标题应使用本地书名和绑定书目数量")
+    T.eq(started.book_ids[1], "b1", "同步任务保留第一本绑定书")
+    T.eq(started.book_ids[3], "b3", "同步任务保留最后一本绑定书")
+    T.eq(persisted.title, "剑来（多书同步，共 3 个绑定书目）",
+        "持久化运行状态应保留多书标题")
+    T.eq(persisted.titles.b1, "剑来1", "持久化运行状态应保留第一本书名")
+    T.eq(persisted.titles.b3, "剑来3", "持久化运行状态应保留最后一本书名")
+end)
+
 T.case("前台 _sync_run 适配器透传 no-op rest,绝不调用 usleep(作者 #17 收尾复核)", function()
     usleep_spy.calls = 0
     captured.inject_called = false
