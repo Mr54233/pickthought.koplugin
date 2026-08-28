@@ -660,7 +660,9 @@ function Sync.run(deps)
                 -- 暖模式:直接从缓存流式喂,完全不碰 EPUB。
                 for index, item in ipairs(m.spine or {}) do
                     local html = spine_cache:get(item.href)
-                    callback(item, html, html == nil and "缓存缺失" or nil, index)
+                    if callback(item, html, html == nil and "缓存缺失" or nil, index) == false then
+                        return false, "已取消"
+                    end
                 end
                 return true
             end
@@ -673,7 +675,9 @@ function Sync.run(deps)
             end
             -- 无真实 read_spine:走 read_text 路径(仍经缓存)。
             for index, item in ipairs(m.spine or {}) do
-                callback(item, cached_read_text(m, item.href), nil, index)
+                if callback(item, cached_read_text(m, item.href), nil, index) == false then
+                    return false, "已取消"
+                end
             end
             return true
         end
@@ -682,7 +686,9 @@ function Sync.run(deps)
             return real_read_spine(m, callback)
         end
         for index, item in ipairs(m.spine or {}) do
-            callback(item, real_read_text and real_read_text(m, item.href), nil, index)
+            if callback(item, real_read_text and real_read_text(m, item.href), nil, index) == false then
+                return false, "已取消"
+            end
         end
         return true
     end
@@ -693,14 +699,16 @@ function Sync.run(deps)
             mapped_new, unmatched_new = ChapterMap.build_stream(map_meta.spine, function(visit)
                 return cached_read_spine(map_meta, function(item, content, err, index)
                     map_count = map_count + 1
-                    step("map", map_count, spine_total, item and item.href)
-                    visit(item, content, err, index)
+                    if not step("map", map_count, spine_total, item and item.href) then
+                        return false
+                    end
+                    return visit(item, content, err, index)
                 end)
             end, todo)
         else
             mapped_new, unmatched_new = ChapterMap.build(map_meta.spine, function(href)
                 map_count = map_count + 1
-                step("map", map_count, spine_total, href)
+                if not step("map", map_count, spine_total, href) then return false end
                 return cached_read_text(map_meta, href)
             end, todo)
         end

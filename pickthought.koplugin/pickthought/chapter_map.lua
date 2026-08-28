@@ -195,9 +195,10 @@ local function build_with_scanner(spine, chapters, scan)
         end
         text = nil
         collectgarbage("step", 400)
+        return true
     end
     local scan_ok, scan_err = scan(process_item)
-    if scan_ok == nil then error(scan_err or "无法读取 EPUB 正文") end
+    if scan_ok == nil or scan_ok == false then error(scan_err or "无法读取 EPUB 正文") end
     local function by_spine(a, b)
         return (tonumber(a.spine_index) or 0) < (tonumber(b.spine_index) or 0)
     end
@@ -264,7 +265,10 @@ function ChapterMap.build(spine, read_text, chapters)
     return build_with_scanner(spine, chapters, function(visit)
         for index, item in ipairs(spine or {}) do
             local ok, html, err = pcall(read_text, item.href)
-            visit(index, item, ok and html or nil, ok and err or html)
+            if ok and html == false then return false, "已取消" end
+            if visit(index, item, ok and html or nil, ok and err or html) == false then
+                return false, "已取消"
+            end
         end
         return true
     end)
@@ -273,7 +277,7 @@ end
 function ChapterMap.build_stream(spine, each_text, chapters)
     return build_with_scanner(spine, chapters, function(visit)
         return each_text(function(item, content, err, index)
-            visit(index, item, content, err)
+            return visit(index, item, content, err)
         end)
     end)
 end

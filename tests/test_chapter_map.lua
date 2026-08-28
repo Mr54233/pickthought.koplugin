@@ -23,6 +23,39 @@ T.case("normalize 剥标签解实体去空白", function()
     T.eq(ChapterMap.normalize("&#8220;引&#8221;"), "“引”", "弯引号数值实体与字面一致")
 end)
 
+T.case("流式映射收到取消后立即停止扫描", function()
+    local calls = 0
+    local ok, err = pcall(function()
+        return ChapterMap.build_stream(SPINE, function(callback)
+            for index, item in ipairs(SPINE) do
+                calls = calls + 1
+                if callback(item, FILES[item.href], nil, index) == false then
+                    return false, "已取消"
+                end
+            end
+            return true
+        end, {{uid = "1", title = "第一章", underlines = {
+            {range = "0-7", markText = "春江潮水连海平"},
+        }}})
+    end)
+    T.ok(not ok and tostring(err):find("已取消", 1, true), "取消应从流式映射返回")
+    T.eq(calls, 2, "未取消时映射扫描全部正文")
+
+    calls = 0
+    local cancelled_ok, cancelled_err = pcall(function()
+        return ChapterMap.build_stream(SPINE, function(callback)
+            calls = calls + 1
+            callback(SPINE[1], FILES[SPINE[1].href], nil, 1)
+            return false, "已取消"
+        end, {{uid = "1", title = "第一章", underlines = {
+            {range = "0-7", markText = "春江潮水连海平"},
+        }}})
+    end)
+    T.ok(not cancelled_ok and tostring(cancelled_err):find("已取消", 1, true),
+        "底层读取取消应继续向上映射")
+    T.eq(calls, 1, "底层读取取消后不再扫描下一轮")
+end)
+
 T.case("实体化编码的正文也能被引文命中", function()
     local files = {
         ["c1.xhtml"] = "<html><body><p>&#26149;&#27743;&#28526;&#27700;&#36830;&#28023;&#24179;</p></body></html>",

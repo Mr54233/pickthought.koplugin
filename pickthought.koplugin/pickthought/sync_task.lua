@@ -1040,17 +1040,19 @@ function SyncTask:start(task, on_progress, on_done)
                         append = incremental and resume_any,
                         meta = inject_opts and inject_opts.meta,
                         book_ids = inject_opts and inject_opts.book_ids,
-                        progress = function(_, done, total)
-                            local now2 = os.time()
+                         progress = function(_, done, total)
+                             if cancelled() then return false end
+                             local now2 = os.time()
                             if now2 - last_emit < 2 then return end
                             last_emit = now2
                             local pct = 0.90
                             if tonumber(done) and tonumber(total) and total > 0 then
                                 pct = 0.90 + math.min(done / total, 1) * 0.09
                             end
-                            emit{stage = "inject", current = tonumber(done),
-                                total = tonumber(total), percent = pct}
-                        end})
+                             emit{stage = "inject", current = tonumber(done),
+                                 total = tonumber(total), percent = pct}
+                             return true
+                         end})
                 end,
                 fetch_budget = mode ~= "reinject" and batch_limit or nil,
                 chapter_budget = mode ~= "reinject" and batch_limit or nil,

@@ -105,6 +105,20 @@ T.case("each_spine 单次打开流式读取全部正文", function()
     T.ok(rows[2].content:find("二", 1, true), "第二个正文内容")
 end)
 
+T.case("each_spine 回调取消后停止读取并关闭 Reader", function()
+    local book = fake_book()
+    local meta = EpubReader.load("cancel.epub", book)
+    local calls = 0
+    local ok, err = EpubReader.each_spine(meta, function()
+        calls = calls + 1
+        return false
+    end, book)
+    T.eq(ok, false, "取消应返回 false")
+    T.eq(err, "已取消", "取消错误")
+    T.eq(calls, 1, "取消后只回调一个正文")
+    T.eq(book._reader_new_count, 2, "取消后 Reader 已关闭且没有重复打开")
+end)
+
 T.case("坏包报错", function()
     local no_container = STUBS.archiver_mock({{path = "mimetype", content = "application/epub+zip"}})
     local meta, err = EpubReader.load("bad.epub", no_container)

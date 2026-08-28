@@ -460,12 +460,22 @@ function M.inject_copy(src, book_id, chapters, opts)
                     if not writer:addFileFromMemory(entry.path, content, mtime) then
                         return fail("写入副本失败:" .. entry.path)
                     end
-                    if opts.progress then pcall(opts.progress, entry.path, seen_entries, total_entries) end
+                    if opts.progress then
+                        local progress_ok, progress_result = pcall(opts.progress,
+                            entry.path, seen_entries, total_entries)
+                        if not progress_ok then return fail("进度回调失败:" .. tostring(progress_result)) end
+                        if progress_result == false then return fail("已取消") end
+                    end
                     local content_bytes = #content
                     content = nil
                     gc_policy:release(content_bytes)
                 else
-                    if opts.progress then pcall(opts.progress, entry.path, seen_entries, total_entries) end
+                    if opts.progress then
+                        local progress_ok, progress_result = pcall(opts.progress,
+                            entry.path, seen_entries, total_entries)
+                        if not progress_ok then return fail("进度回调失败:" .. tostring(progress_result)) end
+                        if progress_result == false then return fail("已取消") end
+                    end
                     gc_policy:release(entry.size or 0)
                 end
                 -- 每单元本地处理耗时采样;降级时让出 CPU。与 opts.progress 心跳解耦:

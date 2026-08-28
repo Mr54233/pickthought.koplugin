@@ -98,6 +98,16 @@ T.case("端到端注入", function()
     T.eq(renames[1][2], "/books/书.撷思.epub", "rename dest")
 end)
 
+T.case("注入进度回调取消后丢弃临时副本", function()
+    local stats, err, Arc = run_inject(book_files(), CHAPTERS, nil, {
+        progress = function()
+            return false
+        end,
+    })
+    T.ok(stats == nil and tostring(err):find("已取消", 1, true), "取消应中止注入")
+    T.ok(Arc._last_writer.closed, "取消后应关闭 writer")
+end)
+
 T.case("拒绝二次注入(is_copy)", function()
     local files = book_files()
     files[#files + 1] = {path = EpubInject.MARKER, content = "{}"}
