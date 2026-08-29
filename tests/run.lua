@@ -35,10 +35,15 @@ local files = {
     "tests.test_thought_db", "tests.test_thoughts",
     "tests.test_annotation_compat", "tests.test_thought_db_integrity",
     "tests.test_thoughts_lru",
-    "tests.test_thought_popup",
     "tests.test_updater",
     "tests.test_performance_mode",
     "tests.test_sync_frontend",
+    -- 想法弹窗重做使用大量 KOReader UI mock，放在最后避免污染其他模块。
+    "tests.test_thought_popup",
+    "tests.test_thought_popup_core",
+    "tests.test_thought_popup_pages",
+    "tests.test_thought_popup_widgets",
+    "tests.test_thought_popup_config",
 }
 for _, name in ipairs(files) do
     local ok, err = pcall(require, name)

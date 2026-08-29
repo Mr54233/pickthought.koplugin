@@ -7,7 +7,7 @@
 
 非官方 KOReader 插件:从微信读书拉取一本书的热门划线与公开想法,引文对齐后注入到本地已有的 EPUB。**不下载书、不上传数据、不丢原书(.orig 备份)**。会员书可拉(付费墙锁正文不锁社区数据)。
 
-核心数据流:`拉取(web端点) → 断点缓存 → 章节映射(引文对齐) → 流式注入 → 原地替换(.orig备份) → SQLite存储 → 点击锚点TextViewer弹窗`
+核心数据流:`拉取(web端点) → 断点缓存 → 章节映射(引文对齐) → 流式注入 → 原地替换(.orig备份) → SQLite存储 → 点击锚点原生位图想法弹窗`
 
 ## 关键约束
 
@@ -19,11 +19,18 @@
 
 桌面测试无需 KOReader 环境,用 LuaJIT + stub:
 ```bash
-luajit tests/run.lua   # 76 例,全绿才能提交
+luajit tests/run.lua   # 全绿才能提交
 ```
 - `tests/stubs.lua`:mock 掉 logger/json/lfs,并提供 `archiver_mock`(惰性索引,与真实 ffi/archiver 同语义)和 `lua-ljsqlite3` 内存 mock。
 - 新增模块要在 `tests/run.lua` 的 files 列表注册测试文件。
 - main.lua 不被测试覆盖(依赖 KOReader 运行时),改动后用 `luajit -bl main.lua` 单独做语法检查。
+
+## 想法弹窗
+
+- 公共入口为 `pickthought.thought_popup`，支持 `items` 和上游兼容的 `pages` 参数；同一位置复用一个 widget，切换位置或关书时必须释放页面、文本和字体缓存。
+- 实现位于 `pickthought/thought_popup/`：`pages.lua` 负责布局和位图缓存，`paginator.lua` 保证行边界分页，`center_widget.lua` 和 `widget.lua` 分别负责居中/底部样式。
+- 设置仍存于 `preferences.thoughts`，新字段为 `position`、`height_ratio`、`width_ratio`、`font_size_relative`、`font_size`、`contrast` 和 `tap_to_page`。不要改用新顶层 key，旧安装的 `font=standard/large/xlarge` 由 Store 启动期归一化迁移。
+- `face_factory.lua` 必须只构建局部字体回退链，不能修改 KOReader 全局 `Font.fallbacks`。插件内的 `fonts/NotoEmoji-Regular.ttf` 与 `fonts/LICENSE` 必须一起保留。
 
 ## 提交规范
 

@@ -1,163 +1,155 @@
--- 想法弹窗翻页键与局部重绘回归测试。
+-- 想法弹窗公共入口、对象池与生命周期回归测试。
+-- 直接对应上游 v1.3.0 的 entry/pool 合约，同时覆盖撷思保留的 items 参数。
 
-package.preload["device"] = function()
+local created_bottom, created_center = {}, {}
+local reopen_log, closed_log, freed_log = {}, {}, {}
+
+local function widget_mock(created)
     return {
-        screen = {
-            getWidth = function() return 600 end,
-            getHeight = function() return 800 end,
-            scaleBySize = function(_, value) return value end,
-        },
-        hasKeys = function() return true end,
-        input = {group = {PgBack = "PgBack", PgFwd = "PgFwd", Back = "Back"}},
+        new = function(_, fields)
+            local widget = {
+                items = fields.items,
+                position = fields.position,
+                width_ratio = fields.width_ratio,
+                contrast = fields.contrast,
+                tap_to_page = fields.tap_to_page,
+                clear = function() end,
+                _freeContentCaches = function(self)
+                    freed_log[#freed_log + 1] = self
+                end,
+                _reopen = function(self, opts)
+                    reopen_log[#reopen_log + 1] = {
+                        widget = self,
+                        items = opts.items,
+                        pages = opts.pages,
+                        position = opts.position,
+                    }
+                    self.items = opts.items
+                    self.width_ratio = opts.width_ratio
+                    self.contrast = opts.contrast
+                    self.tap_to_page = opts.tap_to_page
+                end,
+            }
+            created[#created + 1] = widget
+            return widget
+        end,
     }
 end
 
-package.preload["ui/bidi"] = function()
-    return {
-        flipIfMirroredUILayout = function(value) return value end,
-        flipDirectionIfMirroredUILayout = function(value) return value end,
-    }
+package.preload["pickthought.thought_popup.face_factory"] = function()
+    return { init = function() end }
 end
-
-package.preload["ui/font"] = function()
-    return {getFace = function(_, _, size) return {size = size} end}
+package.preload["pickthought.thought_popup.widget"] = function()
+    return widget_mock(created_bottom)
 end
-
-package.preload["ui/widget/textboxwidget"] = function()
-    local TextBoxWidget = {}
-    function TextBoxWidget:new(fields)
-        fields = fields or {}
-        function fields:getAllLineCount()
-            local _, separators = tostring(self.text or ""):gsub("\n\n", "")
-            return separators + 1
-        end
-        function fields:free() end
-        return fields
-    end
-    return TextBoxWidget
+package.preload["pickthought.thought_popup.center_widget"] = function()
+    return widget_mock(created_center)
 end
-
 package.preload["ui/uimanager"] = function()
-    local UIManager = {dirty = {}}
-    function UIManager:show(widget) self.active = widget end
-    function UIManager:close(widget) if self.active == widget then self.active = nil end end
-    function UIManager:isWidgetShown(widget) return self.active == widget end
-    function UIManager:setDirty(widget, mode, region)
-        self.dirty[#self.dirty + 1] = {widget = widget, mode = mode, region = region}
-    end
-    return UIManager
+    return {
+        visible = nil,
+        show = function(self, widget) self.visible = widget end,
+        close = function(self, widget)
+            closed_log[#closed_log + 1] = widget
+            if self.visible == widget then self.visible = nil end
+        end,
+        isWidgetShown = function(self, widget) return self.visible == widget end,
+    }
 end
 
-package.preload["ui/widget/textviewer"] = function()
-    local TextViewer = {}
-
-    function TextViewer:extend(fields)
-        fields = fields or {}
-        fields.__index = fields
-        return setmetatable(fields, {__index = self})
-    end
-
-    function TextViewer:new(fields)
-        local instance = setmetatable(fields or {}, self)
-        if instance.init then instance:init(false) end
-        return instance
-    end
-
-    function TextViewer:init()
-        self.key_events = {
-            Close = {{"Back"}},
-            ScrollOrPrev = {{"PgBack"}},
-            ScrollOrNext = {{"PgFwd"}},
-        }
-        self.box_widget = {
-            getVisLineCount = function() return 1 end,
-            setText = function(widget, text) widget.text = text end,
-        }
-        self.scroll_widget = {
-            text_widget = self.box_widget,
-            setTapScrollEnabled = function() end,
-            resetScroll = function() end,
-            scrollText = function() end,
-        }
-        self.textw = {dimen = {id = "text"}}
-        self.frame = {dimen = {id = "frame"}}
-        self.titlebar = {
-            setTitle = function(widget)
-                widget.set_title_calls = (widget.set_title_calls or 0) + 1
-            end,
-        }
-        self.button_table = nil
-    end
-
-    function TextViewer:onKeyPress(key)
-        for name, sequence in pairs(self.key_events or {}) do
-            if not sequence.is_inactive and sequence[1]
-                    and sequence[1][1] == key then
-                local event_name = sequence.event or name
-                local handler = self["on" .. event_name]
-                return handler and handler(self, sequence.args)
-            end
-        end
-    end
-
-    function TextViewer:onTapClose() return true end
-    function TextViewer:onSwipe() return true end
-    function TextViewer:onCloseWidget() end
-    return TextViewer
-end
-
-for _, module_name in ipairs({
-    "device",
-    "ui/bidi",
-    "ui/font",
-    "ui/widget/textboxwidget",
-    "ui/uimanager",
-    "ui/widget/textviewer",
+for _, name in ipairs({
     "pickthought.thought_popup",
+    "pickthought.thought_popup.face_factory",
+    "pickthought.thought_popup.widget",
+    "pickthought.thought_popup.center_widget",
+    "ui/uimanager",
 }) do
-    package.loaded[module_name] = nil
+    package.loaded[name] = nil
 end
 
-local UIManager = require("ui/uimanager")
+-- test_sync_frontend 会在 package.loaders 中注册一个 KOReader 模块加载器。
+-- 直接写入 package.loaded，确保本组测试一定使用这里的精确 mock。
+package.loaded["pickthought.thought_popup.face_factory"] = {init = function() end}
+package.loaded["pickthought.thought_popup.widget"] = widget_mock(created_bottom)
+package.loaded["pickthought.thought_popup.center_widget"] = widget_mock(created_center)
+local UIManager = {
+    visible = nil,
+    show = function(self, widget) self.visible = widget end,
+    close = function(self, widget)
+        closed_log[#closed_log + 1] = widget
+        if self.visible == widget then self.visible = nil end
+    end,
+    isWidgetShown = function(self, widget) return self.visible == widget end,
+}
+package.loaded["ui/uimanager"] = UIManager
 local Popup = require("pickthought.thought_popup")
 
-T.case("想法弹窗翻页键切换并只重绘正文", function()
-    local popup = Popup.show{items = {
-        {abstract = "原文摘录", author = "甲", content = "第一条"},
-        {author = "乙", content = "第二条"},
-    }}
+local function clear(list)
+    for i = #list, 1, -1 do table.remove(list, i) end
+end
 
-    T.ok(popup.key_events.ScrollOrPrev
-        and popup.key_events.ScrollOrPrev[1][1] == "PgBack"
-        and popup.key_events.ScrollOrPrev.event == "PreviousThought",
-        "PgBack 应绑定上一条想法")
-    T.ok(popup.key_events.ScrollOrNext
-        and popup.key_events.ScrollOrNext[1][1] == "PgFwd"
-        and popup.key_events.ScrollOrNext.event == "NextThought",
-        "PgFwd 应绑定下一条想法")
+local function reset()
+    Popup.cleanup()
+    clear(created_bottom)
+    clear(created_center)
+    clear(reopen_log)
+    clear(closed_log)
+    clear(freed_log)
+    UIManager.visible = nil
+end
 
-    T.eq(popup.page_index, 1, "弹窗从第一条开始")
-    T.eq(popup.titlebar.set_title_calls, 1, "顶部摘录只在初始化时设置")
-    UIManager.dirty = {}
-    T.ok(popup:onKeyPress("PgFwd"), "PgFwd 事件应被消费")
-    T.eq(popup.page_index, 2, "PgFwd 切换到下一条")
-    T.eq(popup.titlebar.set_title_calls, 1, "切换想法不重新设置顶部摘录")
+local items1 = {{abstract = "引文 A", author = "甲", content = "内容 A", likes_count = 1}}
+local items2 = {{abstract = "引文 B", author = "乙", content = "内容 B", likes_count = 2}}
 
-    local dirty = UIManager.dirty[#UIManager.dirty]
-    T.eq(dirty.widget, popup, "正文刷新仍标记弹窗")
-    T.eq(dirty.region, popup.textw.dimen, "正文刷新区域使用 textw")
-    T.ok(dirty.region ~= popup.frame.dimen, "正文刷新不使用整个弹窗区域")
+T.case("想法弹窗默认居中并兼容 items 参数", function()
+    reset()
+    local popup = Popup.show{items = items1, width_ratio = 0.8, contrast = 9}
+    T.eq(#created_center, 1, "默认位置创建居中组件")
+    T.eq(#created_bottom, 0, "默认位置不创建底部组件")
+    T.eq(popup, created_center[1], "返回已显示的居中组件")
+    T.eq(popup.items, items1, "items 原样传入组件")
+    T.eq(UIManager.visible, popup, "组件已显示")
+end)
 
-    T.ok(popup:onKeyPress("PgBack"), "PgBack 事件应被消费")
-    T.eq(popup.page_index, 1, "PgBack 切换到上一条")
-    T.ok(popup:onKeyPress("PgBack"), "第一页仍应消费 PgBack")
-    T.eq(popup.page_index, 1, "第一页不能越界")
-    T.ok(popup:onKeyPress("PgFwd"), "PgFwd 应再次切换到下一条")
-    T.eq(popup.page_index, 2, "PgFwd 切换到最后一条")
-    T.ok(popup:onKeyPress("PgFwd"), "最后一页重复按键仍应消费")
-    T.eq(popup.page_index, 2, "最后一页不能越界")
+T.case("想法弹窗同位置复用并支持 pages 参数", function()
+    reset()
+    local first = Popup.show{pages = items1}
+    local second = Popup.show{pages = items2}
+    T.eq(first, second, "同一位置复用同一组件")
+    T.eq(#created_center, 1, "不会重复创建居中组件")
+    T.eq(#reopen_log, 1, "复用时调用 reopen")
+    T.eq(reopen_log[1].items, items2, "reopen 收到规范化 items")
+    T.eq(reopen_log[1].pages, items2, "保留公开 pages 参数")
+end)
 
-    T.ok(type(popup.onTapClose) == "function", "触摸点按处理仍存在")
-    T.ok(type(popup.onSwipe) == "function", "触摸滑动处理仍存在")
+T.case("切换位置释放另一侧位图缓存", function()
+    reset()
+    local center = Popup.show{items = items1}
+    local bottom = Popup.show{items = items2, position = "bottom"}
+    T.eq(#created_bottom, 1, "显式底部位置创建底部组件")
+    T.eq(bottom, created_bottom[1], "返回底部组件")
+    T.eq(freed_log[1], center, "切换位置释放居中内容缓存")
+    T.eq(Popup.getPoolStats().pool_size, 1, "池中只保留当前显示位置")
+end)
+
+T.case("非法或空想法数据不会创建弹窗", function()
+    reset()
+    local ok = pcall(Popup.show, {items = {}})
+    T.ok(not ok, "空 items 被拒绝")
+    ok = pcall(Popup.show, {})
+    T.ok(not ok, "缺少 items/pages 被拒绝")
+    local popup = Popup.show{items = items1, position = "unexpected"}
+    T.eq(popup, created_center[1], "非法位置回退居中")
+end)
+
+T.case("想法弹窗关闭别名和 cleanup 释放对象池", function()
+    reset()
+    local popup = Popup.show{items = items1}
+    T.ok(Popup.isShowing() and Popup.is_showing(), "两个显示状态接口一致")
     Popup.close_visible()
+    T.eq(closed_log[#closed_log], popup, "snake_case 关闭接口关闭当前组件")
+    Popup.cleanup()
+    local stats = Popup.getPoolStats()
+    T.eq(stats.pool_size, 0, "cleanup 清空对象池")
+    T.ok(not stats.has_active, "cleanup 后没有活动组件")
 end)

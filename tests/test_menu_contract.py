@@ -37,6 +37,28 @@ class MenuContractTests(unittest.TestCase):
             "文件管理器操作菜单只应有一个绑定/重新绑定入口",
         )
 
+    def test_thought_popup_settings_replace_legacy_font_menu(self):
+        source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
+        settings = source.split("function Plugin:settings_menu()", 1)[1].split(
+            "function Plugin:annotation_style_label()", 1
+        )[0]
+
+        self.assertIn('text="想法弹窗设置"', settings)
+        self.assertIn("function Plugin:thought_popup_menu()", source)
+        self.assertNotIn("function Plugin:thought_font_menu()", source)
+        for label in ("位置：", "高度：", "宽度：", "字号：", "字体对比度：", "点击左右区域翻页"):
+            self.assertIn(label, source, f"想法弹窗设置缺少：{label}")
+
+    def test_thought_popup_entry_uses_shared_config_and_document_cleanup(self):
+        source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'local PopupConfig=require("pickthought.thought_popup.popup_config")',
+            source,
+        )
+        self.assertIn("ThoughtPopup.show(PopupConfig.build(self,items))", source)
+        self.assertIn('require("pickthought.thought_popup").cleanup()', source)
+
 
 if __name__ == "__main__":
     unittest.main()

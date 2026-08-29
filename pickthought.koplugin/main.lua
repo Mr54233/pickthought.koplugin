@@ -374,7 +374,7 @@ end
 
 function Plugin:settings_menu()
     return {
-        {text="想法弹窗字体",sub_item_table_func=function() return self:thought_font_menu() end},
+        {text="想法弹窗设置",sub_item_table_func=function() return self:thought_popup_menu() end},
         {text="阅读时自动分批拉取后续章节",checked_func=function()
             return BatchSync.auto_enabled(self.store:preferences())
         end,callback=function()
@@ -479,16 +479,137 @@ function Plugin:apply_annotation_style()
     return true
 end
 
-function Plugin:thought_font_menu()
-    local choices={{"standard","较小（默认）"},{"large","适中"},{"xlarge","接近正文"}}
-    local rows={}
-    for _,choice in ipairs(choices) do
-        local key,label=choice[1],choice[2]
-        rows[#rows+1]={text=label,radio=true,checked_func=function() return (self.store:preferences().thoughts or {}).font==key end,callback=function()
-            local p=self.store:preferences(); p.thoughts=p.thoughts or {}; p.thoughts.font=key; self.store:save_preferences(p); self:toast("想法字体已设为："..label)
-        end}
+local function popup_percent(value, fallback)
+    return math.floor(((tonumber(value) or fallback) * 100) + .5)
+end
+
+function Plugin:_thought_popup_preferences()
+    return self.store:preferences().thoughts or {}
+end
+
+function Plugin:_save_thought_popup_preferences(update)
+    local preferences=self.store:preferences()
+    preferences.thoughts=preferences.thoughts or {}
+    for key,value in pairs(update or {}) do preferences.thoughts[key]=value end
+    self.store:save_preferences(preferences)
+    return preferences.thoughts
+end
+
+function Plugin:thought_popup_menu()
+    local thoughts=self:_thought_popup_preferences()
+    local position=thoughts.position=="bottom" and "底部" or "居中"
+    local contrast=tonumber(thoughts.contrast) or 9
+    local contrast_label=contrast==9 and "纯黑（默认）" or ((contrast>0 and "+" or "")..tostring(contrast))
+    local font_label
+    if thoughts.font_size~=nil then
+        font_label="固定 "..tostring(math.floor(tonumber(thoughts.font_size) or 0))
+    else
+        local relative=tonumber(thoughts.font_size_relative) or 0
+        font_label=relative==0 and "跟随正文" or ((relative>0 and "+" or "")..tostring(relative))
     end
-    return rows
+    return {
+        {text="位置："..position,callback=self:safe("thought_popup_position",function() self:show_thought_popup_position_picker() end)},
+        {text="高度："..tostring(popup_percent(thoughts.height_ratio,0.70)).."%",callback=self:safe("thought_popup_height",function() self:show_thought_popup_height_picker() end)},
+        {text="宽度："..tostring(popup_percent(thoughts.width_ratio,0.80)).."%",enabled_func=function() return self:_thought_popup_preferences().position~="bottom" end,callback=self:safe("thought_popup_width",function() self:show_thought_popup_width_picker() end)},
+        {text="字号："..font_label,callback=self:safe("thought_popup_font",function() self:show_thought_popup_font_size_picker() end)},
+        {text="字体对比度："..contrast_label,callback=self:safe("thought_popup_contrast",function() self:show_thought_popup_contrast_picker() end)},
+        {text="点击左右区域翻页",checked_func=function() return self:_thought_popup_preferences().tap_to_page==true end,callback=self:safe("thought_popup_tap",function()
+            local enabled=not (self:_thought_popup_preferences().tap_to_page==true)
+            self:_save_thought_popup_preferences({tap_to_page=enabled})
+            self:toast(enabled and "想法弹窗左右点击翻页已开启" or "想法弹窗左右点击翻页已关闭")
+        end)},
+    }
+end
+
+function Plugin:show_thought_popup_position_picker()
+    local ButtonDialog=require("ui/widget/buttondialog")
+    local dialog
+    local function choose(position)
+        UIManager:close(dialog)
+        self:_save_thought_popup_preferences({position=position})
+        self:toast(position=="bottom" and "想法弹窗已设为底部" or "想法弹窗已设为居中")
+    end
+    dialog=ButtonDialog:new{title="想法弹窗位置",buttons={
+        {{text="居中",callback=function() choose("center") end}},
+        {{text="底部",callback=function() choose("bottom") end}},
+        {{text="取消",callback=function() UIManager:close(dialog) end}},
+    }}
+    UIManager:show(dialog)
+end
+
+function Plugin:_show_thought_popup_ratio_picker(kind, title, minimum, maximum, fallback)
+    local SpinWidget=require("ui/widget/spinwidget")
+    local thoughts=self:_thought_popup_preferences()
+    local current=popup_percent(thoughts[kind],fallback)
+    local spin=SpinWidget:new{
+        value=current,value_min=minimum,value_max=maximum,value_step=5,precision="%d%%",
+        ok_text="确定",title_text=title,
+        info_text=title.."占屏幕"..(kind=="width_ratio" and "宽度" or "高度").."的比例。",
+        callback=function(widget)
+            local saved=self:_save_thought_popup_preferences({[kind]=widget.value/100})
+            logger.info("[撷思][ThoughtPopup] preference changed",kind,tostring(saved[kind]))
+        end,
+    }
+    UIManager:show(spin)
+end
+
+function Plugin:show_thought_popup_height_picker()
+    self:_show_thought_popup_ratio_picker("height_ratio","想法弹窗高度",20,90,0.70)
+end
+
+function Plugin:show_thought_popup_width_picker()
+    if self:_thought_popup_preferences().position=="bottom" then
+        self:toast("底部想法弹窗使用全屏宽度")
+        return
+    end
+    self:_show_thought_popup_ratio_picker("width_ratio","想法弹窗宽度",40,100,0.80)
+end
+
+function Plugin:show_thought_popup_font_size_picker()
+    local Screen=require("device").screen
+    local thoughts=self:_thought_popup_preferences()
+    local spin
+    local function show(absolute)
+        local title="想法弹窗字号"
+        if absolute then
+            spin=require("ui/widget/spinwidget"):new{
+                width=math.floor(Screen:getWidth()*.75),
+                value=tonumber(thoughts.font_size) or self:_thought_font_pt(),
+                value_min=12,value_max=255,precision="%d",ok_text="确定",title_text=title,
+                info_text="固定字号不随正文大小变化。",
+                callback=function(widget)
+                    self:_save_thought_popup_preferences({font_size=widget.value,font_size_relative=nil})
+                end,
+                extra_text="改为相对正文字号",
+                extra_callback=function() UIManager:close(spin); show(false) end,
+            }
+        else
+            spin=require("ui/widget/spinwidget"):new{
+                width=math.floor(Screen:getWidth()*.75),
+                value=tonumber(thoughts.font_size_relative) or 0,
+                value_min=-10,value_max=5,precision="%+d",ok_text="确定",title_text=title,
+                info_text="0 为跟随正文；负值更小，正值更大。",
+                callback=function(widget)
+                    self:_save_thought_popup_preferences({font_size_relative=widget.value,font_size=nil})
+                end,
+                extra_text="改为固定字号",
+                extra_callback=function() UIManager:close(spin); show(true) end,
+            }
+        end
+        UIManager:show(spin)
+    end
+    show(thoughts.font_size~=nil)
+end
+
+function Plugin:show_thought_popup_contrast_picker()
+    local SpinWidget=require("ui/widget/spinwidget")
+    local spin=SpinWidget:new{
+        value=tonumber(self:_thought_popup_preferences().contrast) or 9,
+        value_min=-3,value_max=9,precision="%+d",ok_text="确定",title_text="想法弹窗字体对比度",
+        info_text="默认值 9 为纯黑；降低数值可使用更浅的灰色。",
+        callback=function(widget) self:_save_thought_popup_preferences({contrast=widget.value}) end,
+    }
+    UIManager:show(spin)
 end
 
 function Plugin:update_about_menu()
@@ -1667,7 +1788,8 @@ function Plugin:_thought_font_pt(level)
     end
     base=math.max(14,math.min(48,base or 22))
     local factors={standard=0.86,large=1.00,xlarge=1.15}
-    local factor=factors[tostring(level or "standard")] or 1
+    -- 未指定旧字体枚举时返回正文基准大小；新弹窗以相对字号 0 表示跟随正文。
+    local factor=factors[tostring(level)] or 1
     return math.floor(base*factor+.5)
 end
 
@@ -1706,10 +1828,9 @@ function Plugin:_show_thought_href(href)
         if not group then self:info(tostring(err or "没有想法内容")); return end
         local items=Thoughts.popup_items(group)
         if #items==0 then self:info("没有想法内容"); return end
-        local prefs=self.store:preferences().thoughts or {}
         local ThoughtPopup=require("pickthought.thought_popup")
-        ThoughtPopup.show{items=items,
-            height_ratio=tonumber(prefs.height_ratio) or 0.62}
+        local PopupConfig=require("pickthought.thought_popup.popup_config")
+        ThoughtPopup.show(PopupConfig.build(self,items))
         logger.info("[撷思][ThoughtPopup] opened",
             "book=",tostring(info.book_id),"chapter=",tostring(info.chapter_uid),
             "comments=",tostring(#(group.texts or {})),
@@ -1768,6 +1889,7 @@ function Plugin:onCloseDocument()
     if binding and binding.book_id then
         Thoughts.close_book(self.store, binding.book_id)
     end
+    pcall(function() require("pickthought.thought_popup").cleanup() end)
     self:_teardown_thought_tap()
 end
 

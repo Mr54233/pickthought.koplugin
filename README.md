@@ -10,7 +10,7 @@
 - 原地替换原书,进度保留,`.orig` 备份可一键还原
 - 后台同步,断点续传,防锁屏,重启自动接管
 - 大书分批(200 章/次),防风控
-- SQLite 存储,原生 TextViewer 弹窗,点按秒开
+- SQLite 存储,原生位图想法弹窗,点按秒开；支持居中/底部显示、长内容分页或滚动、物理翻页键与可选左右点按翻页
 - 阅读中一键切换默认、细实线、细虚线或隐藏划线样式
 - 在线 OTA 更新
 
@@ -27,3 +27,5 @@ KOReader ≥ v2026.03(需要 `ffi/archiver` + `lua-ljsqlite3`)。
 ## 致谢
 
 衍生自 [miuread-koreader](https://github.com/miumiupy98-art/miuread-koreader)(同步框架/HTTP) 与 [weread.koplugin](https://github.com/finlater/weread.koplugin)(SQLite/弹窗)。基于 [AGPL-3.0](LICENSE)。
+
+`fonts/NotoEmoji-Regular.ttf` 用于想法弹窗的 Emoji 回退，采用 [SIL Open Font License 1.1](pickthought.koplugin/fonts/LICENSE)。

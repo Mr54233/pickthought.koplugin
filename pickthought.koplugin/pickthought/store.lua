@@ -6,10 +6,16 @@ local BatchSync=require("pickthought.batch_sync")
 local Json=require("pickthought.json")
 local U=require("pickthought.util")
 local Store={}; Store.__index=Store
+-- 想法弹窗重做后的设置。保留在原有 preferences.thoughts 下，避免破坏
+-- 已安装用户的偏好文件和其他模块的读取路径。
+local THOUGHT_POPUP_DEFAULTS={
+ position="center",height_ratio=0.70,width_ratio=0.80,
+ font_size_relative=0,font_size=nil,contrast=9,tap_to_page=false,
+}
 local defaults={
  schema=Config.SCHEMA,
  auth={api_key="",cookies={},account={name="",vid="",logged_at=0}},
- preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=true,download_complete_notice=true,show_annotations=true,annotation_style="default",annotation_mode="all",low_resource=false,download_dir="",shelf_sort="read",shelf_scope="all",shelf_view="compact",shelf_filters={},shelf_section="account",account_shelf_kind="books",account_shelf_sort="read",account_shelf_scope="all",generated_shelf_sort="opened",generated_shelf_scope="all",thoughts={font="standard",width_ratio=0.91,height_ratio=0.60},update={manifest=Config.UPDATE_MANIFEST,auto_update=false,notify_update=false},sync={time_enabled=false,time_notice_enabled=true,progress_enabled=true,progress_notice_mode="first",manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300},auto_batch_sync_opt_in=BatchSync.DEFAULT_AUTO,sync_keep_awake=true,sync_batch_limit=200,debug_mode=false},
+ preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=true,download_complete_notice=true,show_annotations=true,annotation_style="default",annotation_mode="all",low_resource=false,download_dir="",shelf_sort="read",shelf_scope="all",shelf_view="compact",shelf_filters={},shelf_section="account",account_shelf_kind="books",account_shelf_sort="read",account_shelf_scope="all",generated_shelf_sort="opened",generated_shelf_scope="all",thoughts=THOUGHT_POPUP_DEFAULTS,update={manifest=Config.UPDATE_MANIFEST,auto_update=false,notify_update=false},sync={time_enabled=false,time_notice_enabled=true,progress_enabled=true,progress_notice_mode="first",manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300},auto_batch_sync_opt_in=BatchSync.DEFAULT_AUTO,sync_keep_awake=true,sync_batch_limit=200,debug_mode=false},
  library={},sessions={},shelf_cache={books={},mp={},updated_at=0},cover_index={},cover_guard={active=false,started_at=0,stage="",version=""},update_state={},update_info={},download_queue={},
  pending_installs={},last_cleanup_result={},read_report_consumed={},
 }
@@ -52,10 +58,63 @@ function Store:new(options)
     o.db=LuaSettings:open(o.settings_path)
     for k,v in pairs(defaults) do if o.db:readSetting(k,nil)==nil then o.db:saveSetting(k,U.copy(v)) end end
     o:migrate()
+    o:normalize_thought_popup_preferences()
     -- v1.1.45 intentionally disables automatic legacy EPUB relocation. File
     -- moves must never run during every reader/file-manager transition.
     o.db:flush()
     return o
+end
+
+local function clamp_number(value, minimum, maximum)
+    value=tonumber(value)
+    if not value then return nil end
+    return math.max(minimum,math.min(maximum,value))
+end
+
+-- Config.SCHEMA 在旧版本中没有连续递增，不能把这项迁移藏在 schema 分支
+-- 里。每次启动做一次幂等补齐：旧高度/宽度保留，只有不存在的新字段才填入
+-- 上游 v1.3.0 的默认值；旧字体枚举映射为近似相对字号。
+function Store:normalize_thought_popup_preferences()
+    local preferences=self.db:readSetting("preferences",{})
+    if type(preferences)~="table" then preferences={} end
+    local thoughts=preferences.thoughts
+    local changed=false
+    if type(thoughts)~="table" then thoughts={}; preferences.thoughts=thoughts; changed=true end
+
+    if thoughts.position~="center" and thoughts.position~="bottom" then
+        thoughts.position=THOUGHT_POPUP_DEFAULTS.position; changed=true
+    end
+    local height=clamp_number(thoughts.height_ratio,0.20,0.90)
+    if height==nil then height=THOUGHT_POPUP_DEFAULTS.height_ratio end
+    if thoughts.height_ratio~=height then thoughts.height_ratio=height; changed=true end
+    local width=clamp_number(thoughts.width_ratio,0.40,1.00)
+    if width==nil then width=THOUGHT_POPUP_DEFAULTS.width_ratio end
+    if thoughts.width_ratio~=width then thoughts.width_ratio=width; changed=true end
+
+    if thoughts.font_size~=nil then
+        local absolute=clamp_number(thoughts.font_size,8,255)
+        if absolute==nil then thoughts.font_size=nil; changed=true
+        elseif thoughts.font_size~=absolute then thoughts.font_size=absolute; changed=true end
+    end
+    if thoughts.font_size==nil then
+        local relative=clamp_number(thoughts.font_size_relative,-10,5)
+        if relative==nil then
+            local legacy={standard=-3,large=0,xlarge=3}
+            relative=legacy[tostring(thoughts.font)] or THOUGHT_POPUP_DEFAULTS.font_size_relative
+        end
+        if thoughts.font_size_relative~=relative then thoughts.font_size_relative=relative; changed=true end
+    end
+
+    local contrast=clamp_number(thoughts.contrast,-3,9)
+    if contrast==nil then contrast=THOUGHT_POPUP_DEFAULTS.contrast end
+    if thoughts.contrast~=contrast then thoughts.contrast=contrast; changed=true end
+    if thoughts.tap_to_page==nil then thoughts.tap_to_page=false; changed=true
+    elseif type(thoughts.tap_to_page)~="boolean" then
+        thoughts.tap_to_page=thoughts.tap_to_page==true; changed=true
+    end
+
+    if changed then self.db:saveSetting("preferences",preferences) end
+    return changed
 end
 function Store:migrate()
     local schema=tonumber(self.db:readSetting("schema",1)) or 1
@@ -292,8 +351,16 @@ function Store:set(k,v) self.db:saveSetting(k,v); self.db:flush() end
 function Store:auth() return U.merge(defaults.auth,self:get("auth",{})) end
 function Store:save_auth(v) self:set("auth",U.merge(defaults.auth,v or {})) end
 function Store:clear_auth() self:set("auth",U.copy(defaults.auth)) end
-function Store:preferences() return U.merge(defaults.preferences,self:get("preferences",{})) end
-function Store:save_preferences(v) self:set("preferences",U.merge(defaults.preferences,v or {})) end
+function Store:preferences()
+    local preferences=U.merge(defaults.preferences,self:get("preferences",{}))
+    preferences.thoughts=U.merge(THOUGHT_POPUP_DEFAULTS,preferences.thoughts or {})
+    return preferences
+end
+function Store:save_preferences(v)
+    local preferences=U.merge(defaults.preferences,v or {})
+    preferences.thoughts=U.merge(THOUGHT_POPUP_DEFAULTS,preferences.thoughts or {})
+    self:set("preferences",preferences)
+end
 function Store:books_root() local p=self:preferences().download_dir; if p=="" then p=self.default_books_dir end; U.mkdir(p); return p end
 function Store:epub_root() return self:books_root() end
 function Store:book_cache_path(id) return self.cache_books_dir.."/"..U.id_name(id) end
