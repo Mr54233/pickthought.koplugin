@@ -174,3 +174,31 @@ T.case("SyncTask fork 失败时也恢复低内存设置", function()
     FFIUtil.runInSubProcess = original
     os.remove(settings_path)
 end)
+
+T.case("SyncTask 多书拉取进度跨书连续且单书保持兼容", function()
+    local progress = SyncTask._fetch_progress
+    local first_book_last = progress(1, 3, 3, 3)
+    local second_book_start = progress(2, 3, 1, 3)
+    local second_book_later = progress(2, 3, 3, 3)
+    local third_book_start = progress(3, 3, 1, 3)
+    T.ok(second_book_start > first_book_last, "切换到第二本时进度不回退")
+    T.ok(second_book_later > second_book_start, "第二本内部进度递增")
+    T.ok(third_book_start > second_book_later, "切换到第三本时进度不回退")
+    T.eq(progress(1, 1, 1, 3), 0.03, "单书第一章保持原起始进度")
+    T.eq(progress(1, 1, 3, 3), 0.03 + (2 / 3) * 0.77,
+        "单书百分比保持原计算")
+end)
+
+T.case("SyncTask 当前书目进度补全书名和序号", function()
+    local state = SyncTask._annotate_book_progress({stage = "fetch", book_id = "b2"},
+        {b1 = 1, b2 = 2, b3 = 3}, 3,
+        {b1 = "剑来1", b2 = "剑来2", b3 = "剑来3"})
+    T.eq(state.book_id, "b2", "书 ID 字符串化后保留")
+    T.eq(state.book_index, 2, "补全当前书目序号")
+    T.eq(state.book_count, 3, "补全绑定书目总数")
+    T.eq(state.book_title, "剑来2", "补全当前书名供标题刷新")
+
+    local unrelated = SyncTask._annotate_book_progress({stage = "map"},
+        {b1 = 1}, 1, {b1 = "剑来"})
+    T.eq(unrelated.book_title, nil, "合集级进度不附带误导性的当前书名")
+end)

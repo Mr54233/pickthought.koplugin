@@ -13,7 +13,7 @@
 --   read_spine(meta, callback)(可选) → 单遍流式读取全部 spine；缺省回退 read_text
 --   save_thoughts(book_id, uid, review_groups)
 --   inject(src, book_id, mapped_chapters, dest) → stats, err(epub_inject.inject_copy)
---   progress(phase, i, n, text) → 返回 false 表示取消(可选)
+--   progress(phase, i, n, text, book_id) → 返回 false 表示取消(可选)
 --   file_exists/rename/remove(可选,默认真实文件系统)
 local Binding = require("pickthought.binding")
 local ChapterMap = require("pickthought.chapter_map")
@@ -47,8 +47,8 @@ function Sync.backup_path(doc_path) return tostring(doc_path) .. Sync.BACKUP_SUF
 
 function Sync.run(deps)
     local progress = deps.progress or function() return true end
-    local function step(phase, i, n, text)
-        return progress(phase, i, n, text) ~= false
+    local function step(phase, i, n, text, book_id)
+        return progress(phase, i, n, text, book_id) ~= false
     end
     local file_exists = deps.file_exists or U.file_exists
     local rename = deps.rename or os.rename
@@ -207,7 +207,7 @@ function Sync.run(deps)
         local book_consecutive_hard = 0
         local book_rate_limited = false
         local book_rate_limit_wait
-        if not step("chapters", 0, 1, "获取章节列表") then return nil, "已取消" end
+        if not step("chapters", 0, 1, "获取章节列表", bid) then return nil, "已取消" end
         local ok, chapters_raw = pcall(function() return deps.api:chapters(bid) end)
         if not ok then
             local msg = "获取章节列表失败:" .. tostring(chapters_raw)
@@ -273,7 +273,7 @@ function Sync.run(deps)
                 book_pending = book_pending + (#chapter_list - i + 1)
                 break
             end
-            if not step("fetch", i, #chapter_list, ch.title) then return nil, "已取消" end
+            if not step("fetch", i, #chapter_list, ch.title, bid) then return nil, "已取消" end
             local good, data = pcall(function()
                 return deps.annotations:fetch_chapter(bid, ch.uid)
             end)

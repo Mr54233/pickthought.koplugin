@@ -133,6 +133,88 @@ end
 -- 加载真实 main.lua(返回 Plugin 类),不进 require 缓存名冲突。
 local chunk = assert(loadfile("pickthought.koplugin/main.lua"))
 local Plugin = chunk()
+local SyncProgress = require("pickthought.sync_progress")
+
+T.case("多书同步当前书目动态显示在标题,正文不重复显示", function()
+    T.eq(SyncProgress._title_for_state({stage = "fetch", book_title = "剑来2"}),
+        "正在同步《剑来2》", "拉取阶段标题显示当前书名")
+    T.eq(SyncProgress._title_for_state({stage = "chapters", book_title = "剑来3"}),
+        "正在同步《剑来3》", "获取章节列表阶段标题显示当前书名")
+    T.eq(SyncProgress._title_for_state({stage = "map", book_title = "剑来2"}), nil,
+        "映射阶段不伪造当前远端书目")
+
+    local dialog = {_title = "正在同步《剑来1》"}
+    dialog.title_widget = {setText = function(_, text) dialog.title_text = text end}
+    dialog.progress = {setPercentage = function(_, value) dialog.percent = value end}
+    dialog.percent_widget = {setText = function(_, text) dialog.percent_text = text end}
+    dialog.status_widget = {setText = function(_, text) dialog.status_text = text end}
+    function dialog:_redraw() self.redraws = (self.redraws or 0) + 1 end
+    setmetatable(dialog, {__index = SyncProgress})
+
+    dialog:set_state({stage = "fetch", current = 2, total = 30, percent = 0.40,
+        book_id = "b2", book_index = 2, book_count = 3, book_title = "剑来2"})
+    T.eq(dialog.title_text, "正在同步《剑来2》", "第二本书更新弹窗标题")
+    T.eq(dialog.status_text, "拉取划线与想法\n章节 2 / 30",
+        "正文只保留阶段和章节进度")
+    T.ok(not dialog.status_text:find("当前书目", 1, true), "正文不重复显示当前书目")
+
+    dialog:set_state({stage = "fetch", current = 1, total = 30, percent = 0.55,
+        book_id = "b3", book_index = 3, book_count = 3, book_title = "剑来3"})
+    T.eq(dialog.title_text, "正在同步《剑来3》", "切换书目后标题继续更新")
+    dialog:set_state({stage = "map", current = 1, total = 100, percent = 0.84})
+    T.eq(dialog.title_text, "正在同步《剑来3》", "合集映射阶段保留最后一个拉取书目标题")
+end)
+
+T.case("多书同步初始标题使用同步队列的第一本书", function()
+    local self = {doc_title_guess = function() return "剑来合集" end}
+    T.eq(Plugin._sync_display_title(self, "tests/剑来.epub", {title = "剑来3"},
+        {"b1", "b2", "b3"}, {b1 = "剑来1", b2 = "剑来2", b3 = "剑来3"}),
+        "剑来1", "初始标题与首个实际同步书目一致")
+    T.eq(Plugin._sync_display_title(self, "tests/剑来.epub", {title = "剑来"},
+        {"b1"}, {}), "剑来", "缺少快照时回退主绑定书名")
+end)
+
+T.case("多书同步任务保留启动时的书名快照", function()
+    local path = "tests/剑来.epub"
+    local persisted
+    local started
+    local self = {
+        store = {
+            get = function(_, key, default)
+                if key == "bindings" then
+                    return {[path] = {
+                        b1 = {book_id = "b1", title = "剑来1", bound_at = 1},
+                        b2 = {book_id = "b2", title = "剑来2", bound_at = 2},
+                    }}
+                end
+                return default
+            end,
+            set = function(_, key, value)
+                if key == "sync_runtime" then persisted = value end
+            end,
+        },
+        sync_task = {
+            start = function(_, options)
+                started = options
+                return true
+            end,
+            descriptor = function() return {pid = 123} end,
+            set_backgrounded = function() end,
+        },
+    }
+    self._book_ids = function() return {"b1", "b2"} end
+    self._binding_titles = function() return {b1 = "剑来1", b2 = "剑来2"} end
+    function self:doc_title_guess() return "剑来" end
+    function self:_sync_display_title() return "剑来1" end
+    function self:_persist_sync_state(runtime) persisted = runtime end
+
+    T.ok(Plugin._start_sync_task(self, path, {book_id = "b2", title = "剑来2"},
+        "sync", {background = true}), "多书同步任务应成功启动")
+    T.eq(started.titles.b1, "剑来1", "后台任务保留第一本书名快照")
+    T.eq(started.titles.b2, "剑来2", "后台任务保留第二本书名快照")
+    T.eq(started.title, "剑来1", "任务初始标题使用第一本书")
+    T.eq(persisted.titles.b1, "剑来1", "持久化状态保留第一本书名快照")
+end)
 
 T.case("前台 _sync_run 适配器透传 no-op rest,绝不调用 usleep(作者 #17 收尾复核)", function()
     usleep_spy.calls = 0

@@ -58,8 +58,10 @@ local function make_deps(overrides)
             calls.merged = {book_id = book_id, uid = tostring(uid), from = from, into = into}
             return true
         end,
-        progress = function(phase, i, n, text)
-            calls.progress[#calls.progress + 1] = {phase = phase, i = i, n = n, text = text}
+        progress = function(phase, i, n, text, book_id)
+            calls.progress[#calls.progress + 1] = {
+                phase = phase, i = i, n = n, text = text, book_id = book_id,
+            }
             return true
         end,
     }
@@ -106,6 +108,12 @@ T.case("同步全流程", function()
     T.eq(calls.injected.mapped[1].href, "OEBPS/c1.xhtml", "映射到 c1")
     T.eq(calls.injected.mapped[1].chapter_uid, "1", "chapter_uid 传递")
     T.ok(#calls.progress >= 3, "进度回调发生")
+    T.eq(calls.progress[1].book_id, "b001", "单书章节列表进度携带书 ID")
+    local fetch_progress
+    for _, event in ipairs(calls.progress) do
+        if event.phase == "fetch" then fetch_progress = event; break end
+    end
+    T.eq(fetch_progress.book_id, "b001", "单书拉取进度携带书 ID")
 end)
 
 T.case("重同步从 .orig 干净备份注入", function()
@@ -630,6 +638,31 @@ T.case("想法缓存失败按复合键扣除,多书同 uid 不串", function()
     T.eq(report.thoughts_failed, 1, "A 本失败想法计入失败")
     local pbA = report.per_book and report.per_book["A"]
     T.ok(pbA and pbA.thought_save_incomplete, "A 本标记想法写入未完成(禁止 .completed)")
+end)
+
+T.case("多书进度回调按顺序携带当前书 ID", function()
+    local deps, calls = make_deps({
+        book_ids = {"b001", "b002"},
+        api = {chapters = function(_, bid)
+            return {data = {
+                {chapterUid = 1, title = "第一章(" .. tostring(bid) .. ")", chapterIdx = 1},
+                {chapterUid = 2, title = "第二章(" .. tostring(bid) .. ")", chapterIdx = 2},
+            }}
+        end},
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "多书同步应成功: " .. tostring(err))
+    local chapter_events, fetch_events = {}, {}
+    for _, event in ipairs(calls.progress) do
+        if event.phase == "chapters" then chapter_events[#chapter_events + 1] = event end
+        if event.phase == "fetch" then fetch_events[#fetch_events + 1] = event end
+    end
+    T.eq(#chapter_events, 2, "两本书各产生章节列表进度")
+    T.eq(chapter_events[1].book_id, "b001", "第一本章节列表进度带书 ID")
+    T.eq(chapter_events[2].book_id, "b002", "第二本章节列表进度带书 ID")
+    T.eq(#fetch_events, 4, "两本书各两章产生拉取进度")
+    T.eq(fetch_events[1].book_id, "b001", "第一本拉取进度带书 ID")
+    T.eq(fetch_events[3].book_id, "b002", "第二本拉取进度带书 ID")
 end)
 
 T.case("单章拉取失败不中断,计入 fetch_errors", function()

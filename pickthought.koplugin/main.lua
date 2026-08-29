@@ -1124,13 +1124,14 @@ function Plugin:_binding_titles(path)
     return titles
 end
 
-function Plugin:_sync_display_title(path, bound, book_ids)
-    local count = type(book_ids) == "table" and #book_ids or 0
-    if count > 1 then
-        return self:doc_title_guess(path)
-            .. string.format("（多书同步，共 %d 个绑定书目）", count)
+function Plugin:_sync_display_title(path, bound, book_ids, titles)
+    -- 多书任务按 book_ids 顺序处理，弹窗刚打开时先显示第一本实际会处理的书；
+    -- 后续由进度状态把标题更新为当前书目，不能把合集说明固定在标题上。
+    local title = ""
+    if type(book_ids) == "table" and #book_ids > 0 and type(titles) == "table" then
+        title = U.trim(tostring(titles[tostring(book_ids[1])] or ""))
     end
-    local title = U.trim(tostring(bound and bound.title or ""))
+    if title == "" then title = U.trim(tostring(bound and bound.title or "")) end
     return title ~= "" and title or self:doc_title_guess(path)
 end
 
@@ -1166,10 +1167,10 @@ function Plugin:_start_sync_task(path,bound,mode,opts)
     -- 多书绑定:统一把全部绑定书 id 传给后台任务,各书独立续传/注入(1:N 合集)。
     local book_ids=self:_book_ids(path)
     local titles=self:_binding_titles(path)
-    local title=self:_sync_display_title(path,bound,book_ids)
+    local title=self:_sync_display_title(path,bound,book_ids,titles)
     local runtime={doc_path=path,book_id=bound.book_id,book_ids=book_ids,titles=titles,
         title=title,mode=mode,started_at=os.time(),dialog=nil,background=false}
-    local ok,err=self.sync_task:start({doc_path=path,book_id=bound.book_id,book_ids=book_ids,title=title,mode=mode,
+    local ok,err=self.sync_task:start({doc_path=path,book_id=bound.book_id,book_ids=book_ids,titles=U.copy(titles),title=title,mode=mode,
             clean_source=opts.clean_source,allow_memory_retry=opts.background ~= true},
         function(state) self:_on_sync_progress(runtime,state) end,
         function(result) self:_finish_sync(runtime,result) end)
@@ -1203,12 +1204,16 @@ function Plugin:_on_sync_progress(runtime,state)
         local limit=tonumber(self.store:preferences().sync_batch_limit) or 200
         if total>limit then
             runtime.big_book_notified=true
+            local scope="本书"
+            if tonumber(state.book_count) and tonumber(state.book_count)>1 then
+                scope="当前书目《"..tostring(state.book_title or "绑定书目").."》"
+            end
             local continuation=BatchSync.auto_enabled(self.store:preferences())
                 and "或继续阅读时自动补。"
                 or "或阅读到边界时按提示后台补。"
             self:toast(string.format(
-                "本书共 %d 章。为防风控,单次最多拉 %d 章;"
-                .."其余用「继续拉取后续章节」按钮,%s",total,limit,continuation),6)
+                "%s共 %d 章。为防风控,单次最多拉 %d 章;"
+                .."其余用「继续拉取后续章节」按钮,%s",scope,total,limit,continuation),6)
         end
     end
     if runtime.dialog then runtime.dialog:set_state(state) end
@@ -1470,6 +1475,10 @@ function Plugin:_sync_run(path,bound)
     local EpubInject=require("pickthought.epub_inject")
     local WebFetch=require("pickthought.web_fetch")
     local PerformanceMode=require("pickthought.performance_mode")
+    local sync_book_ids=self:_book_ids(path)
+    local sync_titles=type(self._binding_titles)=="function" and self:_binding_titles(path) or {}
+    local sync_book_index={}
+    for index,bid in ipairs(sync_book_ids or {}) do sync_book_index[tostring(bid)]=index end
     if not Trapper:info("正在读取本地书…") then return end
     -- Sync.run 内部对 api/fetch 已 pcall,但 ChapterMap/EpubReader 的意外异常
     -- 会死在协程里(Trapper 只记日志),必须在这里收敛成用户可见的失败。
@@ -1477,7 +1486,8 @@ function Plugin:_sync_run(path,bound)
         return Sync.run{
             doc_path=path,
             book_id=bound.book_id,
-            book_ids=self:_book_ids(path),
+            book_ids=sync_book_ids,
+            titles=sync_titles,
             api=self.api,
             annotations=WebFetch:new(self.api),
             load_meta=function(p) return EpubReader.load(p) end,
@@ -1500,10 +1510,14 @@ function Plugin:_sync_run(path,bound)
                      -- Sync.run 另一注入入口,保留默认 usleep 让出 CPU。
                      perf=PerformanceMode:new({ rest=function() end })})
             end,
-            progress=function(phase,i,n,text)
+            progress=function(phase,i,n,text,progress_book_id)
                 local msg
-                if phase=="chapters" then msg="正在获取章节列表…"
-                elseif phase=="fetch" then msg=string.format("正在拉取划线与想法 %d/%d\n%s\n(点按屏幕可取消)",i,n,tostring(text or ""))
+                local book_index=progress_book_id and sync_book_index[tostring(progress_book_id)]
+                local book_title=progress_book_id and sync_titles[tostring(progress_book_id)] or nil
+                local book_prefix=(#sync_book_ids > 1 and book_index)
+                    and string.format("当前书目 %d/%d：《%s》\n",book_index,#sync_book_ids,book_title or "绑定书目") or ""
+                if phase=="chapters" then msg=book_prefix.."正在获取章节列表…"
+                elseif phase=="fetch" then msg=book_prefix..string.format("正在拉取划线与想法 %d/%d\n%s\n(点按屏幕可取消)",i,n,tostring(text or ""))
                 elseif phase=="map" then
                     if n and n>0 and i and i>0 then
                         msg=string.format("正在匹配本地章节 %d/%d 个正文文件",i,n)

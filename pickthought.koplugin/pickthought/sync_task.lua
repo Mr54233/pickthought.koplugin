@@ -69,6 +69,38 @@ local function cooling_books(previous_states, book_ids, now)
     return cooldown
 end
 
+-- 拉取阶段占 3%~80%。单书保持原有计算;多书给每本书一个连续区间,
+-- 这样切换书目时不会把总进度重新算回 0%。current 使用当前章节的
+-- 1-based 序号,因此当前章节刚开始时位于本书区间起点。
+local function fetch_progress(book_index, book_count, current, total)
+    local local_progress = 0
+    local n = tonumber(total) or 0
+    local i = tonumber(current) or 0
+    if n > 0 then
+        local_progress = math.max(0, math.min((i - 1) / n, 1))
+    end
+    local count = tonumber(book_count) or 1
+    if count > 1 then
+        local index = math.max(1, math.min(tonumber(book_index) or 1, count))
+        return 0.03 + ((index - 1 + local_progress) / count) * 0.77
+    end
+    return 0.03 + local_progress * 0.77
+end
+
+local function annotate_book_progress(state, book_index_by_id, book_count, book_title_by_id)
+    state = state or {}
+    local bid = state.book_id
+    local key = bid ~= nil and tostring(bid) or nil
+    local index = key and book_index_by_id[key]
+    if index then
+        state.book_id = key
+        state.book_index = index
+        state.book_count = book_count
+        state.book_title = book_title_by_id[key]
+    end
+    return state
+end
+
 function SyncTask:new(store)
     local owner_token = tostring(os.time()) .. "-" .. tostring(math.random(100000,999999))
     local instance = setmetatable({
@@ -628,6 +660,21 @@ function SyncTask:start(task, on_progress, on_done)
     -- 多书绑定:task.book_ids 为列表;未提供时回退到单个 book_id(旧调用/旧测试不变)。
     local book_ids = (type(task.book_ids) == "table" and #task.book_ids > 0) and task.book_ids or {book_id}
     local doc_title = tostring(task.title or "")
+    -- 进度文件需要知道当前正在处理哪一本远端书;标题使用任务启动时的快照,
+    -- 不依赖父进程之后的当前文档或绑定变化。
+    local book_index_by_id, book_title_by_id = {}, {}
+    local task_titles = type(task.titles) == "table" and task.titles or {}
+    for index, bid in ipairs(book_ids) do
+        local key = tostring(bid)
+        book_index_by_id[key] = index
+        local title = task_titles[bid]
+        if title == nil then title = task_titles[key] end
+        title = U.trim(tostring(title or ""))
+        book_title_by_id[key] = title ~= "" and title or "绑定书目"
+    end
+    local function annotate_progress_state(state)
+        return annotate_book_progress(state, book_index_by_id, #book_ids, book_title_by_id)
+    end
     -- mode: "sync"=联网增量同步(复用缓存并按游标续传);"reinject"=纯离线,
     -- 只用上次拉取的数据重跑映射+注入,零网络。
     local mode = tostring(task.mode or "sync")
@@ -680,7 +727,7 @@ function SyncTask:start(task, on_progress, on_done)
         end
 
         local function emit(state)
-            state = state or {}
+            state = annotate_progress_state(state or {})
             state.task_token = task_token
             state.updated_at = os.time()
             local ok, encoded = pcall(JsonChild.encode, state)
@@ -702,14 +749,15 @@ function SyncTask:start(task, on_progress, on_done)
 
             -- 心跳:章节内的想法批次、注入条目都发进度,让父进程看门狗能区分
             -- 「慢但活着」与「真死了」。2 秒节流,避免高频写盘。
-            local fetch_now = {i = 0, n = 0, title = ""}
+            local fetch_now = {i = 0, n = 0, title = "", book_id = nil, book_index = nil}
             local heartbeat_at = 0
             local function heartbeat(stage, message, percent)
                 local now = os.time()
                 if now - heartbeat_at < 2 then return end
                 heartbeat_at = now
                 emit{stage = stage, current = fetch_now.i, total = fetch_now.n,
-                    chapter = fetch_now.title, percent = percent, message = message}
+                    chapter = fetch_now.title, book_id = fetch_now.book_id,
+                    percent = percent, message = message}
             end
 
             -- 断点/复用缓存:每章拉取结果落盘。
@@ -883,7 +931,7 @@ function SyncTask:start(task, on_progress, on_done)
                 end,
             }
             local function fetch_percent()
-                return 0.03 + (fetch_now.n > 0 and (fetch_now.i - 1) / fetch_now.n or 0) * 0.77
+                return fetch_progress(fetch_now.book_index, #book_ids, fetch_now.i, fetch_now.n)
             end
             -- 缓存体检:review_groups 每项必须带 texts 表(防旧版坏缓存),不合格当未命中重拉。
             local function cache_valid(data)
@@ -1076,7 +1124,7 @@ function SyncTask:start(task, on_progress, on_done)
                 map_cache_path = function(bid) return store:book_dir(bid) .. "/sync-cache/map.json" end,
                 -- B:开启 spine 正文持久化缓存,分批同步第 2 批起不再解压原 EPUB。
                 spine_cache = true,
-                progress = function(phase, i, n, text)
+                progress = function(phase, i, n, text, progress_book_id)
                     if cancelled() then return false end
                     if phase == "map" or phase == "inject" then
                         local bucket = tonumber(i) and tonumber(n) and tonumber(n) > 0
@@ -1088,16 +1136,26 @@ function SyncTask:start(task, on_progress, on_done)
                                 "elapsed_s=", tostring(os.time() - sync_started))
                         end
                     end
-                    local percent
-                    if phase == "chapters" then percent = 0.02
-                    elseif phase == "fetch" then
+                    local percent, phase_book_id
+                    if phase == "chapters" or phase == "fetch" then
+                        local bid = progress_book_id ~= nil and tostring(progress_book_id) or nil
                         fetch_now.i, fetch_now.n, fetch_now.title = i, n, tostring(text or "")
-                        percent = 0.03 + (n > 0 and (i - 1) / n or 0) * 0.77
+                        fetch_now.book_id = bid or fetch_now.book_id
+                        fetch_now.book_index = fetch_now.book_id and book_index_by_id[fetch_now.book_id]
+                        phase_book_id = fetch_now.book_id
+                    end
+                    if phase == "chapters" then
+                        -- 单书保持原有 2% 起始位置;多书沿用拉取区间,切换书目不回退。
+                        percent = #book_ids > 1
+                            and fetch_progress(fetch_now.book_index, #book_ids, 0, 1) or 0.02
+                    elseif phase == "fetch" then
+                        percent = fetch_percent()
                     elseif phase == "map" then
                         -- 映射按正文文件推进,占 0.84~0.90 这一段
                         percent = 0.84 + (n and n > 0 and i and i > 0 and (i / n) * 0.06 or 0)
                     elseif phase == "inject" then percent = 0.90 end
-                    emit{stage = phase, current = i, total = n, chapter = text, percent = percent}
+                    emit{stage = phase, current = i, total = n, chapter = text,
+                        book_id = phase_book_id, percent = percent}
                     return true
                 end,
             }
@@ -1265,5 +1323,7 @@ SyncTask._diagnostics_enabled = diagnostics_enabled
 SyncTask._parse_memory_available_kb = parse_memory_available_kb
 SyncTask._decode_wait_status = decode_wait_status
 SyncTask._cooling_books = cooling_books
+SyncTask._fetch_progress = fetch_progress
+SyncTask._annotate_book_progress = annotate_book_progress
 
 return SyncTask

@@ -34,6 +34,7 @@ end
 function SyncProgress:init()
     self.dimen = Screen:getSize()
     self.cancelled = false
+    self._title = self.title or "撷思同步"
 
     local frame_width = math.floor(Screen:getWidth() * 0.82)
     local frame_height = math.floor(Screen:getHeight() * 0.60)
@@ -42,7 +43,7 @@ function SyncProgress:init()
     local group = VerticalGroup:new{align="center"}
 
     self.title_widget = TextBoxWidget:new{
-        text = self.title or "撷思同步",
+        text = self._title,
         face = Font:getFace("ffont", 22),
         bold = true,
         width = content_width,
@@ -146,8 +147,29 @@ function SyncProgress:_redraw()
     end)
 end
 
+function SyncProgress._title_for_state(state)
+    state = state or {}
+    if state.stage ~= "chapters" and state.stage ~= "fetch" then return nil end
+    local book_title = clean_status(state.book_title, 100)
+    if book_title == "" then return nil end
+    return "正在同步《" .. book_title .. "》"
+end
+
+function SyncProgress:set_title(title)
+    if title == nil then return false end
+    title = clean_status(title, 100)
+    if title == "" or title == self._title then return false end
+    self._title = title
+    self.title = title
+    if self.title_widget then self.title_widget:setText(title) end
+    return true
+end
+
 function SyncProgress:set_state(state)
     state = state or {}
+    -- 多书拉取阶段把当前远端书名放在标题，而不是正文再加一行重复信息。
+    -- 映射/注入是合集级操作，保留最后一个拉取书目的标题即可。
+    local title_changed = self:set_title(SyncProgress._title_for_state(state))
     local current = tonumber(state.current) or 0
     local total = tonumber(state.total) or 0
     local percent = tonumber(state.percent)
@@ -185,7 +207,7 @@ function SyncProgress:set_state(state)
     local percent_text = tostring(math.floor(percent * 100 + 0.5)) .. "%"
     local status_text = table.concat(rows, "\n")
     local signature = percent_text .. "\n" .. status_text
-    if signature == self._last_signature then return end
+    if signature == self._last_signature and not title_changed then return end
     self._last_signature = signature
     self.progress:setPercentage(percent)
     self.percent_widget:setText(percent_text)
