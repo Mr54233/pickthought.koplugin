@@ -15,6 +15,21 @@ local PowerInhibit = require("pickthought.power_inhibit")
 local SyncTask = {}
 SyncTask.__index = SyncTask
 
+local function failure_state(previous, status, reason, now)
+    previous = type(previous) == "table" and previous or {}
+    return {
+        status = status,
+        total = previous.total,
+        pending = previous.pending,
+        next_index = previous.next_index or 1,
+        failed = true,
+        error = tostring(reason or "同步失败"),
+        updated_at = now or os.time(),
+    }
+end
+
+SyncTask._failure_state = failure_state
+
 -- Kindle 512 MB 机型在可用内存约 100 MB 时，fork reader.lua 子进程会被内核
 -- 拒绝。这里留出保守余量，避免把底层 ENOMEM 直接抛给用户。
 local MIN_FORK_AVAILABLE_KB = 128 * 1024
@@ -779,6 +794,43 @@ function SyncTask:start(task, on_progress, on_done)
             return UChild.file_exists(cancel_path)
         end
 
+        local function persist_failure_state(status, reason)
+            for _, bid in ipairs(book_ids) do
+                local cache_dir = worker_data_dir .. "/books/" .. UChild.id_name(bid) .. "/sync-cache"
+                local state_path = cache_dir .. "/state.json"
+                local previous = {}
+                local raw = UChild.read_file(state_path, true)
+                if raw then
+                    local decoded_ok, decoded = pcall(JsonChild.decode, raw)
+                    if decoded_ok and type(decoded) == "table" then previous = decoded end
+                end
+                local state = failure_state(previous, status, reason, os.time())
+                local encoded_ok, encoded = pcall(JsonChild.encode, state)
+                if not encoded_ok then
+                    LoggerChild.warn("[撷思][SyncTask] failure state encode failed",
+                        "book=", tostring(bid), "path=", state_path,
+                        "error=", tostring(encoded))
+                else
+                    local write_call, written, write_error = pcall(
+                        UChild.atomic_write, state_path, encoded, true)
+                    if not write_call or not written then
+                        LoggerChild.warn("[撷思][SyncTask] failure state save failed",
+                            "book=", tostring(bid), "path=", state_path,
+                            "error=", tostring(write_call and write_error or written))
+                    end
+                end
+                local marker = cache_dir .. "/.completed"
+                if UChild.file_exists(marker) then
+                    local removed, remove_error = os.remove(marker)
+                    if not removed and UChild.file_exists(marker) then
+                        LoggerChild.warn("[撷思][SyncTask] failed to clear completion marker",
+                            "book=", tostring(bid), "path=", marker,
+                            "error=", tostring(remove_error or "删除失败"))
+                    end
+                end
+            end
+        end
+
         local ok, value = xpcall(function()
             local store = Store:new{
                 settings_path = worker_settings_path,
@@ -1228,39 +1280,7 @@ function SyncTask:start(task, on_progress, on_done)
                 -- 失败/取消状态落盘(上游 128a007 语义,移植为多书版):每本绑定书都写
                 -- 失败态,失败书下次续传入口不消失(评审五轮 P1#2:失败书状态不丢失)。
                 -- 单书时仅一本,与原逻辑等价。
-                local failure_status = cancelled() and "cancelled" or "failed"
-                for _, bid in ipairs(book_ids) do
-                    local ps = previous_states[bid] or {}
-                    local state_path = cache_for(bid) .. "/state.json"
-                    local ok_call, state_saved, state_error = pcall(function()
-                        return write_json(state_path, {
-                                status = failure_status,
-                                total = ps.total,
-                                pending = ps.pending,
-                                next_index = ps.next_index or 1,
-                                failed = true,
-                                error = tostring(sync_err or "同步失败"),
-                                updated_at = os.time(),
-                            })
-                    end)
-                    if not ok_call or not state_saved then
-                        local detail = ok_call and state_error or state_saved
-                        LoggerChild.warn("[撷思][SyncTask] failure state save failed",
-                            "book=", tostring(bid), "path=", state_path,
-                            "error=", tostring(detail or "写入失败"))
-                    end
-                    -- 本次失败/取消:必须清除旧 .completed,否则下次同步因旧完成标记
-                    -- 开启 skip_resumed,把本次已拉取未注入的缓存跳过(评审六轮 P1#1)。
-                    local marker = cache_for(bid) .. "/.completed"
-                    if UChild.file_exists(marker) then
-                        local removed, remove_error = os.remove(marker)
-                        if not removed and UChild.file_exists(marker) then
-                            LoggerChild.warn("[撷思][SyncTask] failed to clear completion marker",
-                                "book=", tostring(bid), "path=", marker,
-                                "error=", tostring(remove_error or "删除失败"))
-                        end
-                    end
-                end
+                persist_failure_state(cancelled() and "cancelled" or "failed", sync_err)
                 error(sync_err or "同步失败")
             end
             -- 状态落盘:阅读端据此做「继续拉取」菜单与自动分批触发。
@@ -1322,6 +1342,7 @@ function SyncTask:start(task, on_progress, on_done)
                 display_error = "设备内存不足,同步未完成;原书与已有副本未受影响,已拉取章节保存在断点缓存。"
             end
             local was_cancelled = cancelled() or display_error == "已取消"
+            persist_failure_state(was_cancelled and "cancelled" or "failed", display_error)
             emit{stage = was_cancelled and "cancelled" or "error", message = display_error}
             payload = {ok = false, cancelled = was_cancelled or nil, error = display_error}
         end

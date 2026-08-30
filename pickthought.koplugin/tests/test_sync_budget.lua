@@ -62,23 +62,23 @@ T.case("可用内存低于安全线时阻止新批次", function()
     T.ok(tostring(reason):find("安全线", 1, true), "低内存原因明确")
 end)
 
-T.case("worker 96MB 安全线允许 120MB 运行但阻止 95MB 下一章", function()
-    local available = 120 * 1024
+T.case("worker 72MB 安全线允许 90MB 运行但阻止 71MB 下一章", function()
+    local available = 90 * 1024
     local budget = SyncBudget:new{
         max_cache_bytes = 1024 * 1024, max_underlines = 100,
-        max_thought_entries = 100, min_available_kb = 96 * 1024,
+        max_thought_entries = 100, min_available_kb = 72 * 1024,
         read_memory_available_kb = function() return available end,
     }
-    T.ok(budget:can_fetch(), "96 到 128MB 区间允许 worker 继续检查")
+    T.ok(budget:can_fetch(), "72 到 128MB 区间允许 worker 继续检查")
     budget:account({underline_count = 1, thought_entry_count = 1})
-    available = 95 * 1024
+    available = 71 * 1024
     local ok, reason = budget:can_fetch()
-    T.ok(not ok, "低于 96MB 后阻止下一章")
-    T.ok(tostring(reason):find("96MB", 1, true), "低内存原因使用 worker 安全线")
+    T.ok(not ok, "低于 72MB 后阻止下一章")
+    T.ok(tostring(reason):find("72MB", 1, true), "低内存原因使用 worker 安全线")
 end)
 
-T.case("worker 默认内存安全线为 96MB", function()
-    T.eq(SyncBudget.DEFAULTS.min_available_kb, 96 * 1024, "允许 worker 在低内存区间按章续传")
+T.case("worker 默认内存安全线为 72MB", function()
+    T.eq(SyncBudget.DEFAULTS.min_available_kb, 72 * 1024, "允许 worker 在低内存区间按章续传")
     T.eq(SyncBudget.DEFAULTS.max_thought_entries, 150000, "允许历史 200 章想法规模")
     T.eq(SyncBudget.DEFAULTS.max_underlines, 20000, "允许历史 200 章划线规模")
 end)

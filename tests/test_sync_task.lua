@@ -53,6 +53,18 @@ T.case("SyncTask fork 前安全线仍为 128MB", function()
     T.eq(SyncTask.MIN_FORK_AVAILABLE_KB, 128 * 1024, "fork 门槛不随 worker 安全线降低")
 end)
 
+T.case("取消失败状态保留续传位置", function()
+    local state = SyncTask._failure_state({total = 1398, pending = 1198, next_index = 201},
+        "cancelled", "已取消", 1234567890)
+    T.eq(state.status, "cancelled", "取消状态明确")
+    T.eq(state.failed, true, "取消也标记为未完成")
+    T.eq(state.total, 1398, "保留章节总数")
+    T.eq(state.pending, 1198, "保留待处理数量")
+    T.eq(state.next_index, 201, "保留续传位置")
+    T.eq(state.error, "已取消", "保留取消原因")
+    T.eq(state.updated_at, 1234567890, "使用传入时间")
+end)
+
 T.case("SyncTask 描述符保留同步入口来源", function()
     local task = SyncTask:new({temp_dir = "tests"})
     task.job = {
