@@ -25,7 +25,7 @@ _G.STUBS = require("tests.stubs")
 local files = {
     "tests.test_smoke", "tests.test_epub_reader", "tests.test_annotation_style",
     "tests.test_epub_inject",
-    "tests.test_binding", "tests.test_chapter_map", "tests.test_sync",
+    "tests.test_binding", "tests.test_chapter_map", "tests.test_sync_budget", "tests.test_sync",
     "tests.test_sync_state",
     "tests.test_sync_clean_source",
     "tests.test_sync_report", "tests.test_batch_sync",

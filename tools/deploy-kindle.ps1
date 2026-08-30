@@ -26,7 +26,9 @@ function Assert-Command([string]$Name) {
 }
 
 function Quote-Posix([string]$Value) {
-    return "'" + $Value.Replace("'", "'\''") + "'"
+    $singleQuote = [string][char]39
+    $escapedQuote = $singleQuote + "\" + $singleQuote + $singleQuote
+    return $singleQuote + $Value.Replace($singleQuote, $escapedQuote) + $singleQuote
 }
 
 function Invoke-Remote([string]$Command) {

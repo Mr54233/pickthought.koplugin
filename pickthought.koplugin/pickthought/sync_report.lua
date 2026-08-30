@@ -100,6 +100,10 @@ function M.build(report, options)
             lines[#lines + 1] = string.format("下一批：第 %s–%s 章，共 %s 章",
                 integer(next_start), integer(next_end), integer(next_count))
         end
+        if report.batch_budget_reason then
+            lines[#lines + 1] = "本批因资源预算已暂停：" .. tostring(report.batch_budget_reason)
+                .. "；下一批将从断点继续"
+        end
         lines[#lines + 1] = ""
         lines[#lines + 1] = options.auto_batch == false
             and "菜单「继续拉取后续章节」手动拉，或阅读到边界时按提示后台补"

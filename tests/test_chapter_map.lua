@@ -277,3 +277,50 @@ T.case("流式读取顺序不同也按 spine 顺序输出多目标", function()
     T.eq(mapped[1].href, "a.xhtml", "恢复 spine 第一项")
     T.eq(mapped[2].href, "b.xhtml", "恢复 spine 第二项")
 end)
+
+T.case("章节边界只检查相关候选并返回指标", function()
+    local files = {
+        ["c1.xhtml"] = "<h2>第一章 甲乙丙丁</h2><p>第一章的正文引文甲乙丙丁。</p>",
+        ["c2.xhtml"] = "<h2>第二章 戊己庚辛</h2><p>第二章的正文引文戊己庚辛。</p>",
+        ["c3.xhtml"] = "<h2>第三章 壬癸子丑</h2><p>第三章的正文引文壬癸子丑。</p>",
+        ["c4.xhtml"] = "<h2>第四章 其他内容</h2><p>无关正文。</p>",
+        ["c5.xhtml"] = "<h2>第五章 其他内容</h2><p>无关正文。</p>",
+        ["c6.xhtml"] = "<h2>第六章 其他内容</h2><p>无关正文。</p>",
+    }
+    local spine = {}
+    for i = 1, 6 do spine[i] = {href = "c" .. tostring(i) .. ".xhtml"} end
+    local chapters = {
+        {uid = "1", title = "第一章 甲乙丙丁", underlines = {
+            {range = "0-8", markText = "第一章的正文引文甲乙丙丁"},
+        }},
+        {uid = "2", title = "第二章 戊己庚辛", underlines = {
+            {range = "0-8", markText = "第二章的正文引文戊己庚辛"},
+        }},
+        {uid = "3", title = "第三章 壬癸子丑", underlines = {
+            {range = "0-8", markText = "第三章的正文引文壬癸子丑"},
+        }},
+    }
+    local mapped, unmatched, metrics = ChapterMap.build(spine, function(href) return files[href] end,
+        chapters, {check_interval = 1})
+    T.eq(#mapped, 3, "三章均命中")
+    T.eq(#unmatched, 0, "没有未匹配章节")
+    T.ok(metrics and metrics.bounded_files >= 3, "记录章节边界命中文件")
+    T.ok(metrics.quote_checks <= 9, "候选搜索量被章节边界压缩")
+    T.ok(metrics.checkpoints > 0, "记录协作检查点")
+end)
+
+T.case("章节映射检查点取消会停止扫描", function()
+    local calls = 0
+    local ok, err = pcall(function()
+        return ChapterMap.build({{href = "c1.xhtml"}, {href = "c2.xhtml"}}, function(href)
+            return "<h2>第一章 甲乙丙丁</h2><p>第一章的正文引文甲乙丙丁。</p>"
+        end, {{uid = "1", title = "第一章 甲乙丙丁", underlines = {
+            {range = "0-8", markText = "第一章的正文引文甲乙丙丁"},
+        }}}, {check_interval = 1, on_check = function()
+            calls = calls + 1
+            return false
+        end})
+    end)
+    T.ok(not ok and tostring(err):find("已取消", 1, true), "检查点取消向上传播")
+    T.ok(calls > 0, "触发了检查点")
+end)

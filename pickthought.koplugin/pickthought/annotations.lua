@@ -14,6 +14,13 @@ local function range_key(v)
     return str(rawget(v,"range") or rawget(v,"markRange") or rawget(v,"bookmarkRange"))
 end
 
+local function has_thought(data, key)
+    if type(data) ~= "table" then return false end
+    if type(data.thought_ranges) == "table" and data.thought_ranges[key] then return true end
+    return type(data.review_map) == "table"
+        and type(data.review_map[key]) == "table" and #data.review_map[key] > 0
+end
+
 local function parse_range(value)
     local a, b = str(value):match("^(%d+)%-(%d+)$")
     a, b = tonumber(a), tonumber(b)
@@ -289,7 +296,7 @@ local function intervals(data, visible_count, index)
             if a and b and b > a then
                 out[#out + 1] = {
                     a=a, b=b, key=range_key(row),
-                    thought=#(data.review_map[range_key(row)] or {}) > 0,
+                    thought=has_thought(data, range_key(row)),
                 }
             else
                 stats.dropped = stats.dropped + 1

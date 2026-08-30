@@ -12,10 +12,18 @@ local THOUGHT_POPUP_DEFAULTS={
  position="center",height_ratio=0.70,width_ratio=0.80,
  font_size_relative=0,font_size=nil,contrast=9,tap_to_page=false,
 }
+local LEGACY_SYNC_MIN_AVAILABLE_KB=96*1024
+local LEGACY_SYNC_MAX_CACHE_BYTES=24*1024*1024
+local LEGACY_SYNC_MAX_UNDERLINES=12000
+local LEGACY_SYNC_MAX_THOUGHT_ENTRIES=30000
+local CURRENT_SYNC_MIN_AVAILABLE_KB=128*1024
+local CURRENT_SYNC_MAX_CACHE_BYTES=96*1024*1024
+local CURRENT_SYNC_MAX_UNDERLINES=20000
+local CURRENT_SYNC_MAX_THOUGHT_ENTRIES=150000
 local defaults={
  schema=Config.SCHEMA,
  auth={api_key="",cookies={},account={name="",vid="",logged_at=0}},
- preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=true,download_complete_notice=true,show_annotations=true,annotation_style="default",annotation_mode="all",low_resource=false,download_dir="",shelf_sort="read",shelf_scope="all",shelf_view="compact",shelf_filters={},shelf_section="account",account_shelf_kind="books",account_shelf_sort="read",account_shelf_scope="all",generated_shelf_sort="opened",generated_shelf_scope="all",thoughts=THOUGHT_POPUP_DEFAULTS,update={manifest=Config.UPDATE_MANIFEST,auto_update=false,notify_update=false},sync={time_enabled=false,time_notice_enabled=true,progress_enabled=true,progress_notice_mode="first",manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300},auto_batch_sync_opt_in=BatchSync.DEFAULT_AUTO,sync_keep_awake=true,sync_batch_limit=200,debug_mode=false},
+ preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=true,download_complete_notice=true,show_annotations=true,annotation_style="default",annotation_mode="all",low_resource=false,download_dir="",shelf_sort="read",shelf_scope="all",shelf_view="compact",shelf_filters={},shelf_section="account",account_shelf_kind="books",account_shelf_sort="read",account_shelf_scope="all",generated_shelf_sort="opened",generated_shelf_scope="all",thoughts=THOUGHT_POPUP_DEFAULTS,update={manifest=Config.UPDATE_MANIFEST,auto_update=false,notify_update=false},sync={time_enabled=false,time_notice_enabled=true,progress_enabled=true,progress_notice_mode="first",manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300},auto_batch_sync_opt_in=BatchSync.DEFAULT_AUTO,sync_keep_awake=true,sync_batch_limit=200,sync_max_cache_bytes=25165824,sync_max_underlines=12000,sync_max_thought_entries=30000,sync_min_available_kb=131072,debug_mode=false},
  library={},sessions={},shelf_cache={books={},mp={},updated_at=0},cover_index={},cover_guard={active=false,started_at=0,stage="",version=""},update_state={},update_info={},download_queue={},
  pending_installs={},last_cleanup_result={},read_report_consumed={},
 }
@@ -354,11 +362,37 @@ function Store:clear_auth() self:set("auth",U.copy(defaults.auth)) end
 function Store:preferences()
     local preferences=U.merge(defaults.preferences,self:get("preferences",{}))
     preferences.thoughts=U.merge(THOUGHT_POPUP_DEFAULTS,preferences.thoughts or {})
+    -- 96MB 是前一轮测试版本写入的临时安全线,不是用户可配置选项;
+    -- 升级后迁移到为映射/注入预留余量的 128MB。
+    if tonumber(preferences.sync_min_available_kb)==LEGACY_SYNC_MIN_AVAILABLE_KB then
+        preferences.sync_min_available_kb=CURRENT_SYNC_MIN_AVAILABLE_KB
+    end
+    if tonumber(preferences.sync_max_cache_bytes)==LEGACY_SYNC_MAX_CACHE_BYTES then
+        preferences.sync_max_cache_bytes=CURRENT_SYNC_MAX_CACHE_BYTES
+    end
+    if tonumber(preferences.sync_max_underlines)==LEGACY_SYNC_MAX_UNDERLINES then
+        preferences.sync_max_underlines=CURRENT_SYNC_MAX_UNDERLINES
+    end
+    if tonumber(preferences.sync_max_thought_entries)==LEGACY_SYNC_MAX_THOUGHT_ENTRIES then
+        preferences.sync_max_thought_entries=CURRENT_SYNC_MAX_THOUGHT_ENTRIES
+    end
     return preferences
 end
 function Store:save_preferences(v)
     local preferences=U.merge(defaults.preferences,v or {})
     preferences.thoughts=U.merge(THOUGHT_POPUP_DEFAULTS,preferences.thoughts or {})
+    if tonumber(preferences.sync_min_available_kb)==LEGACY_SYNC_MIN_AVAILABLE_KB then
+        preferences.sync_min_available_kb=CURRENT_SYNC_MIN_AVAILABLE_KB
+    end
+    if tonumber(preferences.sync_max_cache_bytes)==LEGACY_SYNC_MAX_CACHE_BYTES then
+        preferences.sync_max_cache_bytes=CURRENT_SYNC_MAX_CACHE_BYTES
+    end
+    if tonumber(preferences.sync_max_underlines)==LEGACY_SYNC_MAX_UNDERLINES then
+        preferences.sync_max_underlines=CURRENT_SYNC_MAX_UNDERLINES
+    end
+    if tonumber(preferences.sync_max_thought_entries)==LEGACY_SYNC_MAX_THOUGHT_ENTRIES then
+        preferences.sync_max_thought_entries=CURRENT_SYNC_MAX_THOUGHT_ENTRIES
+    end
     self:set("preferences",preferences)
 end
 function Store:books_root() local p=self:preferences().download_dir; if p=="" then p=self.default_books_dir end; U.mkdir(p); return p end

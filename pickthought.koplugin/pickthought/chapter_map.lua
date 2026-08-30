@@ -1,6 +1,11 @@
 -- 章节映射:用划线引文在本地 spine 文档里投票,把微信读书章节映射到 zip 内 href。
 -- 引文和文档正文走同一套 normalize(剥标签、解实体、去全部空白),
 -- 这样换行/排版/实体化差异不影响命中;引文全不中时用章节标题兜底(避开目录页)。
+--
+-- 正文文件通常包含一个或少数几个 h1-h6 章节标题。能识别到这些标题时,
+-- 先建立本地章节边界,只在对应边界内做引文投票;没有可靠章节结构时才回退
+-- 到整文件扫描。这样不会改变无结构 EPUB 的兼容性,也不会让同一文件内
+-- 不同章节的重复引文互相投票。
 local logger = require("logger")
 
 local ChapterMap = {}
@@ -8,15 +13,74 @@ local ChapterMap = {}
 -- 匹配算法版本:任何影响匹配结果的改动(引文窗口、投票规则、目录页判定、
 -- 归一化规则)都必须 +1。映射缓存把它写进指纹,算法一改缓存整体作废——
 -- 否则旧算法缓存下来的「匹配失败」会永久生效,改进永远轮不到那些章节。
-ChapterMap.ALGO_VERSION = 7
+ChapterMap.ALGO_VERSION = 8
 
 -- 标题钥匙:剥掉「第X章/节/回…」编号前缀。微信与本地书的章号体系
 -- 经常不一致(实测:微信「第六章 姑娘请自重」= 本地「第二百八十四章
 -- 姑娘请自重」),整标题匹配必死;章名本体才是稳定标识。
 -- 剥完不足 6 字节(如「上」「下」)退回全标题。
+local CHAPTER_ENDINGS = {"章", "节", "回", "卷", "部", "集", "篇"}
+local CHAPTER_NUMBER_TOKENS = {
+    "零", "〇", "一", "二", "三", "四", "五", "六", "七", "八", "九",
+    "十", "百", "千", "万", "两",
+}
+
+local function is_chapter_number(value)
+    local number = tostring(value or ""):gsub("%d", "")
+    for _, token in ipairs(CHAPTER_NUMBER_TOKENS) do
+        number = number:gsub(token, "")
+    end
+    return number == ""
+end
+
+local function strip_chapter_number(value)
+    if value:sub(1, #"第") ~= "第" then return value end
+    local rest = value:sub(#"第" + 1)
+    local ending_pos, ending_len
+    for _, ending in ipairs(CHAPTER_ENDINGS) do
+        local pos = rest:find(ending, 1, true)
+        if pos and (not ending_pos or pos < ending_pos) then
+            ending_pos, ending_len = pos, #ending
+        end
+    end
+    if not ending_pos or ending_pos <= 1
+        or not is_chapter_number(rest:sub(1, ending_pos - 1)) then
+        return value
+    end
+    return rest:sub(ending_pos + ending_len)
+end
+
+local function strip_update_suffix(value)
+    local text = value
+    local function strip_group(current, opening, closing)
+        local last_open = nil
+        local search_from = 1
+        while true do
+            local pos = current:find(opening, search_from, true)
+            if not pos then break end
+            last_open = pos
+            search_from = pos + #opening
+        end
+        local close_at = #current - #closing + 1
+        if last_open and close_at > last_open
+            and current:sub(close_at, close_at + #closing - 1) == closing
+            and current:sub(last_open + #opening, close_at - 1):find("更", 1, true) then
+            return current:sub(1, last_open - 1)
+        end
+        return current
+    end
+    local previous
+    repeat
+        previous = text
+        text = strip_group(text, "（", "）")
+        text = strip_group(text, "(", ")")
+    until text == previous
+    return text
+end
+
 function ChapterMap.title_key(title)
-    local t = ChapterMap.normalize(title)
-    local stripped = t:gsub("^第[%d零一二三四五六七八九十百千两]+[章节回卷部集篇]", "")
+    local t = strip_update_suffix(ChapterMap.normalize(title))
+    local stripped = strip_chapter_number(t)
     if #stripped >= 6 then return stripped end
     return t
 end
@@ -127,11 +191,52 @@ function ChapterMap.quotes_of(underlines, limit)
     return out
 end
 
+-- 从原始 HTML 提取 h1-h6 标题,再换算到 normalize 后的字节坐标。
+-- 用标题所在 opening tag 之前的规范化长度计算位置,避免正文中先出现同名
+-- 文本时把标题边界错放到前文。非 h 标签书籍不返回边界,由旧回退路径处理。
+local function heading_blocks(html, normalized)
+    local source = tostring(html or "")
+    local blocks, cursor = {}, 1
+    while cursor <= #source do
+        local open_start, open_end, level = source:find(
+            "<%s*[hH]([1-6])[^>]*>", cursor)
+        if not open_start then break end
+        local close_start, close_end = source:find(
+            "</%s*[hH]" .. tostring(level) .. "%s*>", open_end + 1)
+        if not close_start then break end
+        local inner = source:sub(open_end + 1, close_start - 1)
+        local heading = ChapterMap.normalize(inner)
+        if heading ~= "" then
+            local start = #ChapterMap.normalize(source:sub(1, open_end)) + 1
+            if start >= 1 and start <= #normalized + 1 then
+                blocks[#blocks + 1] = {
+                    start = start, title = heading,
+                    key = ChapterMap.title_key(heading),
+                }
+            end
+        end
+        cursor = close_end + 1
+    end
+    table.sort(blocks, function(a, b) return a.start < b.start end)
+    local unique = {}
+    for _, block in ipairs(blocks) do
+        local previous = unique[#unique]
+        if not previous or previous.start ~= block.start then
+            unique[#unique + 1] = block
+        end
+    end
+    for index, block in ipairs(unique) do
+        block["end"] = unique[index + 1] and unique[index + 1].start or (#normalized + 1)
+    end
+    return unique
+end
+
 -- 单文件流式:内存里同一时刻只保留一个正文文件的文本(百兆大书在
 -- 256MB 的老设备上不能把全书文本都攥在手里),对它一次性统计所有章节的
 -- 引文命中与标题命中,然后立刻释放。
-local function build_with_scanner(spine, chapters, scan)
+local function build_with_scanner(spine, chapters, scan, options)
     chapters = chapters or {}
+    options = options or {}
     -- 预计算每章引文与规范化标题;全部标题用于识别目录页
     -- (一个文件若包含大半章节标题,它是目录/导航页,标题兜底绝不能落在上面)。
     local quotes_list, titles = {}, {}
@@ -147,26 +252,164 @@ local function build_with_scanner(spine, chapters, scan)
     end
     local toc_threshold = math.max(2, math.ceil(#all_titles * 0.5))
 
+    local title_index = {}   -- [title_key] = {chapter indexes}
+    for ci, title in ipairs(titles) do
+        if title then
+            title_index[title] = title_index[title] or {}
+            title_index[title][#title_index[title] + 1] = ci
+        end
+    end
+
     local scores = {}       -- [ci] = {{href, score}, ...}(spine 顺序)
     local title_hits = {}   -- [ci] = {href, ...}(已排除目录页)
-    local function process_item(spine_index, item, html, read_err)
+    local title_hit_seen = {} -- [ci][href] = true,同文件重复标题只算一个目标
+    local metrics = {
+        primary_files = 0, bounded_files = 0, bounded_chapters = 0,
+        fallback_files = 0, fallback_chapters = 0, quote_checks = 0,
+        checkpoints = 0,
+    }
+
+    local function checkpoint()
+        metrics.checkpoints = metrics.checkpoints + 1
+        if type(options.on_check) == "function"
+            and metrics.checkpoints % (tonumber(options.check_interval) or 16) == 0 then
+            return options.on_check(metrics) ~= false
+        end
+        return true
+    end
+
+    local function add_title_hit(ci, item, spine_index)
+        local href = tostring(item.href)
+        title_hit_seen[ci] = title_hit_seen[ci] or {}
+        if title_hit_seen[ci][href] then return end
+        title_hit_seen[ci][href] = true
+        title_hits[ci] = title_hits[ci] or {}
+        title_hits[ci][#title_hits[ci] + 1] = {
+            href = item.href, spine_index = spine_index,
+        }
+    end
+
+    local function quote_in_ranges(text, quote, ranges)
+        if not ranges then return text:find(quote, 1, true) ~= nil end
+        for _, range in ipairs(ranges) do
+            local first, last = text:find(quote, range.start, true)
+            if first and first < range["end"] then
+                if last + 1 <= range["end"] then return true end
+            end
+        end
+        return false
+    end
+
+    local function process_item(spine_index, item, html, read_err, phase, target_set)
         local text = html and ChapterMap.normalize(html) or nil
         if not text then
             logger.warn("[撷思][ChapterMap] 读取章节失败",
                 "href=", tostring(item.href), "err=", tostring(read_err))
         elseif text ~= "" then
-            -- 目录页检测不再单独扫 all_titles(大书是 千标题×千文件 的天文数字):
-            -- 复用下面每章标题命中的结果,统计本文件命中了多少个「不同标题」,
-            -- 超过阈值判为目录页,整批命中作废。
-            local file_title_cis = {}
+            phase = phase or "primary"
+            if phase == "primary" then metrics.primary_files = metrics.primary_files + 1 end
+            local blocks = heading_blocks(html, text)
+            local block_matches = {}
             local distinct_titles = {}
             local distinct_count = 0
-            for ci in ipairs(chapters) do
+            local legacy_title_cis = {}
+            local legacy_distinct = 0
+            if #blocks == 0 then
+                local legacy_seen = {}
+                for ci, title in ipairs(titles) do
+                    if title and text:find(title, 1, true) then
+                        legacy_title_cis[#legacy_title_cis + 1] = ci
+                        if not legacy_seen[title] then
+                            legacy_seen[title] = true
+                            legacy_distinct = legacy_distinct + 1
+                        end
+                    end
+                end
+            end
+            for _, block in ipairs(blocks) do
+                local matches = title_index[block.key]
+                if matches then
+                    if not distinct_titles[block.key] then
+                        distinct_titles[block.key] = true
+                        distinct_count = distinct_count + 1
+                    end
+                    for _, ci in ipairs(matches) do
+                        block_matches[ci] = block_matches[ci] or {}
+                        block_matches[ci][#block_matches[ci] + 1] = {
+                            start = block.start, ["end"] = block["end"],
+                        }
+                    end
+                else
+                    -- 卷首说明可能把目标章名包在更长标题里(例如“第一卷...惊蛰...卷首”)。
+                    -- 只在 h 标签块内做子串匹配,不会退化为每个正文文件扫描所有标题。
+                    for ci, title in ipairs(titles) do
+                        if title and block.key:find(title, 1, true) then
+                            block_matches[ci] = block_matches[ci] or {}
+                            block_matches[ci][#block_matches[ci] + 1] = {
+                                start = block.start, ["end"] = block["end"],
+                            }
+                        end
+                    end
+                end
+            end
+            local is_toc = (#blocks > 0 and distinct_count >= toc_threshold)
+                or (#blocks == 0 and legacy_distinct >= toc_threshold)
+            local bounded = #blocks > 0 and (distinct_count > 0 or next(block_matches) ~= nil) and not is_toc
+            local candidates = {}
+
+            if phase == "fallback" then
+                metrics.fallback_files = metrics.fallback_files + 1
+                for ci in pairs(target_set or {}) do candidates[ci] = true end
+                -- 回退也要保留目录页保护:正文标题可做兜底,目录标题不可做兜底。
+                if not is_toc then
+                    for ci in pairs(target_set or {}) do
+                        local title = titles[ci]
+                        if title and text:find(title, 1, true) then
+                            add_title_hit(ci, item, spine_index)
+                        end
+                    end
+                end
+            elseif #blocks == 0 then
+                -- 没有结构化标题的 EPUB 保留完整旧路径。
+                for ci in ipairs(chapters) do candidates[ci] = true end
+                if not is_toc then
+                    for _, ci in ipairs(legacy_title_cis) do
+                        add_title_hit(ci, item, spine_index)
+                    end
+                end
+            elseif is_toc then
+                -- 标题数量达到目录阈值时不信任边界,但引文仍按旧路径检查。
+                for ci in ipairs(chapters) do candidates[ci] = true end
+            elseif bounded then
+                metrics.bounded_files = metrics.bounded_files + 1
+                for ci, ranges in pairs(block_matches) do
+                    candidates[ci] = ranges
+                    metrics.bounded_chapters = metrics.bounded_chapters + 1
+                    for _ in ipairs(ranges) do add_title_hit(ci, item, spine_index) end
+                end
+                -- 有 h 标签但标题写在卷首说明/自定义节点里的 EPUB,保留旧的
+                -- 标题兜底;仅在本文件没有任何精确标题边界时执行,避免把主路径
+                -- 退化成“每文件扫描全部目标标题”。
+                if distinct_count == 0 and not is_toc then
+                    for ci, title in ipairs(titles) do
+                        if title and text:find(title, 1, true) then
+                            add_title_hit(ci, item, spine_index)
+                        end
+                    end
+                end
+            end
+
+            for ci, ranges in pairs(candidates) do
+                if not checkpoint() then return false end
                 local quotes = quotes_list[ci]
                 if #quotes > 0 then
                     local score = 0
                     for _, quote in ipairs(quotes) do
-                        if text:find(quote, 1, true) then score = score + 1 end
+                        if not checkpoint() then return false end
+                        metrics.quote_checks = metrics.quote_checks + 1
+                        if quote_in_ranges(text, quote, type(ranges) == "table" and ranges or nil) then
+                            score = score + 1
+                        end
                     end
                     if score > 0 then
                         scores[ci] = scores[ci] or {}
@@ -175,30 +418,46 @@ local function build_with_scanner(spine, chapters, scan)
                         }
                     end
                 end
-                local title = titles[ci]
-                if title and text:find(title, 1, true) then
-                    file_title_cis[#file_title_cis + 1] = ci
-                    if not distinct_titles[title] then
-                        distinct_titles[title] = true
-                        distinct_count = distinct_count + 1
-                    end
-                end
             end
-            if distinct_count < toc_threshold then
-                for _, ci in ipairs(file_title_cis) do
-                    title_hits[ci] = title_hits[ci] or {}
-                    title_hits[ci][#title_hits[ci] + 1] = {
-                        href = item.href, spine_index = spine_index,
-                    }
-                end
+            if phase == "fallback" then
+                for _ in pairs(target_set or {}) do metrics.fallback_chapters = metrics.fallback_chapters + 1 end
             end
         end
         text = nil
         collectgarbage("step", 400)
+        if not checkpoint() then return false end
         return true
     end
-    local scan_ok, scan_err = scan(process_item)
+
+    local scan_ok, scan_err = scan(process_item, "primary")
     if scan_ok == nil or scan_ok == false then error(scan_err or "无法读取 EPUB 正文") end
+
+    -- 标题索引未覆盖的章节才启动兼容回退。正常有结构书籍不会进入这里;
+    -- 标题被改写、正文没有 h 标签或 EPUB 结构异常时仍能复用旧定位语义。
+    local fallback_cis, fallback_count = {}, 0
+    for ci, quotes in ipairs(quotes_list) do
+        if #quotes > 0 then
+            local strong_min = math.min(2, #quotes)
+            local has_strong = false
+            for _, entry in ipairs(scores[ci] or {}) do
+                if entry.score >= strong_min then has_strong = true; break end
+            end
+            if not has_strong and not title_hits[ci] then
+                fallback_cis[ci] = true
+                fallback_count = fallback_count + 1
+            end
+        end
+    end
+    if fallback_count > 0 then
+        scan_ok, scan_err = scan(process_item, "fallback", fallback_cis)
+        if scan_ok == nil or scan_ok == false then error(scan_err or "无法读取 EPUB 正文") end
+    end
+    logger.info("[撷思][ChapterMap] strategy",
+        "bounded_files=", tostring(metrics.bounded_files),
+        "bounded_chapters=", tostring(metrics.bounded_chapters),
+        "fallback_files=", tostring(metrics.fallback_files),
+        "fallback_chapters=", tostring(fallback_count),
+        "quote_checks=", tostring(metrics.quote_checks))
     local function by_spine(a, b)
         return (tonumber(a.spine_index) or 0) < (tonumber(b.spine_index) or 0)
     end
@@ -249,6 +508,11 @@ local function build_with_scanner(spine, chapters, scan)
                     mapped[#mapped + 1] = {
                         chapter_uid = tostring(ch.uid or ""), href = href,
                         underlines = underlines, review_map = ch.review_map or {},
+                        thought_count_by_range = ch.thought_count_by_range,
+                        thought_ranges = ch.thought_ranges,
+                        thought_count = ch.thought_count,
+                        thought_entry_count = ch.thought_entry_count,
+                        cache_bytes = ch.cache_bytes,
                         quote_only = quote_only, book_id = ch.book_id,
                     }
                 end
@@ -258,28 +522,29 @@ local function build_with_scanner(spine, chapters, scan)
             end
         end
     end
-    return mapped, unmatched
+    return mapped, unmatched, metrics
 end
 
-function ChapterMap.build(spine, read_text, chapters)
-    return build_with_scanner(spine, chapters, function(visit)
+function ChapterMap.build(spine, read_text, chapters, options)
+    return build_with_scanner(spine, chapters, function(visit, phase, target_set)
         for index, item in ipairs(spine or {}) do
             local ok, html, err = pcall(read_text, item.href)
             if ok and html == false then return false, "已取消" end
-            if visit(index, item, ok and html or nil, ok and err or html) == false then
+            if visit(index, item, ok and html or nil, ok and err or html,
+                    phase, target_set) == false then
                 return false, "已取消"
             end
         end
         return true
-    end)
+    end, options)
 end
 
-function ChapterMap.build_stream(spine, each_text, chapters)
-    return build_with_scanner(spine, chapters, function(visit)
+function ChapterMap.build_stream(spine, each_text, chapters, options)
+    return build_with_scanner(spine, chapters, function(visit, phase, target_set)
         return each_text(function(item, content, err, index)
-            return visit(index, item, content, err)
-        end)
-    end)
+            return visit(index, item, content, err, phase, target_set)
+        end, phase, target_set)
+    end, options)
 end
 
 return ChapterMap

@@ -204,3 +204,36 @@ T.case("PowerInhibit 默认 helper 超时后终止进程组", function()
     table.remove(scheduled, 1)()
     T.eq(inhibit.worker, nil, "超时 helper 已回收")
 end)
+
+T.case("PowerInhibit helper 已完成时不因父轮询延迟误报超时", function()
+    local now = 100
+    local result
+    local killed = false
+    local path = "tests/.power-helper-result.json"
+    local file = assert(io.open(path, "wb"))
+    file:write(require("pickthought.json").encode({ok = true}))
+    file:close()
+    local ffi_util = {
+        isSubProcessDone = function() return true end,
+        terminateSubProcess = function() killed = true end,
+    }
+    local inhibit = PowerInhibit:new{
+        marker_path = "memory",
+        token = "owner",
+        now = function() return now end,
+        ffi_util = ffi_util,
+        schedule = function() end,
+    }
+    inhibit.worker = {
+        pid = 42, ffi_util = ffi_util, operation = {kind = "restore"},
+        callback = function(value) result = value end,
+        result_path = path, started_at = 100,
+    }
+    now = 104
+    inhibit:_poll_worker()
+    T.ok(result and result.ok, "已完成 helper 返回成功结果")
+    T.ok(not result.timeout, "已完成 helper 不误报超时")
+    T.ok(not killed, "已完成 helper 不再被终止")
+    T.eq(inhibit.worker, nil, "已完成 helper 正常回收")
+    os.remove(path)
+end)

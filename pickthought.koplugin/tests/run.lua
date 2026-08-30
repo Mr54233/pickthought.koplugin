@@ -28,6 +28,7 @@ local files = {
     "tests.test_annotation_style",
     "tests.test_epub_inject",
     "tests.test_chapter_map",
+    "tests.test_sync_budget",
     "tests.test_sync_state",
     "tests.test_sync_report",
     "tests.test_batch_sync",

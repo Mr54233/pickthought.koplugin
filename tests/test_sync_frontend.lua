@@ -148,6 +148,22 @@ T.case("多书同步使用本地书名和绑定书名快照", function()
     T.eq(persisted.titles.b3, "剑来3", "持久化运行状态应保留最后一本书名")
 end)
 
+T.case("用户确认的后台同步启动失败必须显示原因", function()
+    local shown
+    local self = {
+        store = {preferences = function() return {} end},
+        sync_task = {start = function() return false, "设备可用内存不足" end},
+        _book_ids = function() return {"b1"} end,
+        _binding_titles = function() return {b1 = "剑来"} end,
+        _sync_display_title = function() return "剑来" end,
+        info = function(_, text) shown = text end,
+    }
+    T.ok(not Plugin._start_sync_task(self, "tests/剑来.epub", {book_id = "b1"}, "sync", {
+        background = true, source = "batch_confirm",
+    }), "后台同步启动失败应返回 false")
+    T.ok(shown and shown:find("设备可用内存不足", 1, true), "用户能看到启动失败原因")
+end)
+
 T.case("前台 _sync_run 适配器透传 no-op rest,绝不调用 usleep(作者 #17 收尾复核)", function()
     usleep_spy.calls = 0
     captured.inject_called = false

@@ -49,6 +49,61 @@ T.case("SyncTask 调试模式默认关闭且只接受显式开启", function()
     T.ok(SyncTask._diagnostics_enabled({debug_mode = true}), "显式开启")
 end)
 
+T.case("SyncTask 描述符保留同步入口来源", function()
+    local task = SyncTask:new({temp_dir = "tests"})
+    task.job = {
+        pid = 123, progress_path = "p", result_path = "r", cancel_path = "c",
+        source = "batch_confirm", task_token = "token", mode = "sync",
+    }
+    T.eq(task:descriptor().source, "batch_confirm", "描述符保留来源")
+end)
+
+T.case("SyncTask 接管时拒绝进度 token 不匹配", function()
+    local path = "tests/.sync-token-test.json"
+    local handle = assert(io.open(path, "wb"))
+    handle:write(require("pickthought.json").encode({task_token = "other", updated_at = 1}))
+    handle:close()
+    local task = SyncTask:new({temp_dir = "tests"})
+    task.job = {
+        task_token = "expected", progress_path = path, last_progress_raw = nil,
+        last_progress_state = nil, last_progress_at = nil, waiting_notified = false,
+    }
+    T.ok(not task:_read_progress(task.job), "token 不一致的进度不接管")
+    T.ok(task.job.token_mismatch, "记录 token 不一致")
+    os.remove(path)
+end)
+
+T.case("SyncTask 结果文件先出现时等待子进程回收", function()
+    local FFIUtil = require("ffi/util")
+    local old_done = FFIUtil.isSubProcessDone
+    local path = "tests/.sync-early-result.json"
+    local file = assert(io.open(path, "wb"))
+    file:write(require("pickthought.json").encode({ok = true}))
+    file:close()
+    local done = false
+    FFIUtil.isSubProcessDone = function() return done end
+    local completed = 0
+    local task = SyncTask:new({temp_dir = "tests"})
+    task._owns_job = function() return true end
+    task._read_progress = function() return false end
+    task._schedule = function() end
+    task.job = {
+        pid = 999999, progress_path = "tests/.sync-no-progress", result_path = path,
+        cancel_path = "tests/.sync-no-cancel", last_poll_at = os.time(),
+        last_progress_at = os.time(), started_at = os.time(),
+        on_done = function() completed = completed + 1 end,
+    }
+    task:_poll()
+    T.eq(completed, 0, "结果文件先到时不得提前收尾")
+    T.ok(task.job ~= nil, "子进程未回收时任务仍在")
+    done = true
+    task:_poll()
+    T.eq(completed, 1, "子进程回收后才收尾")
+    T.eq(task.job, nil, "任务正常清理")
+    FFIUtil.isSubProcessDone = old_done
+    os.remove(path)
+end)
+
 T.case("SyncTask 解码子进程退出码与终止信号", function()
     local normal = SyncTask._decode_wait_status(0)
     T.eq(normal.exit_code, 0, "正常退出码")

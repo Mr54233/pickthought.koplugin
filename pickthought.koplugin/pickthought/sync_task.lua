@@ -234,14 +234,24 @@ end
 -- 仍活着就对进程组直接 SIGKILL;返回「是否确认已死」,杀不死不许收尾。
 function SyncTask:_terminate(pid)
     pcall(FFIUtil.terminateSubProcess, pid)
-    if process_exists(pid) ~= true then return true end
+    local current_alive = process_exists(pid)
+    local collected, collected_state = pcall(FFIUtil.isSubProcessDone, pid, false)
+    -- 对重启后接管的非亲子进程,KOReader 的 isSubProcessDone 会把
+    -- waitpid(ECHILD) 也返回 true;只要 /proc 仍存在就不能当作已回收。
+    if collected and collected_state and current_alive ~= true then return true end
+    if current_alive ~= true then return false end
     local ok, ffi = pcall(require, "ffi")
     if ok and ffi then
         pcall(ffi.cdef, "int kill(int pid, int sig);")
         pcall(function() ffi.C.kill(-tonumber(pid), 9) end)
         pcall(function() ffi.C.kill(tonumber(pid), 9) end)
     end
-    return process_exists(pid) ~= true
+    -- kill 后进程可能短暂处于 zombie。必须再次调用 isSubProcessDone
+    -- 让直接父进程 waitpid 回收,不能只看 /proc 不存在就宣称已终止。
+    local after_alive = process_exists(pid)
+    local reaped, done = pcall(FFIUtil.isSubProcessDone, pid, false)
+    if reaped and done and after_alive ~= true then return true end
+    return false
 end
 
 function SyncTask:_claim(pid)
@@ -263,7 +273,7 @@ function SyncTask:descriptor()
         pid=job.pid,progress_path=job.progress_path,result_path=job.result_path,
         cancel_path=job.cancel_path,worker_settings_path=job.worker_settings_path,
         started_at=job.started_at,owner_token=self.owner_token,task_token=job.task_token,
-        mode=job.mode,debug_mode=job.debug_mode,
+        mode=job.mode,source=job.source,debug_mode=job.debug_mode,
     }
 end
 
@@ -411,7 +421,9 @@ function SyncTask:_read_progress(job)
     if not raw or raw == job.last_progress_raw then return false end
     local ok, state = pcall(Json.decode, raw)
     if ok and type(state) == "table" then
-        if job.task_token and tostring(state.task_token or "")~=tostring(job.task_token) then
+        local state_token = tostring(state.task_token or "")
+        if (job.task_token and state_token ~= tostring(job.task_token))
+            or (not job.task_token and state_token ~= "") then
             job.token_mismatch=true
             logger.warn("[撷思][SyncTask] progress task identity mismatch")
             return false
@@ -440,11 +452,24 @@ function SyncTask:_finish(job, forced_error)
         result = ok and decoded or {ok = false, error = "同步结果无法解析"}
     end
 
-    os.remove(job.progress_path)
-    os.remove(job.result_path)
-    os.remove(job.cancel_path)
-    if job.worker_settings_path then os.remove(job.worker_settings_path) end
-    if self:_owns_job() then os.remove(self.owner_path) end
+    local function cleanup(path, label)
+        if not path then return true end
+        local removed, remove_error = os.remove(path)
+        if not removed and file_exists(path) then
+            logger.warn("[撷思][SyncTask] cleanup failed", "file=", tostring(label),
+                "path=", tostring(path), "error=", tostring(remove_error or "删除失败"))
+            return false
+        end
+        return true
+    end
+    cleanup(job.progress_path, "progress")
+    cleanup(job.result_path, "result")
+    cleanup(job.cancel_path, "cancel")
+    cleanup(job.worker_settings_path, "worker_settings")
+    if self:_owns_job() then cleanup(self.owner_path, "owner") end
+    logger.info("[撷思][SyncTask] task cleaned", "pid=", tostring(job.pid),
+        "source=", tostring(job.source or "unknown"),
+        "cancelled=", tostring(job.cancel_requested_at ~= nil))
     self.job = nil
     self:_release_awake()
     if job.on_done then job.on_done(result) end
@@ -465,8 +490,6 @@ function SyncTask:_poll()
         self:_finish(job,"后台同步任务身份不匹配;断点已保留,请重新开始同步。")
         return
     end
-    if file_exists(job.result_path) then self:_finish(job); return end
-
     local now=os.time()
     -- 挂起豁免:轮询间隔远超调度周期说明设备睡过一觉——挂起期间父子进程都被
     -- 冻结,墙钟静默对子进程不公平;重置活动基线,给它完整的恢复窗口,
@@ -554,6 +577,13 @@ function SyncTask:_poll()
         return
     end
 
+    -- 结果文件可能先于子进程 C._exit 写出。只有确认子进程已被
+    -- isSubProcessDone/waitpid 回收后才能读取并清理结果,否则会留下 zombie。
+    if done_ok and done and file_exists(job.result_path) then
+        self:_finish(job)
+        return
+    end
+
     if job.debug_mode and job.exit_status and not job.exit_status_logged then
         job.exit_status_logged=true
         local state=job.last_progress_state or {}
@@ -569,14 +599,23 @@ function SyncTask:_poll()
     end
     job.dead_seen_at=job.dead_seen_at or now
     if now-job.dead_seen_at<8 then self:_schedule(); return end
-    self:_finish(job)
+    self:_finish(job, job.cancel_requested_at and "同步已取消" or nil)
 end
 
 function SyncTask:cancel()
     local job = self.job
     if not job or job.cancel_requested_at or not self:_owns_job() then return end
+    local written, write_error = U.atomic_write(job.cancel_path, "1", true)
+    if not written then
+        logger.warn("[撷思][SyncTask] cancel marker write failed", "pid=", tostring(job.pid),
+            "source=", tostring(job.source or "unknown"),
+            "error=", tostring(write_error or "写入失败"))
+        return false, write_error or "取消标记写入失败"
+    end
     job.cancel_requested_at = os.time()
-    U.atomic_write(job.cancel_path, "1", true)
+    logger.info("[撷思][SyncTask] cancel requested", "pid=", tostring(job.pid),
+        "source=", tostring(job.source or "unknown"))
+    return true
 end
 
 function SyncTask:clear_stale_awake()
@@ -598,9 +637,10 @@ function SyncTask:attach(descriptor,on_progress,on_done)
         cancel_path=descriptor.cancel_path,worker_settings_path=descriptor.worker_settings_path,
         on_progress=on_progress,on_done=on_done,last_progress_raw=nil,last_progress_state=nil,
         last_progress_at=nil,last_keepalive=0,started_at=descriptor.started_at,dead_seen_at=nil,waiting_notified=false,
-        task_token=descriptor.task_token,mode=descriptor.mode,
+        task_token=descriptor.task_token,mode=descriptor.mode,source=descriptor.source or "recovery",
         debug_mode=descriptor.debug_mode==true,
     }
+    if file_exists(descriptor.cancel_path) then self.job.cancel_requested_at=os.time() end
     self.backgrounded=true
     self:_read_progress(self.job)
     if self.job.token_mismatch then
@@ -616,19 +656,18 @@ function SyncTask:attach(descriptor,on_progress,on_done)
         self.job=nil
         return false,"无法接管后台同步:"..tostring(done)
     end
-    self:_claim(pid)
+    local claimed, claim_error = self:_claim(pid)
+    if not claimed then
+        self.job = nil
+        self:_release_awake()
+        return false, "无法接管同步任务所有权:" .. tostring(claim_error or "写入失败")
+    end
     self:_hold_awake()
     logger.info("[撷思][SyncTask] attached","pid=",tostring(pid),
+        "source=",tostring(self.job.source or "recovery"),
         "done=",tostring(done_ok and done or "unknown"),"alive=",tostring(alive))
-    if file_exists(self.job.result_path) then
-        local attached_job=self.job
-        UIManager:scheduleIn(0,function()
-            if self.job==attached_job and self:_owns_job() then self:_finish(attached_job) end
-        end)
-    else
-        if alive==false and done_ok and done==true then self.job.dead_seen_at=os.time() end
-        self:_schedule()
-    end
+    if alive==false and done_ok and done==true then self.job.dead_seen_at=os.time() end
+    self:_schedule()
     return true
 end
 
@@ -678,6 +717,7 @@ function SyncTask:start(task, on_progress, on_done)
     -- mode: "sync"=联网增量同步(复用缓存并按游标续传);"reinject"=纯离线,
     -- 只用上次拉取的数据重跑映射+注入,零网络。
     local mode = tostring(task.mode or "sync")
+    local task_source = tostring(task.source or (retry_memory and "manual" or "unknown"))
     -- clean_source:外部干净 .epub 路径,作为注入源绕开脏/缺失的 .orig(逃生舱)。
     -- 仅离线重注(reinject)用到;由 main.lua 选书后透传,空则走旧逻辑。
     local clean_source = task.clean_source and tostring(task.clean_source) or nil
@@ -701,6 +741,7 @@ function SyncTask:start(task, on_progress, on_done)
         local Thoughts = require("pickthought.thoughts")
         local JsonChild = require("pickthought.json")
         local UChild = require("pickthought.util")
+        local SyncBudget = require("pickthought.sync_budget")
         local LoggerChild = require("logger")
 
         local diagnostic_logger = LoggerChild.LvDEBUG or LoggerChild.info
@@ -727,9 +768,10 @@ function SyncTask:start(task, on_progress, on_done)
         end
 
         local function emit(state)
-            state = annotate_progress_state(state or {})
-            state.task_token = task_token
-            state.updated_at = os.time()
+        state = annotate_progress_state(state or {})
+        state.task_token = task_token
+        state.sync_source = task_source
+        state.updated_at = os.time()
             local ok, encoded = pcall(JsonChild.encode, state)
             if ok then UChild.atomic_write(progress_path, encoded, true) end
         end
@@ -974,6 +1016,7 @@ function SyncTask:start(task, on_progress, on_done)
                     if raw then
                         local good, data = pcall(JsonChild.decode, raw)
                         if good and cache_valid(data) then
+                            data.cache_bytes = #raw
                             data.resumed = true
                             diagnostic("chapter_done", "book=", tostring(bid),
                                 "chapter=", tostring(uid), "source=", "cache",
@@ -1024,20 +1067,25 @@ function SyncTask:start(task, on_progress, on_done)
                     -- 只有整章完整成功才缓存,否则下次重拉。
                     if type(data) == "table" and data.underline_request_ok ~= false
                         and #(data.errors or {}) == 0 then
-                        local slim = serializable_copy({
-                            underlines = data.underlines, review_map = data.review_map,
-                            review_groups = data.review_groups,
-                            underline_count = data.underline_count,
-                            thought_count = data.thought_count,
-                            thought_entry_count = data.thought_entry_count,
-                            errors = {}, underline_request_ok = true,
-                        })
+                        -- 章节缓存只保留映射所需的 range/摘要和真实条目数;
+                        -- 想法正文已由 Sync.run 保存到 SQLite,不再在 JSON 和 worker
+                        -- 内存里长期保留两份完整 review_map。
+                        local slim = SyncBudget.compact(data)
+                        slim.errors = {}
+                        slim.underline_request_ok = true
                         local cache_path = cache_path_for(bid, uid)
-                        local saved, save_error = write_json(cache_path, slim)
-                        if not saved then
-                            error("章节缓存保存失败(" .. tostring(bid) .. ",第"
-                                .. tostring(uid) .. "章):" .. tostring(save_error))
+                        local encoded_ok, encoded = pcall(JsonChild.encode, serializable_copy(slim))
+                        if not encoded_ok then
+                            error("章节缓存序列化失败(" .. tostring(bid) .. ",第"
+                                .. tostring(uid) .. "章):" .. tostring(encoded))
                         end
+                        local saved_call, saved, save_error = pcall(
+                            UChild.atomic_write, cache_path, encoded, true)
+                        if not saved_call or not saved then
+                            error("章节缓存保存失败(" .. tostring(bid) .. ",第"
+                                .. tostring(uid) .. "章):" .. tostring(saved_call and save_error or saved))
+                        end
+                        data.cache_bytes = #encoded
                     end
                     -- 礼貌间隔:章与章之间随机停 200~400ms,请求速率贴近真人翻章。
                     FFIUtil.usleep((200 + math.random(0, 200)) * 1000)
@@ -1077,7 +1125,8 @@ function SyncTask:start(task, on_progress, on_done)
                 end
                 return parts
             end)(), ",")
-            diagnostic("sync_begin", "mode=", mode, "chapter_start=", starts_text,
+            diagnostic("sync_begin", "mode=", mode, "source=", task_source,
+                "chapter_start=", starts_text,
                 "batch_limit=", tostring(batch_limit))
             local report, sync_err = Sync.run{
                 doc_path = doc_path,
@@ -1116,6 +1165,19 @@ function SyncTask:start(task, on_progress, on_done)
                 end,
                 fetch_budget = mode ~= "reinject" and batch_limit or nil,
                 chapter_budget = mode ~= "reinject" and batch_limit or nil,
+                max_batch_cache_bytes = tonumber(preferences.sync_max_cache_bytes),
+                max_batch_underlines = tonumber(preferences.sync_max_underlines),
+                max_batch_thought_entries = tonumber(preferences.sync_max_thought_entries),
+                min_available_kb = tonumber(preferences.sync_min_available_kb),
+                read_memory_available_kb = function()
+                    local available = worker_memory()
+                    return available
+                end,
+                map_checkpoint = function()
+                    if cancelled() then return false end
+                    FFIUtil.usleep(1000)
+                    return not cancelled()
+                end,
                 -- 续传起点按书传(P1#5):Sync.run 对每本书取 chapter_starts[bid]。
                 chapter_starts = (mode ~= "reinject") and chapter_starts or nil,
                 skip_resumed = incremental and all_completed,
@@ -1161,6 +1223,9 @@ function SyncTask:start(task, on_progress, on_done)
             }
             diagnostic("sync_end", "ok=", tostring(report ~= nil),
                 "elapsed_s=", tostring(os.time() - sync_started),
+                "budget_reason=", report and tostring(report.batch_budget_reason or "") or "",
+                "budget_cache_bytes=", report and tostring(report.batch_cache_bytes or 0) or "",
+                "budget_thoughts=", report and tostring(report.batch_thought_entries or 0) or "",
                 "error=", report and "" or tostring(sync_err))
             if not report then
                 -- 失败/取消状态落盘(上游 128a007 语义,移植为多书版):每本绑定书都写
@@ -1190,7 +1255,14 @@ function SyncTask:start(task, on_progress, on_done)
                     -- 本次失败/取消:必须清除旧 .completed,否则下次同步因旧完成标记
                     -- 开启 skip_resumed,把本次已拉取未注入的缓存跳过(评审六轮 P1#1)。
                     local marker = cache_for(bid) .. "/.completed"
-                    if UChild.file_exists(marker) then pcall(os.remove, marker) end
+                    if UChild.file_exists(marker) then
+                        local removed, remove_error = os.remove(marker)
+                        if not removed and UChild.file_exists(marker) then
+                            LoggerChild.warn("[撷思][SyncTask] failed to clear completion marker",
+                                "book=", tostring(bid), "path=", marker,
+                                "error=", tostring(remove_error or "删除失败"))
+                        end
+                    end
                 end
                 error(sync_err or "同步失败")
             end
@@ -1304,13 +1376,32 @@ function SyncTask:start(task, on_progress, on_done)
         waiting_notified = false,
         task_token = task_token,
         mode = mode,
+        source = task_source,
         debug_mode = debug_mode,
         started_at = os.time(),
     }
-    self:_claim(pid)
+    local claimed, claim_error = self:_claim(pid)
+    if not claimed then
+        local cancel_written = U.atomic_write(cancel_path, "1", true)
+        local terminated = self:_terminate(pid)
+        if not terminated then
+            logger.warn("[撷思][SyncTask] owner claim failed and worker remains alive",
+                "pid=", tostring(pid), "source=", tostring(task_source))
+        end
+        self.job = nil
+        if terminated then
+            os.remove(progress_path)
+            os.remove(result_path)
+            if cancel_written then os.remove(cancel_path) end
+            os.remove(worker_settings_path)
+        end
+        self:_release_memory_mode()
+        return false, "无法记录同步任务所有权:" .. tostring(claim_error or "写入失败")
+    end
     self.backgrounded = false
     self:_hold_awake()
-    logger.info("[撷思][SyncTask] started", "pid=", tostring(pid))
+    logger.info("[撷思][SyncTask] started", "pid=", tostring(pid),
+        "source=", tostring(self.job.source), "task_token=", tostring(task_token))
     self:_schedule()
     return true
 end

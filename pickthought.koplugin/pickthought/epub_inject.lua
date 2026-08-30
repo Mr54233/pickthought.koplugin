@@ -201,11 +201,15 @@ local function chapter_data(book_id, ch)
     book_id = ch.book_id or book_id
     local underlines = ch.underlines or {}
     local review_map = ch.review_map or {}
-    local thought_count = 0
-    for _ in pairs(review_map) do thought_count = thought_count + 1 end
+    local thought_counts = ch.thought_count_by_range or {}
+    local thought_count = tonumber(ch.thought_count)
+    if not thought_count then
+        for _ in pairs(review_map) do thought_count = (thought_count or 0) + 1 end
+    end
     return {
         book_id = book_id, chapter_uid = tostring(ch.chapter_uid or ""),
         underlines = underlines, review_map = review_map,
+        thought_count_by_range = thought_counts, thought_ranges = ch.thought_ranges,
         underline_count = #underlines, thought_count = thought_count, errors = {},
     }
 end
@@ -297,7 +301,9 @@ function M.inject_copy(src, book_id, chapters, opts)
             if key ~= "" then
                 track.total[key] = true
                 local reviews = ch.review_map and ch.review_map[key]
-                local count = type(reviews) == "table" and #reviews or 0
+                local count = tonumber(ch.thought_count_by_range
+                    and ch.thought_count_by_range[key])
+                    or (type(reviews) == "table" and #reviews or 0)
                 track.thoughts[key] = math.max(track.thoughts[key] or 0, count)
             end
         end

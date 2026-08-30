@@ -21,7 +21,7 @@ local EpubInject = require("pickthought.epub_inject")
 local Json = require("pickthought.json")
 local SpineCache = require("pickthought.spine_cache")
 local U = require("pickthought.util")
-local SpineCache = require("pickthought.spine_cache")
+local SyncBudget = require("pickthought.sync_budget")
 local logger = require("logger")
 
 local Sync = {}
@@ -170,6 +170,14 @@ function Sync.run(deps)
     if fetch_budget and fetch_budget <= 0 then fetch_budget = nil end
     local chapter_budget = tonumber(deps.chapter_budget)
     if chapter_budget and chapter_budget <= 0 then chapter_budget = nil end
+    local resource_budget = SyncBudget:new{
+        max_cache_bytes = deps.max_batch_cache_bytes,
+        max_underlines = deps.max_batch_underlines,
+        max_thought_entries = deps.max_batch_thought_entries,
+        min_available_kb = deps.min_available_kb,
+        read_memory_available_kb = deps.read_memory_available_kb,
+    }
+    local batch_budget_reason
     local skip_resumed = deps.skip_resumed == true
     local chapters_pending = 0
     local rate_limited = false
@@ -264,6 +272,15 @@ function Sync.run(deps)
         local book_fetch_start = #fetched
         while i <= #chapter_list do
             local ch = chapter_list[i]
+            local can_fetch, budget_reason = resource_budget:can_fetch()
+            if not can_fetch then
+                if resource_budget.chapters == 0 then
+                    return nil, "设备资源不足,无法开始同步:" .. tostring(budget_reason)
+                end
+                batch_budget_reason = budget_reason
+                book_pending = book_pending + (#chapter_list - i + 1)
+                break
+            end
             ch.book_id = bid
             if fetch_budget and book_fresh_fetches >= fetch_budget then
                 book_pending = book_pending + (#chapter_list - i + 1)
@@ -319,10 +336,17 @@ function Sync.run(deps)
                 end
                 total_underlines = total_underlines + (data.underline_count or 0)
                 total_thought_entries = total_thought_entries + (data.thought_entry_count or 0)
+                resource_budget:account(data)
+                local compact = SyncBudget.compact(data)
                 if (data.underline_count or 0) > 0 then
                     fetched[#fetched + 1] = {
                         uid = ch.uid, title = ch.title, book_id = bid,
-                        underlines = data.underlines, review_map = data.review_map,
+                        underlines = compact.underlines, review_map = compact.review_map,
+                        thought_count_by_range = compact.thought_count_by_range,
+                        thought_ranges = compact.thought_ranges,
+                        thought_count = compact.thought_count,
+                        thought_entry_count = compact.thought_entry_count,
+                        cache_bytes = compact.cache_bytes,
                     }
                     book_contributed = true
                     book_last_contrib_resumed = data.resumed == true
@@ -399,6 +423,8 @@ function Sync.run(deps)
                 book_pending = book_pending + (#chapter_list - book_next + 1)
                 break
             end
+            data = nil
+            collectgarbage("step", 1200)
             i = i + 1
         end
         -- 本书限速状态聚合进报告级 rate_limited(多书任一书被限即整体标记,见 P1#4)。
@@ -500,6 +526,18 @@ function Sync.run(deps)
         report.chapters_processed = chapters_processed
         report.chapters_fetch_succeeded = chapters_fetch_succeeded
         report.batch_limit = chapter_budget or fetch_budget or chapters_total_all
+        local budget = resource_budget:summary()
+        report.batch_budget_reason = batch_budget_reason or budget.stop_reason
+        report.batch_cache_bytes = budget.cache_bytes
+        report.batch_underlines = budget.underlines
+        report.batch_thought_entries = budget.thought_entries
+        report.batch_min_available_kb = budget.min_available_kb
+        report.batch_budget = {
+            max_cache_bytes = budget.max_cache_bytes,
+            max_underlines = budget.max_underlines,
+            max_thought_entries = budget.max_thought_entries,
+            min_memory_kb = budget.min_memory_kb,
+        }
         -- 多书标志:报告/弹窗层据此不推导单一连续章节范围(评审五轮 P1#1)。
         report.multi_book = multi_book or nil
         report.book_count = #book_ids
@@ -628,6 +666,13 @@ function Sync.run(deps)
     local map_count = 0
     local spine_total = #(map_meta.spine or {})
     local mapped_new, unmatched_new = {}, {}
+    local map_metrics
+    local function map_checkpoint(metrics)
+        if type(deps.map_checkpoint) == "function" then
+            return deps.map_checkpoint(metrics) ~= false
+        end
+        return true
+    end
 
     -- B:spine 正文持久化缓存。仅当调用方显式开启 deps.spine_cache 且存在 map
     -- 缓存、且本批确有新章节要匹配(todo>0)时启用;测试不开启,行为完全不变。
@@ -697,27 +742,29 @@ function Sync.run(deps)
     if #todo > 0 then
         local map_started_at = os.time()
         if deps.read_spine then
-            mapped_new, unmatched_new = ChapterMap.build_stream(map_meta.spine, function(visit)
+            mapped_new, unmatched_new, map_metrics = ChapterMap.build_stream(map_meta.spine, function(visit, phase, target_set)
                 return cached_read_spine(map_meta, function(item, content, err, index)
                     map_count = map_count + 1
                     if not step("map", map_count, spine_total, item and item.href) then
                         return false
                     end
-                    return visit(item, content, err, index)
+                    return visit(item, content, err, index, phase, target_set)
                 end)
-            end, todo)
+            end, todo, {on_check = map_checkpoint})
         else
-            mapped_new, unmatched_new = ChapterMap.build(map_meta.spine, function(href)
+            mapped_new, unmatched_new, map_metrics = ChapterMap.build(map_meta.spine, function(href)
                 map_count = map_count + 1
                 if not step("map", map_count, spine_total, href) then return false end
                 return cached_read_text(map_meta, href)
-            end, todo)
+            end, todo, {on_check = map_checkpoint})
         end
         if spine_cache then spine_cache:close() end
         logger.info("[撷思][ChapterMap] completed",
             "spine=", tostring(spine_total), "chapters=", tostring(#todo),
             "streamed=", tostring(deps.read_spine ~= nil),
             "spine_cache=", spine_cache and (spine_cache:warm() and "warm" or "cold") or "off",
+            "quote_checks=", tostring(map_metrics and map_metrics.quote_checks or 0),
+            "fallback_chapters=", tostring(map_metrics and map_metrics.fallback_chapters or 0),
             "elapsed_s=", tostring(math.max(0, os.time() - map_started_at)))
     end
 
@@ -745,6 +792,11 @@ function Sync.run(deps)
                 mapped[#mapped + 1] = {
                     chapter_uid = tostring(ch.uid), href = tostring(href),
                     underlines = ch.underlines, review_map = ch.review_map or {},
+                    thought_count_by_range = ch.thought_count_by_range,
+                    thought_ranges = ch.thought_ranges,
+                    thought_count = ch.thought_count,
+                    thought_entry_count = ch.thought_entry_count,
+                    cache_bytes = ch.cache_bytes,
                     quote_only = quote_only, book_id = ch.book_id,
                 }
             end
@@ -757,6 +809,11 @@ function Sync.run(deps)
                 mapped[#mapped + 1] = {
                     chapter_uid = tostring(ch.uid), href = row.href,
                     underlines = ch.underlines, review_map = ch.review_map or {},
+                    thought_count_by_range = ch.thought_count_by_range,
+                    thought_ranges = ch.thought_ranges,
+                    thought_count = ch.thought_count,
+                    thought_entry_count = ch.thought_entry_count,
+                    cache_bytes = ch.cache_bytes,
                     quote_only = row.quote_only, book_id = ch.book_id,
                 }
                 hrefs[#hrefs + 1] = row.href
@@ -1241,6 +1298,7 @@ function Sync.run(deps)
         fetch_errors = hard_failures + partial_errors,
         rate_limited = rate_limited or nil,
         rate_limit_wait = rate_limit_wait,
+        map_metrics = map_metrics,
     }
 end
 

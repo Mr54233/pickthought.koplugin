@@ -1156,7 +1156,7 @@ function Plugin:_persist_sync_state(runtime)
     self.store:set("sync_runtime",{
         status="active",doc_path=runtime.doc_path,book_id=runtime.book_id,title=runtime.title,
         book_ids=U.copy(runtime.book_ids or {}),titles=U.copy(runtime.titles or {}),
-        task=runtime.task,started_at=runtime.started_at,
+        source=runtime.source,task=runtime.task,started_at=runtime.started_at,
     })
 end
 
@@ -1168,10 +1168,11 @@ function Plugin:_start_sync_task(path,bound,mode,opts)
     local book_ids=self:_book_ids(path)
     local titles=self:_binding_titles(path)
     local title=self:_sync_display_title(path,bound,book_ids,titles)
+    local source=opts.source or (opts.background and "batch_auto" or "manual")
     local runtime={doc_path=path,book_id=bound.book_id,book_ids=book_ids,titles=titles,
-        title=title,mode=mode,started_at=os.time(),dialog=nil,background=false}
+        title=title,mode=mode,source=source,started_at=os.time(),dialog=nil,background=false}
     local ok,err=self.sync_task:start({doc_path=path,book_id=bound.book_id,book_ids=book_ids,titles=U.copy(titles),title=title,mode=mode,
-            clean_source=opts.clean_source,allow_memory_retry=opts.background ~= true},
+            source=source,clean_source=opts.clean_source,allow_memory_retry=opts.background ~= true},
         function(state) self:_on_sync_progress(runtime,state) end,
         function(result) self:_finish_sync(runtime,result) end)
     if not ok then
@@ -1333,7 +1334,7 @@ function Plugin:_maybe_auto_batch(page)
         if not current_path then self:_stale_sync_context(); return end
         self._auto_batch_started=true
         self:toast(BatchSync.background_text(context.plan),3)
-        if not self:_start_sync_task(current_path,current_bound,"sync",{background=true,silent=true}) then
+        if not self:_start_sync_task(current_path,current_bound,"sync",{background=true,silent=true,source="batch_auto"}) then
             self._auto_batch_started=nil
         end
         return
@@ -1350,7 +1351,7 @@ function Plugin:_maybe_auto_batch(page)
             local current_path,current_bound=self:_resolve_sync_context(operation_context)
             if not current_path then self:_stale_sync_context(); return end
             self._auto_batch_started=true
-            if not self:_start_sync_task(current_path,current_bound,"sync",{background=true,silent=true}) then
+            if not self:_start_sync_task(current_path,current_bound,"sync",{background=true,source="batch_confirm"}) then
                 self._auto_batch_started=nil
             end
         end,
@@ -1435,7 +1436,8 @@ function Plugin:_recover_sync_state()
     end
     -- 描述符体检:进度与结果文件都没了说明任务早已收尾/被清理,直接清状态。
     if not U.file_exists(tostring(state.task.progress_path or ""))
-        and not U.file_exists(tostring(state.task.result_path or "")) then
+        and not U.file_exists(tostring(state.task.result_path or ""))
+        and not U.file_exists(tostring(state.task.cancel_path or "")) then
         self:_clear_sync_state()
         self.sync_task:clear_stale_awake()
         return
@@ -1444,7 +1446,8 @@ function Plugin:_recover_sync_state()
     if #book_ids==0 and state.book_id then book_ids={tostring(state.book_id)} end
     local titles=type(state.titles)=="table" and state.titles or {}
     local runtime={doc_path=state.doc_path,book_id=state.book_id,book_ids=book_ids,titles=titles,
-        title=state.title,started_at=state.started_at,task=state.task,dialog=nil,background=true}
+        title=state.title,source=state.source or state.task.source or "recovery",
+        started_at=state.started_at,task=state.task,dialog=nil,background=true}
     self._sync_runtime=runtime
     local ok,err=self.sync_task:attach(state.task,
         function(progress) self:_on_sync_progress(runtime,progress) end,

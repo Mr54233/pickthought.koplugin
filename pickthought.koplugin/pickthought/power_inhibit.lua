@@ -120,37 +120,47 @@ function PowerInhibit:_poll_worker()
     local worker = self.worker
     if not worker then return end
     local ffi_util = worker.ffi_util
+    local ok, done = pcall(ffi_util.isSubProcessDone, worker.pid, false)
+    -- 先判断子进程是否已经完成,再判断墙钟超时。UI 调度延迟时 helper
+    -- 可能早已写完结果,不能因为父进程晚轮询就把成功操作误报成 timeout。
+    if ok and done then
+        local result
+        if worker.timed_out then
+            result = {ok = false, error = "helper timeout", timeout = true}
+        else
+            local raw = U.read_file(worker.result_path, true)
+            if raw then
+                local decoded, value = pcall(Json.decode, raw)
+                result = decoded and value or {ok = false, error = "helper result decode failed"}
+            else
+                result = {ok = false, error = "helper returned no result"}
+            end
+        end
+        os.remove(worker.result_path)
+        os.remove(worker.result_path .. ".tmp")
+        self:_finish_worker(result)
+        return
+    end
+    if not ok then
+        pcall(ffi_util.terminateSubProcess, worker.pid)
+        os.remove(worker.result_path)
+        os.remove(worker.result_path .. ".tmp")
+        self:_finish_worker({ok = false, error = tostring(done)})
+        return
+    end
     if not worker.timed_out and self.now() - worker.started_at >= self.helper_timeout then
         worker.timed_out = true
         pcall(ffi_util.terminateSubProcess, worker.pid)
-        logger.warn("[撷思][PowerInhibit] helper timeout", "operation=", worker.operation.kind)
+        logger.warn("[撷思][PowerInhibit] helper timeout", "operation=", worker.operation.kind,
+            "elapsed=", tostring(self.now() - worker.started_at))
         local callback = worker.callback
         worker.callback = nil
         if callback then callback({ok = false, error = "helper timeout", timeout = true}) end
     end
-    local ok, done = pcall(ffi_util.isSubProcessDone, worker.pid, false)
-    if ok and not done then
+    if not done then
         self:_schedule(self.helper_poll_interval, function() self:_poll_worker() end)
         return
     end
-    local result
-    if worker.timed_out then
-        result = {ok = false, error = "helper timeout", timeout = true}
-    elseif not ok then
-        pcall(ffi_util.terminateSubProcess, worker.pid)
-        result = {ok = false, error = tostring(done)}
-    else
-        local raw = U.read_file(worker.result_path, true)
-        if raw then
-            local decoded, value = pcall(Json.decode, raw)
-            result = decoded and value or {ok = false, error = "helper result decode failed"}
-        else
-            result = {ok = false, error = "helper returned no result"}
-        end
-    end
-    os.remove(worker.result_path)
-    os.remove(worker.result_path .. ".tmp")
-    self:_finish_worker(result)
 end
 
 function PowerInhibit:_run_helper(operation, callback)

@@ -60,6 +60,19 @@ T.case("询问模式的完成报告不误称自动补", function()
     T.ok(not text:find("继续阅读时自动补", 1, true), "关闭自动后不误称自动拉取")
 end)
 
+T.case("资源预算暂停原因和断点提示清楚", function()
+    local text = render({
+        batch_start = 1, batch_end = 40, chapters_processed = 40,
+        chapters_fetch_succeeded = 40, chapters_total = 1000, chapters_pending = 960,
+        next_index = 41, batch_limit = 200, batch_budget_reason = "本批想法数量已达到预算",
+        total_underlines = 10, total_thought_entries = 30,
+        underlines_injected = 10, thoughts_injected = 30, unmatched = {},
+        backup = "book.epub.orig",
+    })
+    T.ok(text:find("本批因资源预算已暂停：本批想法数量已达到预算", 1, true), "展示预算停止原因")
+    T.ok(text:find("下一批将从断点继续", 1, true), "提示下一批从断点继续")
+end)
+
 
 -- 评审五轮 P1#1:多书报告不推导单一连续章节范围,只展示聚合数量 + 逐书明细。
 T.case("多书报告不生成跨书伪范围", function()

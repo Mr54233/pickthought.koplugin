@@ -1347,3 +1347,31 @@ T.case("缓存续同步:未明确完成(skip_resumed=false)时缓存章节重新
     -- 关键:缓存章节全部重新注入(不因 resumed 而跳过),上次未注入的缓存被补上。
     T.ok(#calls.injected.mapped >= 5, "5 章缓存全部重新注入,而非被跳过")
 end)
+
+T.case("自适应资源预算停在章节边界并保留续传游标", function()
+    local rows = {}
+    for i = 1, 4 do rows[i] = {chapterUid = i, title = "第一章", chapterIdx = i} end
+    local fetches = 0
+    local deps, calls = make_deps({
+        api = {chapters = function() return {data = rows} end},
+        annotations = {
+            fetch_chapter = function()
+                fetches = fetches + 1
+                return {
+                    underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                    review_map = {["0-7"] = {{content = "想法", abstract = "春江潮水连海平"}}},
+                    review_groups = {{range = "0-7", texts = {{content = "想法"}}}},
+                    underline_count = 1, thought_count = 1, thought_entry_count = 1, errors = {},
+                }
+            end,
+        },
+        max_batch_thought_entries = 1,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "预算触发后已有章节仍应注入: " .. tostring(err))
+    T.eq(fetches, 1, "达到想法预算后不再拉下一章")
+    T.eq(report.chapters_pending, 3, "剩余章节计入 pending")
+    T.eq(report.next_index, 2, "下一次从第二章继续")
+    T.ok(tostring(report.batch_budget_reason):find("想法", 1, true), "报告记录预算原因")
+    T.eq(#calls.injected.mapped, 1, "预算停止前的章节正常注入")
+end)
