@@ -1,15 +1,15 @@
 {
-  "version": "0.3.3",
-  "name": "撷思 PickThought 0.3.3",
+  "version": "0.4.0",
+  "name": "撷思 PickThought 0.4.0",
   "package_type": "full",
-  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.3/pickthought.koplugin.zip",
+  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.0/pickthought.koplugin.zip",
   "package_urls": [
-    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.3/pickthought.koplugin.zip",
-    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.3/pickthought.koplugin.zip",
-    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.3/pickthought.koplugin.zip",
-    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.3.3/pickthought.koplugin.zip"
+    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.0/pickthought.koplugin.zip",
+    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.0/pickthought.koplugin.zip",
+    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.0/pickthought.koplugin.zip",
+    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.0/pickthought.koplugin.zip"
   ],
-  "size": 141482,
-  "sha256": "59abcb806a93b21ce24b1e34b05a6472a1d77cfab3fe3173818a1220a30db117",
-  "notes": "新功能：\n增加同步调试模式与退出诊断\n\n问题修复：\n异步执行休眠保活避免阻塞界面\n移除设置中的重复划线样式入口\n恢复默认想法虚线样式"
+  "size": 907582,
+  "sha256": "822f423a8ff1936d4a86c96b7a04c5d921da589feac8f50837a32826183a9039",
+  "notes": "性能优化：\n增加滑窗耗时采样与降级让出 CPU(PR #17)\n\n新功能：\n完善分阶段同步进度展示\n展示同步分阶段明细进度\n优化同步资源预算与注入性能\n移植原生位图想法弹窗\n合入多书绑定注入与离线优化(PR #13)\n增加 clean_source 外部干净源重注能力(PR #20)\n增加 SQLite 数据库完整性校验与 WAL 折叠(PR #15)\n\n问题修复：\n统一匹配累计进度文案\n降低同步内存线并修复取消状态\n完善同步资源预算与任务生命周期\n多书同步标题动态显示当前书目\n修复多书同步标题与完成文案\n冷却同步保留限速状态\n稳定绑定时间与主绑定排序\n收紧离线重注缓存校验\n禁止缓存与同步结果写入失败静默通过\n完善原子文件写入与回滚\n拦截 EPUB writer 收尾失败\n让同步取消信号完整传播\n接入同步状态事务提交链路\n完善同步缓存与备份回滚\nclean_source 换位失败时恢复旧备份"
 }
