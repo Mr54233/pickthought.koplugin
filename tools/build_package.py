@@ -13,6 +13,8 @@ from typing import Dict, Iterable, Optional
 
 
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
+TEXT_SUFFIXES = {".lua", ".txt", ".md", ".json", ".css", ".xml", ".html", ".htm", ".svg"}
+TEXT_FILENAMES = {"LICENSE", "NOTICE"}
 
 
 class PackageError(RuntimeError):
@@ -62,7 +64,7 @@ def _package_files(plugin_root: Path) -> Iterable[Path]:
 
 def _package_bytes(path: Path) -> bytes:
     data = path.read_bytes()
-    if path.suffix.lower() == ".lua":
+    if path.suffix.lower() in TEXT_SUFFIXES or path.name in TEXT_FILENAMES:
         # Normalize checkout-specific line endings so local and CI packages match.
         data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     return data

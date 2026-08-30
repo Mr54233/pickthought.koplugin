@@ -14,6 +14,7 @@ class BuildPackageTests(unittest.TestCase):
         (plugin / "pickthought" / "config.lua").write_text(
             'return { VERSION = "1.2.3" }\n', encoding="utf-8"
         )
+        (plugin / "LICENSE").write_text("License line 1\nLicense line 2\n", encoding="utf-8")
 
     def test_build_is_byte_for_byte_deterministic(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -36,7 +37,8 @@ class BuildPackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             self._source(root)
-            for path in (root / "pickthought.koplugin").rglob("*.lua"):
+            plugin = root / "pickthought.koplugin"
+            for path in list(plugin.rglob("*.lua")) + [plugin / "LICENSE"]:
                 path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
 
             archive_path = root / "package.zip"
