@@ -186,7 +186,7 @@ T.case("三阶段进度显示累计和当前文件明细", function()
         "匹配阶段显示当前正文文件")
     T.ok(dialog.status_text:find("当前文件关联：划线 12 条，想法 37 条", 1, true),
         "匹配阶段显示当前文件关联数量")
-    T.ok(dialog.status_text:find("本轮已扫描：正文文件 415 个", 1, true),
+    T.ok(dialog.status_text:find("本轮累计已扫描：正文文件 415 个", 1, true),
         "匹配阶段显示累计扫描文件数")
 
     dialog:set_state({stage = "inject", current = 415, total = 1333,

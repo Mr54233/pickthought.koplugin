@@ -219,7 +219,7 @@ function SyncProgress:set_state(state)
                 .. " 条，想法 " .. format_count(state.current_file_thoughts) .. " 条"
         end
         if state.matched_files ~= nil then
-            rows[#rows + 1] = "本轮已扫描：正文文件 " .. format_count(state.matched_files) .. " 个"
+            rows[#rows + 1] = "本轮累计已扫描：正文文件 " .. format_count(state.matched_files) .. " 个"
         end
         if total > 200 then rows[#rows + 1] = "大型书籍的文本匹配需要较长时间,请耐心等待" end
     elseif total > 0 and current > 0 and state.stage == "inject" then
