@@ -79,6 +79,13 @@ local function make_deps(overrides)
         inject = function(src, book_id, mapped, dest, options)
             calls.injected = {src = src, book_id = book_id, mapped = mapped,
                 dest = dest, options = options}
+            if options and options.progress then
+                options.progress("OEBPS/c1.xhtml", 1, 1, {
+                    target_file = true, current_file_underlines = #mapped,
+                    current_file_thoughts = 1, injected_files = 1,
+                    injected_underlines = #mapped, injected_thoughts = 1,
+                })
+            end
             return {injected = #mapped, marks = #mapped,
                 unmatched = {}, quote_aligned = #mapped, dropped = 0,
                 underlines_resolved = #mapped, thoughts_linked = 1,
@@ -89,8 +96,11 @@ local function make_deps(overrides)
             calls.merged = {book_id = book_id, uid = tostring(uid), from = from, into = into}
             return true
         end,
-        progress = function(phase, i, n, text)
-            calls.progress[#calls.progress + 1] = {phase = phase, i = i, n = n, text = text}
+        progress = function(phase, i, n, text, book_id, metrics)
+            calls.progress[#calls.progress + 1] = {
+                phase = phase, i = i, n = n, text = text, book_id = book_id,
+                metrics = metrics,
+            }
             return true
         end,
     }

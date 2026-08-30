@@ -165,6 +165,41 @@ T.case("多书同步当前书目动态显示在标题,正文不重复显示", fu
     T.eq(dialog.title_text, "正在同步《剑来3》", "合集映射阶段保留最后一个拉取书目标题")
 end)
 
+T.case("三阶段进度显示累计和当前文件明细", function()
+    local dialog = {_title = "正在同步《剑来》"}
+    dialog.title_widget = {setText = function() end}
+    dialog.progress = {setPercentage = function() end}
+    dialog.percent_widget = {setText = function() end}
+    dialog.status_widget = {setText = function(_, text) dialog.status_text = text end}
+    function dialog:_redraw() end
+    setmetatable(dialog, {__index = SyncProgress})
+
+    dialog:set_state({stage = "fetch", current = 17, total = 1398,
+        fetch_underlines = 2435, fetch_thoughts = 30338})
+    T.ok(dialog.status_text:find("本轮累计：划线 2,435 条，想法 30,338 条", 1, true),
+        "拉取阶段显示累计数据")
+
+    dialog:set_state({stage = "map", current = 415, total = 1284,
+        current_file = "Text/0415.xhtml", current_file_underlines = 12,
+        current_file_thoughts = 37, matched_files = 415})
+    T.ok(dialog.status_text:find("当前文件：Text/0415.xhtml", 1, true),
+        "匹配阶段显示当前正文文件")
+    T.ok(dialog.status_text:find("当前文件关联：划线 12 条，想法 37 条", 1, true),
+        "匹配阶段显示当前文件关联数量")
+    T.ok(dialog.status_text:find("本轮已扫描：正文文件 415 个", 1, true),
+        "匹配阶段显示累计扫描文件数")
+
+    dialog:set_state({stage = "inject", current = 415, total = 1333,
+        current_file = "Text/0415.xhtml", current_file_target = true,
+        current_file_underlines = 9, current_file_thoughts = 28,
+        injected_underlines = 3420, injected_thoughts = 10206})
+    T.ok(dialog.status_text:find("当前文件注入：划线 9 条，想法 28 条", 1, true),
+        "注入阶段显示当前文件实际数量")
+    T.ok(dialog.status_text:find("本轮累计注入：划线 3,420 条，想法 10,206 条", 1, true),
+        "注入阶段显示累计实际数量")
+    T.eq(SyncProgress.format_count(1234567), "1,234,567", "大数字千位分隔")
+end)
+
 T.case("多书同步初始标题使用同步队列的第一本书", function()
     local self = {doc_title_guess = function() return "剑来合集" end}
     T.eq(Plugin._sync_display_title(self, "tests/剑来.epub", {title = "剑来3"},

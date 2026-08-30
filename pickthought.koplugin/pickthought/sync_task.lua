@@ -1144,24 +1144,17 @@ function SyncTask:start(task, on_progress, on_done)
                     -- 写包按条目回报(2 秒节流):大书注入+压缩要跑几分钟,
                     -- 百分比与文件计数都得动;心跳同时喂饱父进程的停顿检测,
                     -- 免得纯本地打包被误报成「等待网络」。
-                    local last_emit = 0
                     return EpubInject.inject_copy(src, bid, mapped, {dest = dest,
                         append = incremental and resume_any,
                         meta = inject_opts and inject_opts.meta,
                         book_ids = inject_opts and inject_opts.book_ids,
-                         progress = function(_, done, total)
-                             if cancelled() then return false end
-                             local now2 = os.time()
-                            if now2 - last_emit < 2 then return end
-                            last_emit = now2
-                            local pct = 0.90
-                            if tonumber(done) and tonumber(total) and total > 0 then
-                                pct = 0.90 + math.min(done / total, 1) * 0.09
+                        progress = function(path, done, total, detail)
+                            if cancelled() then return false end
+                            if inject_opts and type(inject_opts.progress) == "function" then
+                                return inject_opts.progress(path, done, total, detail) ~= false
                             end
-                             emit{stage = "inject", current = tonumber(done),
-                                 total = tonumber(total), percent = pct}
-                             return true
-                         end})
+                            return true
+                        end})
                 end,
                 fetch_budget = mode ~= "reinject" and batch_limit or nil,
                 chapter_budget = mode ~= "reinject" and batch_limit or nil,
@@ -1186,7 +1179,7 @@ function SyncTask:start(task, on_progress, on_done)
                 map_cache_path = function(bid) return store:book_dir(bid) .. "/sync-cache/map.json" end,
                 -- B:开启 spine 正文持久化缓存,分批同步第 2 批起不再解压原 EPUB。
                 spine_cache = true,
-                progress = function(phase, i, n, text, progress_book_id)
+                progress = function(phase, i, n, text, progress_book_id, metrics)
                     if cancelled() then return false end
                     if phase == "map" or phase == "inject" then
                         local bucket = tonumber(i) and tonumber(n) and tonumber(n) > 0
@@ -1216,8 +1209,12 @@ function SyncTask:start(task, on_progress, on_done)
                         -- 映射按正文文件推进,占 0.84~0.90 这一段
                         percent = 0.84 + (n and n > 0 and i and i > 0 and (i / n) * 0.06 or 0)
                     elseif phase == "inject" then percent = 0.90 end
-                    emit{stage = phase, current = i, total = n, chapter = text,
+                    local state = {stage = phase, current = i, total = n, chapter = text,
                         book_id = phase_book_id, percent = percent}
+                    for key, value in pairs(metrics or {}) do
+                        if value ~= nil then state[key] = value end
+                    end
+                    emit(state)
                     return true
                 end,
             }

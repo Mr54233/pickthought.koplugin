@@ -47,8 +47,24 @@ function Sync.backup_path(doc_path) return tostring(doc_path) .. Sync.BACKUP_SUF
 
 function Sync.run(deps)
     local progress = deps.progress or function() return true end
-    local function step(phase, i, n, text, book_id)
-        return progress(phase, i, n, text, book_id) ~= false
+    local progress_metrics = {
+        fetch_chapters = 0, fetch_underlines = 0, fetch_thoughts = 0,
+        book_fetch_chapters = 0, book_fetch_underlines = 0, book_fetch_thoughts = 0,
+        matched_files = 0, matched_underlines = 0, matched_thoughts = 0,
+        injected_files = 0, injected_underlines = 0, injected_thoughts = 0,
+        current_file = nil, current_file_underlines = 0, current_file_thoughts = 0,
+        current_file_target = false,
+    }
+    local function progress_snapshot(overrides)
+        local snapshot = {}
+        for key, value in pairs(progress_metrics) do snapshot[key] = value end
+        for key, value in pairs(overrides or {}) do snapshot[key] = value end
+        return snapshot
+    end
+    local function step(phase, i, n, text, book_id, overrides)
+        local snapshot = progress_snapshot(overrides)
+        snapshot.phase = phase
+        return progress(phase, i, n, text, book_id, snapshot) ~= false
     end
     local file_exists = deps.file_exists or U.file_exists
     local rename = deps.rename or os.rename
@@ -212,6 +228,9 @@ function Sync.run(deps)
         -- 每本书独立的预算/限速/连续失败状态:第一本耗尽预算或触发限速/熔断,
         -- 不得影响后续书(评审二轮 P1#2)。
         local book_fresh_fetches = 0
+        progress_metrics.book_fetch_chapters = 0
+        progress_metrics.book_fetch_underlines = 0
+        progress_metrics.book_fetch_thoughts = 0
         local book_consecutive_hard = 0
         local book_rate_limited = false
         local book_rate_limit_wait
@@ -267,6 +286,7 @@ function Sync.run(deps)
         local book_deferred, book_deferred_index
         -- 本书批次起止(逐书记录,避免全局累加器被末本覆盖,P1#4)。
         local book_batch_start, book_batch_end
+        local book_fetch_chapters, book_fetch_underlines, book_fetch_thoughts = 0, 0, 0
         -- 本书进入前 fetched 长度,熔断(整书失败)时据此回退剔除本书已加入的章节,
         -- 避免失败书的残缺数据混入注入(见 test 断点缓存命中不复位熔断计数)。
         local book_fetch_start = #fetched
@@ -336,6 +356,17 @@ function Sync.run(deps)
                 end
                 total_underlines = total_underlines + (data.underline_count or 0)
                 total_thought_entries = total_thought_entries + (data.thought_entry_count or 0)
+                progress_metrics.fetch_chapters = progress_metrics.fetch_chapters + 1
+                progress_metrics.fetch_underlines = progress_metrics.fetch_underlines
+                    + (tonumber(data.underline_count) or 0)
+                progress_metrics.fetch_thoughts = progress_metrics.fetch_thoughts
+                    + (tonumber(data.thought_entry_count) or 0)
+                book_fetch_chapters = book_fetch_chapters + 1
+                book_fetch_underlines = book_fetch_underlines + (tonumber(data.underline_count) or 0)
+                book_fetch_thoughts = book_fetch_thoughts + (tonumber(data.thought_entry_count) or 0)
+                progress_metrics.book_fetch_chapters = book_fetch_chapters
+                progress_metrics.book_fetch_underlines = book_fetch_underlines
+                progress_metrics.book_fetch_thoughts = book_fetch_thoughts
                 resource_budget:account(data)
                 local compact = SyncBudget.compact(data)
                 if (data.underline_count or 0) > 0 then
@@ -408,6 +439,11 @@ function Sync.run(deps)
                     book_failed_reason = "划线拉取失败: " .. short_err(last_error)
                     break
                 end
+            end
+            if good and type(data) == "table" and data.underline_request_ok ~= false
+                and #(data.errors or {}) == 0 and not chapter_rate_limited
+                and not skipped_completed_cache then
+                if not step("fetch", i, #chapter_list, ch.title, bid) then return nil, "已取消" end
             end
             if not chapter_rate_limited and not skipped_completed_cache then
                 book_batch_start = book_batch_start or i
@@ -667,6 +703,7 @@ function Sync.run(deps)
     local spine_total = #(map_meta.spine or {})
     local mapped_new, unmatched_new = {}, {}
     local map_metrics
+    local matched_file_seen = {}
     local function map_checkpoint(metrics)
         if type(deps.map_checkpoint) == "function" then
             return deps.map_checkpoint(metrics) ~= false
@@ -741,22 +778,34 @@ function Sync.run(deps)
 
     if #todo > 0 then
         local map_started_at = os.time()
+        local function report_map_file(detail)
+            local href = tostring(detail and detail.href or "")
+            if href ~= "" and not matched_file_seen[href] then
+                matched_file_seen[href] = true
+                progress_metrics.matched_files = progress_metrics.matched_files + 1
+            end
+            progress_metrics.matched_underlines = progress_metrics.matched_underlines
+                + (tonumber(detail and detail.underlines) or 0)
+            progress_metrics.matched_thoughts = progress_metrics.matched_thoughts
+                + (tonumber(detail and detail.thoughts) or 0)
+            progress_metrics.current_file = href
+            progress_metrics.current_file_underlines = tonumber(detail and detail.underlines) or 0
+            progress_metrics.current_file_thoughts = tonumber(detail and detail.thoughts) or 0
+            progress_metrics.current_file_target = true
+            return step("map", map_count, spine_total, href)
+        end
         if deps.read_spine then
             mapped_new, unmatched_new, map_metrics = ChapterMap.build_stream(map_meta.spine, function(visit, phase, target_set)
                 return cached_read_spine(map_meta, function(item, content, err, index)
                     map_count = map_count + 1
-                    if not step("map", map_count, spine_total, item and item.href) then
-                        return false
-                    end
                     return visit(item, content, err, index, phase, target_set)
                 end)
-            end, todo, {on_check = map_checkpoint})
+            end, todo, {on_check = map_checkpoint, on_file = report_map_file})
         else
             mapped_new, unmatched_new, map_metrics = ChapterMap.build(map_meta.spine, function(href)
                 map_count = map_count + 1
-                if not step("map", map_count, spine_total, href) then return false end
                 return cached_read_text(map_meta, href)
-            end, todo, {on_check = map_checkpoint})
+            end, todo, {on_check = map_checkpoint, on_file = report_map_file})
         end
         if spine_cache then spine_cache:close() end
         logger.info("[撷思][ChapterMap] completed",
@@ -880,12 +929,44 @@ function Sync.run(deps)
         }
     end
 
+    progress_metrics.current_file = nil
+    progress_metrics.current_file_underlines = 0
+    progress_metrics.current_file_thoughts = 0
+    progress_metrics.current_file_target = false
     if not step("inject", 0, 1) then return nil, "已取消" end
+    local last_inject_progress_at = 0
+    local function report_inject_progress(path, done, total, detail)
+        detail = type(detail) == "table" and detail or {}
+        progress_metrics.current_file = tostring(path or "")
+        progress_metrics.current_file_target = detail.target_file == true
+        progress_metrics.current_file_underlines = detail.target_file
+            and (tonumber(detail.current_file_underlines) or 0) or 0
+        progress_metrics.current_file_thoughts = detail.target_file
+            and (tonumber(detail.current_file_thoughts) or 0) or 0
+        if detail.injected_files ~= nil then
+            progress_metrics.injected_files = tonumber(detail.injected_files) or progress_metrics.injected_files
+        end
+        if detail.injected_underlines ~= nil then
+            progress_metrics.injected_underlines = tonumber(detail.injected_underlines)
+                or progress_metrics.injected_underlines
+        end
+        if detail.injected_thoughts ~= nil then
+            progress_metrics.injected_thoughts = tonumber(detail.injected_thoughts)
+                or progress_metrics.injected_thoughts
+        end
+        local now = os.time()
+        if tonumber(done) and tonumber(total) and tonumber(done) < tonumber(total)
+            and now - last_inject_progress_at < 2 then
+            return true
+        end
+        last_inject_progress_at = now
+        return step("inject", done, total, path)
+    end
     -- 注入到中间文件(无 .epub 后缀,不会闪现在书架),成功后原子换位。
     -- 多书时把所有绑定书的 mapped 章节合并进同一次注入,book_ids 一并列进 MARKER。
     local temp_dest = doc_path .. ".pickthought-new"
     local stats, inject_err = deps.inject(src, book_ids[1], mapped, temp_dest,
-        {append = append, meta = meta, book_ids = book_ids})
+        {append = append, meta = meta, book_ids = book_ids, progress = report_inject_progress})
     if not stats then return nil, inject_err end
 
     -- 重叠划线被合并的,把想法并进存活锚点的组:点一个虚线看到这一段全部想法。

@@ -140,6 +140,18 @@ local function clean_status(value, limit)
     return text
 end
 
+local function format_count(value)
+    local number = math.max(0, math.floor(tonumber(value) or 0))
+    local text = tostring(number)
+    local changed
+    repeat
+        text, changed = text:gsub("^(%d+)(%d%d%d)", "%1,%2")
+    until changed == 0
+    return text
+end
+
+SyncProgress.format_count = format_count
+
 function SyncProgress:_redraw()
     local target = (self.frame and self.frame.dimen) or self.dimen
     UIManager:setDirty(self, function()
@@ -195,11 +207,31 @@ function SyncProgress:set_state(state)
     rows[#rows + 1] = labels[state.stage] or tostring(state.stage or "处理中")
     if total > 0 and state.stage == "fetch" then
         rows[#rows + 1] = "章节 " .. tostring(current) .. " / " .. tostring(total)
+        if state.fetch_underlines ~= nil or state.fetch_thoughts ~= nil then
+            rows[#rows + 1] = "本轮累计：划线 " .. format_count(state.fetch_underlines)
+                .. " 条，想法 " .. format_count(state.fetch_thoughts) .. " 条"
+        end
     elseif total > 0 and state.stage == "map" then
         rows[#rows + 1] = "正文文件 " .. tostring(current) .. " / " .. tostring(total)
+        if state.current_file and state.current_file ~= "" then
+            rows[#rows + 1] = "当前文件：" .. clean_status(state.current_file, 120)
+            rows[#rows + 1] = "当前文件关联：划线 " .. format_count(state.current_file_underlines)
+                .. " 条，想法 " .. format_count(state.current_file_thoughts) .. " 条"
+        end
+        if state.matched_files ~= nil then
+            rows[#rows + 1] = "本轮已扫描：正文文件 " .. format_count(state.matched_files) .. " 个"
+        end
         if total > 200 then rows[#rows + 1] = "大型书籍的文本匹配需要较长时间,请耐心等待" end
     elseif total > 0 and current > 0 and state.stage == "inject" then
         rows[#rows + 1] = "写入文件 " .. tostring(current) .. " / " .. tostring(total)
+        if state.current_file_target and state.current_file and state.current_file ~= "" then
+            rows[#rows + 1] = "当前文件注入：划线 " .. format_count(state.current_file_underlines)
+                .. " 条，想法 " .. format_count(state.current_file_thoughts) .. " 条"
+        end
+        if state.injected_underlines ~= nil or state.injected_thoughts ~= nil then
+            rows[#rows + 1] = "本轮累计注入：划线 " .. format_count(state.injected_underlines)
+                .. " 条，想法 " .. format_count(state.injected_thoughts) .. " 条"
+        end
         if total > 200 then rows[#rows + 1] = "大型书籍的注入与压缩需要几分钟,请耐心等待" end
     end
     if state.chapter and state.chapter ~= "" then rows[#rows + 1] = clean_status(state.chapter, 120) end

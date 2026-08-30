@@ -48,6 +48,13 @@ local function make_deps(overrides)
         inject = function(src, book_id, mapped, dest, options)
             calls.injected = {src = src, book_id = book_id, mapped = mapped,
                 dest = dest, options = options}
+            if options and options.progress then
+                options.progress("OEBPS/c1.xhtml", 1, 1, {
+                    target_file = true, current_file_underlines = #mapped,
+                    current_file_thoughts = 1, injected_files = 1,
+                    injected_underlines = #mapped, injected_thoughts = 1,
+                })
+            end
             return {injected = #mapped, marks = #mapped,
                 unmatched = {}, quote_aligned = #mapped, dropped = 0,
                 underlines_resolved = #mapped, thoughts_linked = 1,
@@ -58,9 +65,10 @@ local function make_deps(overrides)
             calls.merged = {book_id = book_id, uid = tostring(uid), from = from, into = into}
             return true
         end,
-        progress = function(phase, i, n, text, book_id)
+        progress = function(phase, i, n, text, book_id, metrics)
             calls.progress[#calls.progress + 1] = {
                 phase = phase, i = i, n = n, text = text, book_id = book_id,
+                metrics = metrics,
             }
             return true
         end,
@@ -114,6 +122,36 @@ T.case("同步全流程", function()
         if event.phase == "fetch" then fetch_progress = event; break end
     end
     T.eq(fetch_progress.book_id, "b001", "单书拉取进度携带书 ID")
+    T.eq(fetch_progress.metrics.fetch_underlines, 0, "拉取开始时累计划线为零")
+    local fetch_done
+    for _, event in ipairs(calls.progress) do
+        if event.phase == "fetch" and event.metrics and event.metrics.fetch_underlines == 1 then
+            fetch_done = event
+        end
+    end
+    T.ok(fetch_done, "章节成功后回报拉取累计计数")
+    T.eq(fetch_done.metrics.fetch_thoughts, 1, "章节成功后回报累计想法数")
+    local map_progress
+    for _, event in ipairs(calls.progress) do
+        if event.phase == "map" and event.metrics and event.metrics.current_file then
+            map_progress = event
+            break
+        end
+    end
+    T.ok(map_progress, "匹配阶段回报当前正文文件")
+    T.eq(map_progress.metrics.current_file_underlines, 1, "匹配阶段回报当前文件划线关联数")
+    T.eq(map_progress.metrics.current_file_thoughts, 1, "匹配阶段回报当前文件想法关联数")
+    T.eq(map_progress.metrics.matched_files, 1, "匹配阶段回报正文文件累计数")
+    local inject_progress
+    for _, event in ipairs(calls.progress) do
+        if event.phase == "inject" and event.metrics
+            and (event.metrics.injected_underlines or 0) > 0 then
+            inject_progress = event
+            break
+        end
+    end
+    T.ok(inject_progress, "注入阶段回报累计注入计数")
+    T.eq(inject_progress.metrics.injected_thoughts, 1, "注入阶段回报累计想法数")
 end)
 
 T.case("重同步从 .orig 干净备份注入", function()
@@ -660,9 +698,11 @@ T.case("多书进度回调按顺序携带当前书 ID", function()
     T.eq(#chapter_events, 2, "两本书各产生章节列表进度")
     T.eq(chapter_events[1].book_id, "b001", "第一本章节列表进度带书 ID")
     T.eq(chapter_events[2].book_id, "b002", "第二本章节列表进度带书 ID")
-    T.eq(#fetch_events, 4, "两本书各两章产生拉取进度")
+    T.eq(#fetch_events, 8, "两本书各两章在开始/完成时产生拉取进度")
     T.eq(fetch_events[1].book_id, "b001", "第一本拉取进度带书 ID")
-    T.eq(fetch_events[3].book_id, "b002", "第二本拉取进度带书 ID")
+    T.eq(fetch_events[5].book_id, "b002", "第二本拉取进度带书 ID")
+    T.eq(fetch_events[5].metrics.book_fetch_underlines, 0, "切换第二本时局部划线计数清零")
+    T.eq(fetch_events[6].metrics.book_fetch_underlines, 1, "第二本局部划线计数独立累计")
 end)
 
 T.case("单章拉取失败不中断,计入 fetch_errors", function()

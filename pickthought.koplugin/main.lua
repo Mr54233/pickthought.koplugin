@@ -1552,12 +1552,13 @@ function Plugin:_sync_run(path,bound)
             merge_thoughts=function(book_id,uid,from,into) return Thoughts.merge(self.store,book_id,uid,from,into) end,
             -- P1#2:前台也用函数式 map_cache_path,与后台一致(每书独立 map.json)。
             map_cache_path=function(bid) return self.store:book_dir(bid).."/sync-cache/map.json" end,
-            inject=function(src,book_id,mapped,dest,options)
-                return EpubInject.inject_copy(src,book_id,mapped,
+             inject=function(src,book_id,mapped,dest,options)
+                 return EpubInject.inject_copy(src,book_id,mapped,
                     {dest=dest,append=options and options.append==true,
                      meta=options and options.meta,
                      -- 多书:透传全部绑定书 id,marker 记录完整来源(P1#4)。
                      book_ids=options and options.book_ids,
+                     progress=options and options.progress,
                      -- 前台 Trapper 回退路径:降级让出必须用非阻塞方式。本路径 Sync.run
                      -- 处于 xpcall 内,Lua 5.1 无法跨 C 调用 yield,故不能用 coroutine.yield,
                      -- 也不能用 fu.usleep(会阻塞前台协程、不交还 UIManager)。这里显式传入
@@ -1565,22 +1566,38 @@ function Plugin:_sync_run(path,bound)
                      -- Sync.run 另一注入入口,保留默认 usleep 让出 CPU。
                      perf=PerformanceMode:new({ rest=function() end })})
             end,
-            progress=function(phase,i,n,text,progress_book_id)
-                local msg
-                local book_index=progress_book_id and sync_book_index[tostring(progress_book_id)]
-                local book_title=progress_book_id and sync_titles[tostring(progress_book_id)] or nil
-                local book_prefix=(#sync_book_ids > 1 and book_index)
-                    and string.format("当前书目 %d/%d：《%s》\n",book_index,#sync_book_ids,book_title or "绑定书目") or ""
-                if phase=="chapters" then msg=book_prefix.."正在获取章节列表…"
-                elseif phase=="fetch" then msg=book_prefix..string.format("正在拉取划线与想法 %d/%d\n%s\n(点按屏幕可取消)",i,n,tostring(text or ""))
-                elseif phase=="map" then
-                    if n and n>0 and i and i>0 then
-                        msg=string.format("正在匹配本地章节 %d/%d 个正文文件",i,n)
-                        if n>200 then msg=msg.."\n大型书籍的文本匹配需要较长时间,请耐心等待" end
-                    else msg="正在匹配本地章节…" end
-                else msg="正在生成划线版并替换…\n(书较大时需要一点时间)" end
-                return Trapper:info(msg)
-            end,
+             progress=function(phase,i,n,text,progress_book_id,metrics)
+                 local msg
+                 local book_index=progress_book_id and sync_book_index[tostring(progress_book_id)]
+                 local book_title=progress_book_id and sync_titles[tostring(progress_book_id)] or nil
+                 local book_prefix=(#sync_book_ids > 1 and book_index)
+                     and string.format("当前书目 %d/%d：《%s》\n",book_index,#sync_book_ids,book_title or "绑定书目") or ""
+                 metrics=type(metrics)=="table" and metrics or {}
+                 local count=SyncProgress.format_count
+                 if phase=="chapters" then msg=book_prefix.."正在获取章节列表…"
+                 elseif phase=="fetch" then msg=book_prefix..string.format("正在拉取划线与想法 %d/%d\n本轮累计：划线 %s 条，想法 %s 条\n%s\n(点按屏幕可取消)",
+                     i,n,count(metrics.fetch_underlines),count(metrics.fetch_thoughts),tostring(text or ""))
+                 elseif phase=="map" then
+                     if n and n>0 and i and i>0 then
+                         msg=string.format("正在匹配本地章节 %d/%d 个正文文件",i,n)
+                         if metrics.current_file and metrics.current_file~="" then
+                             msg=msg.."\n当前文件关联：划线 "..count(metrics.current_file_underlines)
+                                 .." 条，想法 "..count(metrics.current_file_thoughts).." 条"
+                         end
+                         if n>200 then msg=msg.."\n大型书籍的文本匹配需要较长时间,请耐心等待" end
+                     else msg="正在匹配本地章节…" end
+                 else
+                     msg="正在生成划线版并替换…"
+                     if metrics.current_file_target and metrics.current_file then
+                         msg=msg.."\n当前文件注入：划线 "..count(metrics.current_file_underlines)
+                             .." 条，想法 "..count(metrics.current_file_thoughts).." 条"
+                     end
+                     msg=msg.."\n本轮累计注入：划线 "..count(metrics.injected_underlines)
+                         .." 条，想法 "..count(metrics.injected_thoughts).." 条"
+                         .."\n(书较大时需要一点时间)"
+                 end
+                 return Trapper:info(msg)
+             end,
         }
     end,debug.traceback)
     Trapper:clear()

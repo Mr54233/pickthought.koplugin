@@ -395,6 +395,8 @@ function M.inject_copy(src, book_id, chapters, opts)
         end
     end
     local injected_uids = {}
+    local injected_thought_keys = {}
+    local injected_thoughts_total = 0
     -- 跨文件聚合每条划线的着落:拆分章一章对多文件,同一条划线在没对齐的文件里
     -- 各计一次 unlocated,直接累加会虚高数倍(真机:4 万条划线报 3.2 万未注入,
     -- 三项相加超过总数)。唯一划线在任一目标文件落锚或被重叠合并,即算有着落。
@@ -433,6 +435,7 @@ function M.inject_copy(src, book_id, chapters, opts)
                         return fail("无法读取 EPUB 条目:" .. entry.path
                             .. (read_err and ("(" .. read_err .. ")") or ""))
                     end
+                    local progress_detail = {target_file = rows ~= nil}
                     if rows then
                         stats.target_files = stats.target_files + 1
                         local data_rows = {}
@@ -447,6 +450,24 @@ function M.inject_copy(src, book_id, chapters, opts)
                             stats.batch_fallbacks = stats.batch_fallbacks + 1
                         end
                         local has_new_marks = false
+                        local file_mark_count, file_thought_count = 0, 0
+                        local file_thought_keys = {}
+                        local function account_thoughts(data, track, keys)
+                            for key in pairs(keys or {}) do
+                                local thought_key = ckey(data.book_id, data.chapter_uid)
+                                    .. "\0" .. tostring(key)
+                                if not file_thought_keys[thought_key] then
+                                    file_thought_keys[thought_key] = true
+                                    file_thought_count = file_thought_count
+                                        + (tonumber(track.thoughts[key]) or 0)
+                                end
+                                if not injected_thought_keys[thought_key] then
+                                    injected_thought_keys[thought_key] = true
+                                    injected_thoughts_total = injected_thoughts_total
+                                        + (tonumber(track.thoughts[key]) or 0)
+                                end
+                            end
+                        end
                         for _, applied in ipairs(applied_rows or {}) do
                             local data, ch_stats = applied.data, applied.stats or {}
                             local mark_count, hit_keys = applied.mark_count or 0, applied.hit_keys or {}
@@ -467,6 +488,13 @@ function M.inject_copy(src, book_id, chapters, opts)
                             end
                             if mark_count > 0 then
                                 has_new_marks = true
+                                file_mark_count = file_mark_count + mark_count
+                                account_thoughts(data, track, hit_keys)
+                                local overlapped = {}
+                                for _, key in ipairs(ch_stats.overlapped_keys or {}) do
+                                    overlapped[tostring(key)] = true
+                                end
+                                account_thoughts(data, track, overlapped)
                                 -- 拆分章会产生同 uid 多行,injected 按「有锚点落书的微信章」去重计数。
                                 -- 多书按 book_id+uid 复合键,不同书同 uid 不互相吞掉计数。
                                 if not injected_uids[ckey(data.book_id, data.chapter_uid)] then
@@ -481,13 +509,18 @@ function M.inject_copy(src, book_id, chapters, opts)
                             end
                         end
                         content = has_new_marks and ensure_style(rendered) or rendered
+                        progress_detail.current_file_underlines = file_mark_count
+                        progress_detail.current_file_thoughts = file_thought_count
+                        progress_detail.injected_files = stats.target_files
+                        progress_detail.injected_underlines = stats.marks
+                        progress_detail.injected_thoughts = injected_thoughts_total
                     end
                     if not writer:addFileFromMemory(entry.path, content, mtime) then
                         return fail("写入副本失败:" .. entry.path)
                     end
                     if opts.progress then
                         local progress_ok, progress_result = pcall(opts.progress,
-                            entry.path, seen_entries, total_entries)
+                            entry.path, seen_entries, total_entries, progress_detail)
                         if not progress_ok then return fail("进度回调失败:" .. tostring(progress_result)) end
                         if progress_result == false then return fail("已取消") end
                     end
@@ -495,9 +528,10 @@ function M.inject_copy(src, book_id, chapters, opts)
                     content = nil
                     gc_policy:release(content_bytes)
                 else
+                    local progress_detail = {target_file = false}
                     if opts.progress then
                         local progress_ok, progress_result = pcall(opts.progress,
-                            entry.path, seen_entries, total_entries)
+                            entry.path, seen_entries, total_entries, progress_detail)
                         if not progress_ok then return fail("进度回调失败:" .. tostring(progress_result)) end
                         if progress_result == false then return fail("已取消") end
                     end

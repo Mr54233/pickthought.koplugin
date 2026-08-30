@@ -59,7 +59,9 @@ end)
 T.case("端到端注入", function()
     local prog = {}
     local stats, err, Arc, renames = run_inject(book_files(), CHAPTERS, nil, {
-        progress = function(name, i, n) prog[#prog + 1] = {name = name, i = i, n = n} end,
+        progress = function(name, i, n, detail)
+            prog[#prog + 1] = {name = name, i = i, n = n, detail = detail}
+        end,
     })
     T.ok(stats, "inject_copy 应成功: " .. tostring(err))
     T.eq(stats.injected, 1, "注入 1 章")
@@ -94,6 +96,15 @@ T.case("端到端注入", function()
     T.ok(#prog >= 4, "逐条目进度回调发生")
     T.eq(prog[#prog].i, 6, "计数走到最后一个条目")
     T.eq(prog[#prog].n, 6, "总数=全部 zip 条目")
+    local target_progress
+    for _, event in ipairs(prog) do
+        if event.detail and event.detail.target_file then target_progress = event end
+    end
+    T.ok(target_progress, "目标正文进度带文件明细")
+    T.eq(target_progress.detail.current_file_underlines, 1, "当前文件实际注入划线数")
+    T.eq(target_progress.detail.current_file_thoughts, 1, "当前文件实际注入想法数")
+    T.eq(target_progress.detail.injected_underlines, 1, "累计实际注入划线数")
+    T.eq(target_progress.detail.injected_thoughts, 1, "累计实际注入想法数")
     for k = 2, #prog do
         T.ok(prog[k].i > prog[k - 1].i, "进度计数单调递增")
     end
@@ -410,7 +421,10 @@ T.case("重叠划线带想法时并入存活锚点", function()
         },
         review_map = {["2-5"] = {{content = "被合并划线上的想法", author = "乙"}}},
     }}
-    local stats, err, Arc = run_inject(book_files(), chapters)
+    local progress = {}
+    local stats, err, Arc = run_inject(book_files(), chapters, nil, {
+        progress = function(_, _, _, detail) progress[#progress + 1] = detail end,
+    })
     T.ok(stats, "应成功: " .. tostring(err))
     T.eq(stats.marks, 1, "只留一个锚点")
     T.eq(#stats.merges, 1, "记录合并映射")
@@ -418,6 +432,13 @@ T.case("重叠划线带想法时并入存活锚点", function()
     T.eq(stats.merges[1].into, "0-7", "into=存活锚点")
     T.eq(stats.merges[1].uid, "42", "带章节 uid")
     T.eq(stats.thoughts_linked, 1, "被合并划线上的想法仍算注入成功")
+    local observed
+    for _, detail in ipairs(progress) do
+        if detail and detail.target_file then observed = detail end
+    end
+    T.ok(observed, "重叠注入回报当前文件")
+    T.eq(observed.current_file_thoughts, 1, "合并范围的想法计入当前文件")
+    T.eq(observed.injected_thoughts, 1, "合并范围的想法计入累计注入")
     local ch1
     for _, e in ipairs(STUBS.written(Arc._last_writer)) do
         if e.path == "OEBPS/Text/ch1.xhtml" then ch1 = e end

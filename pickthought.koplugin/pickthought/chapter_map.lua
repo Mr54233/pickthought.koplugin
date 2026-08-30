@@ -269,6 +269,26 @@ local function build_with_scanner(spine, chapters, scan, options)
         checkpoints = 0,
     }
 
+    local function thought_count_of(chapter)
+        local count = tonumber(chapter and chapter.thought_count)
+        if count then return math.max(0, count) end
+        count = 0
+        local by_range = chapter and chapter.thought_count_by_range
+        local seen = {}
+        for _, row in ipairs(chapter and chapter.underlines or {}) do
+            local key = type(row) == "table" and tostring(row.range or row.markRange
+                or row.bookmarkRange or "") or ""
+            if key ~= "" and not seen[key] then
+                seen[key] = true
+                count = count + (tonumber(by_range and by_range[key]) or 0)
+            end
+        end
+        if count == 0 and type(chapter and chapter.review_map) == "table" then
+            for _ in pairs(chapter.review_map) do count = count + 1 end
+        end
+        return count
+    end
+
     local function checkpoint()
         metrics.checkpoints = metrics.checkpoints + 1
         if type(options.on_check) == "function"
@@ -418,6 +438,22 @@ local function build_with_scanner(spine, chapters, scan, options)
                         }
                     end
                 end
+            end
+            if type(options.on_file) == "function" then
+                local associated_chapters, associated_underlines, associated_thoughts = 0, 0, 0
+                for ci in pairs(candidates) do
+                    local chapter = chapters[ci] or {}
+                    associated_chapters = associated_chapters + 1
+                    associated_underlines = associated_underlines + #(chapter.underlines or {})
+                    associated_thoughts = associated_thoughts + thought_count_of(chapter)
+                end
+                local reported = options.on_file({
+                    href = item.href, phase = phase,
+                    chapters = associated_chapters,
+                    underlines = associated_underlines,
+                    thoughts = associated_thoughts,
+                })
+                if reported == false then return false end
             end
             if phase == "fallback" then
                 for _ in pairs(target_set or {}) do metrics.fallback_chapters = metrics.fallback_chapters + 1 end
