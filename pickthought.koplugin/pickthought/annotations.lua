@@ -336,10 +336,11 @@ local function intervals(data, visible_count, index)
     return clean, stats
 end
 
-local function render_text_token(token, marks, data)
+local function render_text_token(token, marks, data, cursor)
     if token.skip or not token.units or #token.units == 0 then return token.raw end
     local out, pos = {}, token.start
     local active, thought_link_open = nil, false
+    cursor = cursor or {index = 1}
     local function close_active()
         if not active then return end
         if thought_link_open then
@@ -351,8 +352,11 @@ local function render_text_token(token, marks, data)
         thought_link_open = false
     end
     for _, unit in ipairs(token.units) do
-        local mark
-        for _, it in ipairs(marks) do if pos >= it.a and pos < it.b then mark = it; break end end
+        while marks[cursor.index] and marks[cursor.index].b <= pos do
+            cursor.index = cursor.index + 1
+        end
+        local candidate = marks[cursor.index]
+        local mark = candidate and pos >= candidate.a and pos < candidate.b and candidate or nil
         if mark ~= active then
             close_active()
             active = mark
@@ -364,7 +368,8 @@ local function render_text_token(token, marks, data)
                     -- 折叠:把「链接 <a> + 标注 <span>」合并为单个 <a class="pickthought-link pickthought-mark">,
                     -- 减半样式元素数量;配合 annotation_style 使用共享 class 的默认样式,
                     -- 保留低内存设备的结构优化。
-                    local href = Thoughts.href(data.book_id, data.chapter_uid, active.key)
+                    local mark_data = active.data or data
+                    local href = Thoughts.href(mark_data.book_id, mark_data.chapter_uid, active.key)
                     out[#out + 1] = '<a class="pickthought-link pickthought-mark" data-pickthought-range="'
                         .. active.key .. '" href="' .. href .. '">'
                     thought_link_open = true
@@ -392,22 +397,16 @@ local function inject(html, data)
     local marks, stats = intervals(data, visible_count, index)
     if #marks == 0 then return html, stats end
     local out = {}
+    local cursor = {index = 1}
     for _, token in ipairs(tokens) do
-        if token.kind == "text" then out[#out + 1] = render_text_token(token, marks, data)
+        if token.kind == "text" then out[#out + 1] = render_text_token(token, marks, data, cursor)
         else out[#out + 1] = token.raw end
     end
     return table.concat(out), stats
 end
 
-function Annotations:apply(html, data)
-    if not data or data.underline_count == 0 then return html, "", {underlines=0,thoughts=0} end
-    local rendered, alignment = inject(html, data)
-    logger.info("[撷思][Annotations] alignment",
-        "book=", tostring(data.book_id or ""), "chapter=", tostring(data.chapter_uid or ""),
-        "quote=", tostring(alignment and alignment.quote_aligned or 0),
-        "numeric=", tostring(alignment and alignment.numeric or 0),
-        "dropped=", tostring(alignment and alignment.dropped or 0))
-    return rendered, CSS, {
+local function annotation_stats(data, alignment)
+    return {
         underlines=data.underline_count, thoughts=data.thought_count,
         thought_entries=data.thought_entry_count or 0, errors=#(data.errors or {}),
         quote_aligned=alignment and alignment.quote_aligned or 0,
@@ -418,6 +417,135 @@ function Annotations:apply(html, data)
         merged=alignment and alignment.merged or {},
         overlapped_keys=alignment and alignment.overlapped_keys or {},
     }
+end
+
+-- 兼容逐章回退路径:用注入前后的锚点数量差判断本次真正新增的划线。
+-- 不能直接复用 epub_inject 的私有辅助函数,否则模块单独加载时会变成全局 nil。
+local function count_occurrences(text, needle)
+    local n, from = 0, 1
+    text, needle = tostring(text or ""), tostring(needle or "")
+    if needle == "" then return 0 end
+    while true do
+        local at = text:find(needle, from, true)
+        if not at then return n end
+        n = n + 1
+        from = at + #needle
+    end
+end
+
+local function count_marks(rendered, underlines, base)
+    local n, seen, hit = 0, {}, {}
+    for _, row in ipairs(underlines or {}) do
+        local key = range_key(row)
+        if key ~= "" and not seen[key] then
+            seen[key] = true
+            local needle = 'data-pickthought-range="' .. key .. '"'
+            if count_occurrences(rendered, needle) > count_occurrences(base, needle) then
+                n = n + 1
+                hit[key] = true
+            end
+        end
+    end
+    return n, hit
+end
+
+function Annotations:apply(html, data)
+    if not data or data.underline_count == 0 then return html, "", {underlines=0,thoughts=0} end
+    local rendered, alignment = inject(html, data)
+    logger.info("[撷思][Annotations] alignment",
+        "book=", tostring(data.book_id or ""), "chapter=", tostring(data.chapter_uid or ""),
+        "quote=", tostring(alignment and alignment.quote_aligned or 0),
+        "numeric=", tostring(alignment and alignment.numeric or 0),
+        "dropped=", tostring(alignment and alignment.dropped or 0))
+    return rendered, CSS, annotation_stats(data, alignment)
+end
+
+-- 同一正文文件的多个映射章节共享一次 tokenize/build_text_index。
+-- 已有撷思锚点或跨章节区间重叠时保守回退旧路径,避免改变嵌套标记和统计语义。
+function Annotations:apply_many(html, datasets)
+    datasets = type(datasets) == "table" and datasets or {}
+    if #datasets <= 1 or tostring(html or ""):find('data-pickthought-range="', 1, true) then
+        local rendered = html
+        local rows = {}
+        for _, data in ipairs(datasets) do
+            local before = rendered
+            local next_rendered, _, stats = self:apply(rendered, data)
+            local mark_count, hit_keys = count_marks(next_rendered, data.underlines, before)
+            rows[#rows + 1] = {data = data, stats = stats, mark_count = mark_count, hit_keys = hit_keys}
+            rendered = next_rendered
+        end
+        return rendered, rows, {optimized = false, shared_index_builds = 0, batch_apply_calls = #datasets}
+    end
+
+    local tokens, visible_count = tokenize(html)
+    local index = build_text_index(tokens)
+    local all_marks, rows = {}, {}
+    local injected_before = false
+    for _, data in ipairs(datasets) do
+        if data and data.underline_count and data.underline_count > 0 then
+            if injected_before or data.quote_only then data.no_numeric_fallback = true end
+            local marks, alignment = intervals(data, visible_count, index)
+            local hit_keys = {}
+            for _, mark in ipairs(marks) do
+                mark.data = data
+                hit_keys[mark.key] = true
+                all_marks[#all_marks + 1] = mark
+            end
+            rows[#rows + 1] = {
+                data = data, stats = annotation_stats(data, alignment),
+                mark_count = 0, hit_keys = hit_keys, marks = marks,
+            }
+            if #marks > 0 then injected_before = true end
+        end
+    end
+
+    table.sort(all_marks, function(a, b)
+        if a.a ~= b.a then return a.a < b.a end
+        if a.b ~= b.b then return a.b < b.b end
+        return tostring(a.key) < tostring(b.key)
+    end)
+    local previous
+    for _, mark in ipairs(all_marks) do
+        if previous and mark.a < previous.b then
+            -- 跨章节重叠的旧实现会通过第二次 tokenize 形成嵌套结构;
+            -- 批量单遍渲染不复刻该细节,因此整文件回退以保持兼容。
+            local rendered = html
+            local fallback_rows = {}
+            for _, data in ipairs(datasets) do
+                local before = rendered
+                local next_rendered, _, stats = self:apply(rendered, data)
+                local mark_count, hit_keys = count_marks(next_rendered, data.underlines, before)
+                fallback_rows[#fallback_rows + 1] = {
+                    data = data, stats = stats, mark_count = mark_count, hit_keys = hit_keys,
+                }
+                rendered = next_rendered
+            end
+            return rendered, fallback_rows, {
+                optimized = false, shared_index_builds = 0,
+                batch_apply_calls = #datasets, fallback = true,
+            }
+        end
+        previous = mark
+    end
+
+    local out = {}
+    local cursor = {index = 1}
+    for _, token in ipairs(tokens) do
+        if token.kind == "text" then
+            out[#out + 1] = render_text_token(token, all_marks, {}, cursor)
+        else
+            out[#out + 1] = token.raw
+        end
+    end
+    local rendered = table.concat(out)
+    for _, row in ipairs(rows) do
+        local seen = {}
+        for _, mark in ipairs(row.marks or {}) do
+            if not seen[mark.key] then seen[mark.key] = true; row.mark_count = row.mark_count + 1 end
+        end
+        row.marks = nil
+    end
+    return rendered, rows, {optimized = true, shared_index_builds = 1, batch_apply_calls = 1}
 end
 
 return Annotations

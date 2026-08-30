@@ -10,8 +10,9 @@ M.DEFAULTS = {
     max_cache_bytes = 96 * 1024 * 1024,
     max_underlines = 20000,
     max_thought_entries = 150000,
-    -- 映射/注入还会额外占用一段内存,不能把安全线设在旧现场的临界值。
-    min_available_kb = 128 * 1024,
+    -- worker 已经 fork 后允许继续运行到 96MB;fork 前门槛仍由 SyncTask
+    -- 独立保持 128MB,避免把 fork 的地址空间峰值和章节拉取混成一个值。
+    min_available_kb = 96 * 1024,
 }
 
 local function scalar_bytes(value)

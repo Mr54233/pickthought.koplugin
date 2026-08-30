@@ -167,6 +167,14 @@ function M.read_bucket(chapter_index, batch_limit)
     return math.floor((chapter_index - 1) / batch_limit) + 1
 end
 
+local function same_failed_batch(state, plan)
+    return type(state) == "table" and state.status == "failed"
+        and integer(state.start_index) == integer(plan.start_index)
+        and integer(state.end_index) == integer(plan.end_index)
+        and integer(state.total) == integer(plan.total)
+        and integer(state.batch_limit) == integer(plan.batch_limit)
+end
+
 function M.should_offer(args)
     args = args or {}
     if args.busy then return false, "busy" end
@@ -184,6 +192,9 @@ function M.should_offer(args)
     local bucket = math.max(M.read_bucket(read_chapter, plan.batch_limit),
         M.read_bucket(plan.start_index, plan.batch_limit))
     local dismissed = type(args.dismissed) == "table" and args.dismissed or nil
+    if same_failed_batch(args.failed, plan) then
+        return false, "failed"
+    end
     if dismissed and integer(dismissed.total) == plan.total
         and integer(dismissed.batch_limit) == plan.batch_limit
         and bucket <= integer(dismissed.bucket) then
@@ -204,6 +215,43 @@ function M.dismissal(context)
         batch_limit = context.plan.batch_limit,
         dismissed_at = os.time(),
     }
+end
+
+function M.failure(context, reason)
+    if type(context) ~= "table" or type(context.plan) ~= "table"
+        or context.plan.start_index == nil then return nil end
+    local plan = context.plan
+    reason = tostring(reason or "未知错误"):gsub("%s+", " ")
+    if #reason > 220 then reason = reason:sub(1, 220) .. "…" end
+    return {
+        status = "failed",
+        start_index = plan.start_index,
+        end_index = plan.end_index,
+        total = plan.total,
+        batch_limit = plan.batch_limit,
+        bucket = context.bucket,
+        reason = reason,
+        failed_at = os.time(),
+    }
+end
+
+function M.failure_text(plan, reason)
+    if type(plan) ~= "table" or plan.start_index == nil then
+        return "本批自动补批未完成\n\n请从菜单中手动选择“继续拉取后续章节”重试。"
+    end
+    local detail = tostring(reason or "未知错误"):gsub("%s+", " ")
+    if #detail > 220 then detail = detail:sub(1, 220) .. "…" end
+    return table.concat({
+        "本批自动补批未完成",
+        "",
+        string.format("计划拉取第 %s～%s 章，本批尚未完成。",
+            format_integer(plan.start_index), format_integer(plan.end_index)),
+        "原因：" .. detail,
+        "",
+        "本次已暂停自动补批，继续翻页不会重复弹窗。",
+        "请清理内存或重启 KOReader，然后在菜单中手动选择“继续拉取后续章节”。",
+        string.format("手动重试仍从第 %s 章开始。", format_integer(plan.start_index)),
+    }, "\n")
 end
 
 return M

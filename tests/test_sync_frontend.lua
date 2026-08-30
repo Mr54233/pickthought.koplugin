@@ -150,18 +150,78 @@ end)
 
 T.case("用户确认的后台同步启动失败必须显示原因", function()
     local shown
+    local recorded
     local self = {
         store = {preferences = function() return {} end},
         sync_task = {start = function() return false, "设备可用内存不足" end},
         _book_ids = function() return {"b1"} end,
         _binding_titles = function() return {b1 = "剑来"} end,
         _sync_display_title = function() return "剑来" end,
+        _record_batch_failure = function(_, path, context, reason, key)
+            recorded = {path = path, context = context, reason = reason, key = key}
+            return true
+        end,
         info = function(_, text) shown = text end,
     }
     T.ok(not Plugin._start_sync_task(self, "tests/剑来.epub", {book_id = "b1"}, "sync", {
-        background = true, source = "batch_confirm",
+        background = true, source = "batch_confirm", batch_prompt_key = "b1",
+        batch_context = {plan = {start_index = 201, end_index = 400, total = 1000, batch_limit = 200}, bucket = 2},
     }), "后台同步启动失败应返回 false")
-    T.ok(shown and shown:find("设备可用内存不足", 1, true), "用户能看到启动失败原因")
+    T.ok(shown and shown:find("本批自动补批未完成", 1, true), "用户能看到批次失败提示")
+    T.ok(shown:find("第 201～400 章", 1, true), "失败提示包含批次范围")
+    T.eq(recorded and recorded.key, "b1", "失败批次已记录")
+end)
+
+T.case("边界确认先排队关闭再启动后台任务", function()
+    local UIManager = require("ui/uimanager")
+    local old_next_tick = UIManager.nextTick
+    local scheduled
+    local started
+    UIManager.nextTick = function(_, callback) scheduled = callback end
+    local self = {
+        _resolve_sync_context = function() return "tests/剑来.epub", {book_id = "b1"} end,
+        _start_sync_task = function(_, path, bound, mode, options)
+            started = {path = path, bound = bound, mode = mode, options = options}
+            return true
+        end,
+        _stale_sync_context = function() error("不应触发过期上下文") end,
+    }
+    local context = {plan = {start_index = 201, end_index = 400, total = 1000, batch_limit = 200}, bucket = 2}
+    Plugin._defer_batch_sync(self, {}, context, "b1", "batch_confirm", false)
+    T.ok(self._auto_batch_started, "排队后先锁定批次启动状态")
+    T.eq(started, nil, "当前回调不直接启动 worker")
+    T.ok(type(scheduled) == "function", "任务启动已排到下一轮 UI 事件")
+    scheduled()
+    T.ok(started and started.path == "tests/剑来.epub", "下一轮才启动同步")
+    T.eq(started.options.source, "batch_confirm", "保留确认入口来源")
+    T.eq(started.options.batch_context, context, "保留失败抑制所需上下文")
+    T.eq(started.options.batch_prompt_key, "b1", "保留批次状态键")
+    UIManager.nextTick = old_next_tick
+end)
+
+T.case("后台补批异步失败记录批次并显示可操作提示", function()
+    local recorded
+    local shown
+    local context = {plan = {start_index = 201, end_index = 400, total = 1000, batch_limit = 200}, bucket = 2}
+    local runtime = {
+        doc_path = "tests/剑来.epub", batch_context = context, batch_prompt_key = "b1",
+    }
+    local self = {
+        _sync_runtime = runtime,
+        _close_sync_dialog = function() end,
+        sync_task = {set_backgrounded = function() end},
+        _clear_sync_state = function() end,
+        _merge_sync_auth = function() end,
+        _record_batch_failure = function(_, path, value, reason, key)
+            recorded = {path = path, context = value, reason = reason, key = key}
+            return true
+        end,
+        _sync_fail = function(_, text) shown = text end,
+    }
+    Plugin._finish_sync(self, runtime, {ok = false, error = "设备资源不足,无法开始同步"})
+    T.eq(recorded and recorded.key, "b1", "异步失败记录批次键")
+    T.ok(shown and shown:find("继续翻页不会重复弹窗", 1, true), "异步失败提示包含抑制说明")
+    T.ok(shown:find("手动重试仍从第 201 章开始", 1, true), "异步失败提示包含断点")
 end)
 
 T.case("前台 _sync_run 适配器透传 no-op rest,绝不调用 usleep(作者 #17 收尾复核)", function()

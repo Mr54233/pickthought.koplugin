@@ -210,6 +210,7 @@ local function chapter_data(book_id, ch)
         book_id = book_id, chapter_uid = tostring(ch.chapter_uid or ""),
         underlines = underlines, review_map = review_map,
         thought_count_by_range = thought_counts, thought_ranges = ch.thought_ranges,
+        quote_only = ch.quote_only,
         underline_count = #underlines, thought_count = thought_count, errors = {},
     }
 end
@@ -274,7 +275,8 @@ function M.inject_copy(src, book_id, chapters, opts)
         injected = 0, marks = 0, unmatched = {},
         quote_aligned = 0, numeric = 0, dropped = 0, overlapped = 0, unlocated = 0,
         underlines_resolved = 0, thoughts_linked = 0, thoughts_linked_by_uid = {},
-        merges = {},
+        merges = {}, target_files = 0, batch_apply_calls = 0,
+        shared_index_builds = 0, batch_fallbacks = 0,
     }
     local groups, group_count = {}, 0
     local total_underlines = 0
@@ -432,17 +434,22 @@ function M.inject_copy(src, book_id, chapters, opts)
                             .. (read_err and ("(" .. read_err .. ")") or ""))
                     end
                     if rows then
-                        -- 多个微信章节可以落在同一 spine 文件:在前面章节的注入结果上叠加。
-                        local injected_before = false
-                        for _, ch in ipairs(rows) do
-                            local data = chapter_data(book_id, ch)
-                            -- 叠加章节的 range 是微信侧章节内偏移,对合并文件毫无意义:
-                            -- 引文对齐不中就丢弃,绝不允许数字兜底把划线画进别章正文。
-                            -- 拆分章(quote_only,一微信章注入多文件)同理:各文件只收
-                            -- 引文对齐得上的划线,防错位防跨文件重复。
-                            if injected_before or ch.quote_only then data.no_numeric_fallback = true end
-                            local rendered, _, ch_stats = Annotations:new(nil):apply(content, data)
-                            local mark_count, hit_keys = count_marks(rendered, data.underlines, content)
+                        stats.target_files = stats.target_files + 1
+                        local data_rows = {}
+                        for _, ch in ipairs(rows) do data_rows[#data_rows + 1] = chapter_data(book_id, ch) end
+                        local rendered, applied_rows, apply_meta =
+                            Annotations:new(nil):apply_many(content, data_rows)
+                        stats.batch_apply_calls = stats.batch_apply_calls
+                            + (apply_meta and apply_meta.batch_apply_calls or 1)
+                        stats.shared_index_builds = stats.shared_index_builds
+                            + (apply_meta and apply_meta.shared_index_builds or 0)
+                        if apply_meta and apply_meta.fallback then
+                            stats.batch_fallbacks = stats.batch_fallbacks + 1
+                        end
+                        local has_new_marks = false
+                        for _, applied in ipairs(applied_rows or {}) do
+                            local data, ch_stats = applied.data, applied.stats or {}
+                            local mark_count, hit_keys = applied.mark_count or 0, applied.hit_keys or {}
                             local track = uid_track[ckey(data.book_id, data.chapter_uid)]
                             for key in pairs(hit_keys) do track.resolved[key] = true end
                             for _, key in ipairs(ch_stats.overlapped_keys or {}) do
@@ -459,8 +466,7 @@ function M.inject_copy(src, book_id, chapters, opts)
                                 }
                             end
                             if mark_count > 0 then
-                                content = ensure_style(rendered)
-                                injected_before = true
+                                has_new_marks = true
                                 -- 拆分章会产生同 uid 多行,injected 按「有锚点落书的微信章」去重计数。
                                 -- 多书按 book_id+uid 复合键,不同书同 uid 不互相吞掉计数。
                                 if not injected_uids[ckey(data.book_id, data.chapter_uid)] then
@@ -474,6 +480,7 @@ function M.inject_copy(src, book_id, chapters, opts)
                                 }
                             end
                         end
+                        content = has_new_marks and ensure_style(rendered) or rendered
                     end
                     if not writer:addFileFromMemory(entry.path, content, mtime) then
                         return fail("写入副本失败:" .. entry.path)
@@ -565,6 +572,10 @@ function M.inject_copy(src, book_id, chapters, opts)
     stats.min_available_kb = gc_policy.min_available_kb
     logger.info("[撷思][EpubInject] completed",
         "entries=", tostring(gc_policy.processed),
+        "target_files=", tostring(stats.target_files),
+        "batch_apply_calls=", tostring(stats.batch_apply_calls),
+        "shared_index_builds=", tostring(stats.shared_index_builds),
+        "batch_fallbacks=", tostring(stats.batch_fallbacks),
         "full_gc=", tostring(gc_policy.full_collections),
         "peak_heap_kb=", tostring(stats.peak_heap_kb),
         "min_available_kb=", tostring(stats.min_available_kb or "unknown"),

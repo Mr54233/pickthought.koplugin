@@ -1151,6 +1151,46 @@ function Plugin:_save_batch_prompt_state(book_id,state)
     return U.atomic_write(self:_batch_prompt_path(book_id),require("pickthought.json").encode(state),true)
 end
 
+function Plugin:_batch_prompt_key(path)
+    return table.concat(self:_book_ids(path or ""), ",")
+end
+
+function Plugin:_record_batch_failure(path, context, reason, prompt_key)
+    local failure = BatchSync.failure(context, reason)
+    if not failure then return false end
+    local key = prompt_key or self:_batch_prompt_key(path)
+    if key == "" then return false end
+    local saved = self:_save_batch_prompt_state(key, failure)
+    if not saved then
+        logger.warn("[撷思][BatchSync] failed to save failed batch state", "key=", key)
+    end
+    return saved
+end
+
+function Plugin:_clear_batch_prompt_state(path, prompt_key)
+    local key = prompt_key or self:_batch_prompt_key(path)
+    if key == "" then return true end
+    local state_path = self:_batch_prompt_path(key)
+    local removed = os.remove(state_path)
+    return removed or not U.file_exists(state_path)
+end
+
+function Plugin:_defer_batch_sync(operation_context, context, prompt_key, source, silent)
+    self._auto_batch_started=true
+    UIManager:nextTick(function()
+        local path_now,bound_now=self:_resolve_sync_context(operation_context)
+        if not path_now then
+            self._auto_batch_started=nil
+            self:_stale_sync_context()
+            return
+        end
+        if not self:_start_sync_task(path_now,bound_now,"sync",{
+            background=true,silent=silent,source=source,
+            batch_context=context,batch_prompt_key=prompt_key,
+        }) then self._auto_batch_started=nil end
+    end)
+end
+
 -- ===== 后台同步任务运行时 =====
 function Plugin:_persist_sync_state(runtime)
     self.store:set("sync_runtime",{
@@ -1170,14 +1210,24 @@ function Plugin:_start_sync_task(path,bound,mode,opts)
     local title=self:_sync_display_title(path,bound,book_ids,titles)
     local source=opts.source or (opts.background and "batch_auto" or "manual")
     local runtime={doc_path=path,book_id=bound.book_id,book_ids=book_ids,titles=titles,
-        title=title,mode=mode,source=source,started_at=os.time(),dialog=nil,background=false}
+        title=title,mode=mode,source=source,started_at=os.time(),dialog=nil,background=false,
+        batch_context=opts.batch_context,batch_prompt_key=opts.batch_prompt_key}
     local ok,err=self.sync_task:start({doc_path=path,book_id=bound.book_id,book_ids=book_ids,titles=U.copy(titles),title=title,mode=mode,
             source=source,clean_source=opts.clean_source,allow_memory_retry=opts.background ~= true},
         function(state) self:_on_sync_progress(runtime,state) end,
         function(result) self:_finish_sync(runtime,result) end)
     if not ok then
-        if opts.silent then logger.warn("[撷思][Sync] auto batch start failed",tostring(err))
-        else self:info("无法启动后台同步:\n"..tostring(err)) end
+        if opts.batch_context then
+            self:_record_batch_failure(path, opts.batch_context, err, opts.batch_prompt_key)
+        end
+        if opts.silent then
+            logger.warn("[撷思][Sync] auto batch start failed",tostring(err))
+            if opts.batch_context then self:toast("本批自动补批未完成,请从菜单手动重试",5) end
+        elseif opts.batch_context then
+            self:info(BatchSync.failure_text(opts.batch_context.plan, err))
+        else
+            self:info("无法启动后台同步:\n"..tostring(err))
+        end
         return false
     end
     runtime.task=self.sync_task:descriptor()
@@ -1315,11 +1365,13 @@ function Plugin:_maybe_auto_batch(page)
             "fragment=",tostring(fragment),"/",tostring(fragment_total),
             "next_index=",tostring(state.next_index))
     end
+    local prompt_state = self:_batch_prompt_state(book_key)
     local should_offer,context=BatchSync.should_offer{
         state=state, batch_limit=preferences.sync_batch_limit,
         page=page, total_pages=total_pages,
         fragment=fragment, fragment_total=fragment_total,
-        dismissed=not auto and self:_batch_prompt_state(book_key) or nil,
+        dismissed=not auto and prompt_state or nil,
+        failed=prompt_state,
     }
     if not should_offer then return end
     if not self:logged_in() or not self:is_online() then return end
@@ -1332,11 +1384,8 @@ function Plugin:_maybe_auto_batch(page)
     if auto then
         local current_path,current_bound=self:_resolve_sync_context(operation_context)
         if not current_path then self:_stale_sync_context(); return end
-        self._auto_batch_started=true
         self:toast(BatchSync.background_text(context.plan),3)
-        if not self:_start_sync_task(current_path,current_bound,"sync",{background=true,silent=true,source="batch_auto"}) then
-            self._auto_batch_started=nil
-        end
+        self:_defer_batch_sync(operation_context,context,book_key,"batch_auto",true)
         return
     end
 
@@ -1348,12 +1397,7 @@ function Plugin:_maybe_auto_batch(page)
         ok_callback=function()
             self._batch_prompt_open=nil
             if self:_sync_mutation_blocked("已有同步任务进行中,本次不重复启动") then return end
-            local current_path,current_bound=self:_resolve_sync_context(operation_context)
-            if not current_path then self:_stale_sync_context(); return end
-            self._auto_batch_started=true
-            if not self:_start_sync_task(current_path,current_bound,"sync",{background=true,source="batch_confirm"}) then
-                self._auto_batch_started=nil
-            end
+            self:_defer_batch_sync(operation_context,context,book_key,"batch_confirm",false)
         end,
         cancel_text="暂不拉取",
         cancel_callback=function()
@@ -1392,13 +1436,21 @@ function Plugin:_finish_sync(runtime,result)
     result=result or {}
     self:_merge_sync_auth(result)
     if result.ok==true and type(result.report)=="table" then
+        self:_clear_batch_prompt_state(runtime.doc_path,runtime.batch_prompt_key)
         Thoughts.clear_memory_cache()
         self:_sync_report(result.report,runtime)
         return
     end
     local err=tostring(result.error or "未知错误")
+    if runtime.batch_context then
+        self:_record_batch_failure(runtime.doc_path,runtime.batch_context,err,runtime.batch_prompt_key)
+    end
     if result.cancelled or err=="同步已取消" then
         self:toast("同步已取消;已拉取章节保留在断点,下次同步会续传",4)
+        return
+    end
+    if runtime.batch_context then
+        self:_sync_fail(BatchSync.failure_text(runtime.batch_context.plan,err))
         return
     end
     -- 子进程的错误消息不少已自带断点提示,别再拼一遍(真机截图出过双重提示)。

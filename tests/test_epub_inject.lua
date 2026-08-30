@@ -1,4 +1,5 @@
 local EpubInject = require("pickthought.epub_inject")
+local Annotations = require("pickthought.annotations")
 local Json = require("pickthought.json")
 local PerformanceMode = require("pickthought.performance_mode")
 
@@ -27,6 +28,16 @@ local CHAPTERS = {{
     underlines = {{range = "0-7", markText = "春江潮水连海平"}},
     review_map = {["0-7"] = {{content = "开篇即巅峰", author = "读者甲"}}},
 }}
+
+local function apply_sequential(html, datasets)
+    local rendered, rows = html, {}
+    for _, data in ipairs(datasets) do
+        local next_rendered, _, stats = Annotations:new():apply(rendered, data)
+        rows[#rows + 1] = stats
+        rendered = next_rendered
+    end
+    return rendered, rows
+end
 
 local function run_inject(files, chapters, mock_opts, opts)
     local Arc = STUBS.archiver_mock(files, mock_opts)
@@ -260,6 +271,76 @@ T.case("后缀歧义进 unmatched,同一文件多章叠加注入", function()
     T.ok(ch1.content:find('data-pickthought-range="8-15"', 1, true), "第二章锚点叠加在同一文件")
     local _, style_count = ch1.content:gsub('id="pickthought%-annotation%-style"', "")
     T.eq(style_count, 1, "样式只内联一次")
+end)
+
+T.case("同一正文多章节共享一次索引", function()
+    local chapters = {
+        {chapter_uid = "42", href = "Text/ch1.xhtml",
+            underlines = {{range = "0-7", markText = "春江潮水连海平"}}, review_map = {}},
+        {chapter_uid = "43", href = "Text/ch1.xhtml",
+            underlines = {{range = "8-15", markText = "海上明月共潮生"}}, review_map = {}},
+    }
+    local stats, err, Arc = run_inject(book_files(), chapters)
+    T.ok(stats, "批量注入应成功: " .. tostring(err))
+    T.eq(stats.target_files, 1, "只处理一个目标正文文件")
+    T.eq(stats.batch_apply_calls, 1, "同文件只调用一次批量入口")
+    T.eq(stats.shared_index_builds, 1, "同文件只建立一次正文索引")
+    T.eq(stats.batch_fallbacks, 0, "不重叠章节不走旧回退")
+    T.eq(stats.injected, 2, "同文件两章都注入")
+    local content
+    for _, entry in ipairs(STUBS.written(Arc._last_writer)) do
+        if entry.path == "OEBPS/Text/ch1.xhtml" then content = entry.content end
+    end
+    T.ok(content:find('data-pickthought-range="0-7"', 1, true), "第一章锚点保留")
+    T.ok(content:find('data-pickthought-range="8-15"', 1, true), "第二章锚点保留")
+end)
+
+T.case("批量注入与旧逐章输出一致", function()
+    local datasets = {
+        {book_id = "b001", chapter_uid = "42",
+            underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+            review_map = {}, underline_count = 1, thought_count = 0, errors = {}},
+        {book_id = "b001", chapter_uid = "43",
+            underlines = {{range = "8-15", markText = "海上明月共潮生"}},
+            review_map = {}, underline_count = 1, thought_count = 0, errors = {}},
+    }
+    local old_rendered, old_rows = apply_sequential(CH1, datasets)
+    local new_rendered, new_rows, meta = Annotations:new():apply_many(CH1, datasets)
+    T.eq(new_rendered, old_rendered, "批量输出必须与旧逐章输出一致")
+    T.eq(meta.optimized, true, "不重叠数据走批量路径")
+    for i = 1, #datasets do
+        T.eq(new_rows[i].mark_count, 1, "批量统计本章实际锚点")
+        T.eq(new_rows[i].stats.quote_aligned, old_rows[i].quote_aligned,
+            "批量统计与旧路径一致")
+        T.eq(new_rows[i].stats.dropped, old_rows[i].dropped,
+            "批量失败统计与旧路径一致")
+    end
+
+    local tagged_html = "<html><body><p>春江<strong>潮水</strong>连海平，海上明月共潮生。</p></body></html>"
+    local tagged = {
+        {book_id = "b001", chapter_uid = "44",
+            underlines = {{range = "0-8", markText = "春江潮水连海平"}},
+            review_map = {}, underline_count = 1, thought_count = 0, errors = {}},
+        {book_id = "b001", chapter_uid = "45",
+            underlines = {{range = "9-16", markText = "海上明月共潮生"}},
+            review_map = {}, underline_count = 1, thought_count = 0, errors = {}},
+    }
+    local old_tagged = apply_sequential(tagged_html, tagged)
+    local new_tagged = Annotations:new():apply_many(tagged_html, tagged)
+    T.eq(new_tagged, old_tagged, "跨 HTML 标签的批量输出必须与旧路径一致")
+end)
+
+T.case("跨章节重叠时回退旧逐章注入", function()
+    local chapters = {
+        {chapter_uid = "42", href = "Text/ch1.xhtml",
+            underlines = {{range = "0-7", markText = "春江潮水连海平"}}, review_map = {}},
+        {chapter_uid = "43", href = "Text/ch1.xhtml",
+            underlines = {{range = "2-5", markText = "潮水连海"}}, review_map = {}},
+    }
+    local stats, err = run_inject(book_files(), chapters)
+    T.ok(stats, "重叠章节回退后仍应成功: " .. tostring(err))
+    T.eq(stats.batch_fallbacks, 1, "重叠章节使用兼容回退")
+    T.ok(stats.injected >= 1, "回退路径仍保留注入")
 end)
 
 T.case("没有划线数据时明确报错", function()

@@ -49,6 +49,10 @@ T.case("SyncTask 调试模式默认关闭且只接受显式开启", function()
     T.ok(SyncTask._diagnostics_enabled({debug_mode = true}), "显式开启")
 end)
 
+T.case("SyncTask fork 前安全线仍为 128MB", function()
+    T.eq(SyncTask.MIN_FORK_AVAILABLE_KB, 128 * 1024, "fork 门槛不随 worker 安全线降低")
+end)
+
 T.case("SyncTask 描述符保留同步入口来源", function()
     local task = SyncTask:new({temp_dir = "tests"})
     task.job = {

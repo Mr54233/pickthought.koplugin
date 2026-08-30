@@ -110,6 +110,33 @@ T.case("拒绝一次后跨到下一阅读批次才再次询问", function()
     T.eq(next_context.plan.end_index, 400, "一次确认仍只补一个固定批次")
 end)
 
+T.case("批次失败后同一批次不重复询问", function()
+    local state = {total = 1615, pending = 1415, next_index = 201}
+    local offer, context = BatchSync.should_offer{
+        state = state, batch_limit = 200, page = 200, total_pages = 1615,
+    }
+    T.ok(offer, "失败前正常显示边界确认")
+    local failed = BatchSync.failure(context, "设备可用内存低于安全线(96MB)")
+    T.eq(failed.status, "failed", "记录失败批次状态")
+    for _, page in ipairs({201, 300, 400}) do
+        local again, reason = BatchSync.should_offer{
+            state = state, batch_limit = 200, page = page, total_pages = 1615,
+            failed = failed,
+        }
+        T.eq(again, false, "同一失败批次不重复询问:" .. tostring(page))
+        T.eq(reason, "failed", "返回失败抑制原因")
+    end
+    local next_offer = BatchSync.should_offer{
+        state = {total = 1615, pending = 1215, next_index = 401},
+        batch_limit = 200, page = 401, total_pages = 1615, failed = failed,
+    }
+    T.ok(next_offer, "同步游标变化后不误伤新批次")
+    local text = BatchSync.failure_text(context.plan, "设备可用内存低于安全线(96MB)")
+    T.ok(text:find("第 201～400 章", 1, true), "失败提示包含计划范围")
+    T.ok(text:find("继续翻页不会重复弹窗", 1, true), "失败提示说明不会重复弹窗")
+    T.ok(text:find("菜单中手动选择", 1, true), "失败提示给出手动入口")
+end)
+
 T.case("补完落后批次后按新游标继续且不受旧拒绝记录影响", function()
     local old_dismissal = {bucket = 2, total = 1615, batch_limit = 200}
     local offer, context = BatchSync.should_offer{
