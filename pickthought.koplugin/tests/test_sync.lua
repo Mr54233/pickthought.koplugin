@@ -125,12 +125,16 @@ T.case("同步全流程", function()
     T.eq(fetch_progress.metrics.fetch_underlines, 0, "拉取开始时累计划线为零")
     local fetch_done
     for _, event in ipairs(calls.progress) do
-        if event.phase == "fetch" and event.metrics and event.metrics.fetch_underlines == 1 then
+        if event.phase == "fetch" and event.metrics
+            and event.metrics.fetch_underlines == 1
+            and event.metrics.current_fetch_underlines == 1 then
             fetch_done = event
         end
     end
     T.ok(fetch_done, "章节成功后回报拉取累计计数")
     T.eq(fetch_done.metrics.fetch_thoughts, 1, "章节成功后回报累计想法数")
+    T.eq(fetch_done.metrics.current_fetch_underlines, 1, "章节成功后回报当前章划线数")
+    T.eq(fetch_done.metrics.current_fetch_thoughts, 1, "章节成功后回报当前章想法数")
     local map_progress
     for _, event in ipairs(calls.progress) do
         if event.phase == "map" and event.metrics and event.metrics.current_file then

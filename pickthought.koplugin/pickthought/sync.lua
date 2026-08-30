@@ -13,7 +13,7 @@
 --   read_spine(meta, callback)(可选) → 单遍流式读取全部 spine；缺省回退 read_text
 --   save_thoughts(book_id, uid, review_groups)
 --   inject(src, book_id, mapped_chapters, dest) → stats, err(epub_inject.inject_copy)
---   progress(phase, i, n, text, book_id) → 返回 false 表示取消(可选)
+--   progress(phase, i, n, text, book_id, metrics) → 返回 false 表示取消(可选)
 --   file_exists/rename/remove(可选,默认真实文件系统)
 local Binding = require("pickthought.binding")
 local ChapterMap = require("pickthought.chapter_map")
@@ -52,6 +52,8 @@ function Sync.run(deps)
         book_fetch_chapters = 0, book_fetch_underlines = 0, book_fetch_thoughts = 0,
         matched_files = 0, matched_underlines = 0, matched_thoughts = 0,
         injected_files = 0, injected_underlines = 0, injected_thoughts = 0,
+        current_fetch_underlines = 0, current_fetch_thoughts = 0,
+        fetch_message = nil,
         current_file = nil, current_file_underlines = 0, current_file_thoughts = 0,
         current_file_target = false,
     }
@@ -310,9 +312,25 @@ function Sync.run(deps)
                 book_pending = book_pending + (#chapter_list - i + 1)
                 break
             end
+            progress_metrics.current_fetch_underlines = 0
+            progress_metrics.current_fetch_thoughts = 0
+            progress_metrics.fetch_message = nil
             if not step("fetch", i, #chapter_list, ch.title, bid) then return nil, "已取消" end
             local good, data = pcall(function()
-                return deps.annotations:fetch_chapter(bid, ch.uid)
+                return deps.annotations:fetch_chapter(bid, ch.uid, function(stage, index, total, extra, detail)
+                    detail = type(detail) == "table" and detail or {}
+                    progress_metrics.current_fetch_underlines = tonumber(detail.current_underlines)
+                        or progress_metrics.current_fetch_underlines
+                    progress_metrics.current_fetch_thoughts = tonumber(detail.current_thoughts)
+                        or progress_metrics.current_fetch_thoughts
+                    if stage == "thoughts" then
+                        progress_metrics.fetch_message = "想法批次 " .. tostring(index) .. "/"
+                            .. tostring(total) .. (extra and extra ~= "" and (" " .. tostring(extra)) or "")
+                    else
+                        progress_metrics.fetch_message = nil
+                    end
+                    return step("fetch", i, #chapter_list, ch.title, bid)
+                end)
             end)
             -- 预算按"网络请求次数"计:缓存命中(resumed)免费,失败的尝试也占额度。
             if not (good and type(data) == "table" and data.resumed) then
@@ -356,6 +374,9 @@ function Sync.run(deps)
                 end
                 total_underlines = total_underlines + (data.underline_count or 0)
                 total_thought_entries = total_thought_entries + (data.thought_entry_count or 0)
+                progress_metrics.current_fetch_underlines = tonumber(data.underline_count) or 0
+                progress_metrics.current_fetch_thoughts = tonumber(data.thought_entry_count) or 0
+                progress_metrics.fetch_message = nil
                 progress_metrics.fetch_chapters = progress_metrics.fetch_chapters + 1
                 progress_metrics.fetch_underlines = progress_metrics.fetch_underlines
                     + (tonumber(data.underline_count) or 0)

@@ -841,18 +841,8 @@ function SyncTask:start(task, on_progress, on_done)
             local api = Api:new(http, store, nil)
             local fetcher = WebFetch:new(api)
 
-            -- 心跳:章节内的想法批次、注入条目都发进度,让父进程看门狗能区分
-            -- 「慢但活着」与「真死了」。2 秒节流,避免高频写盘。
+            -- 保存当前章节上下文,由 Sync.run 的阶段回调统一发进度心跳。
             local fetch_now = {i = 0, n = 0, title = "", book_id = nil, book_index = nil}
-            local heartbeat_at = 0
-            local function heartbeat(stage, message, percent)
-                local now = os.time()
-                if now - heartbeat_at < 2 then return end
-                heartbeat_at = now
-                emit{stage = stage, current = fetch_now.i, total = fetch_now.n,
-                    chapter = fetch_now.title, book_id = fetch_now.book_id,
-                    percent = percent, message = message}
-            end
 
             -- 断点/复用缓存:每章拉取结果落盘。
             -- 成功的同步以 .completed 标记收尾并保留数据(供离线重注);
@@ -1059,7 +1049,7 @@ function SyncTask:start(task, on_progress, on_done)
             -- max retry_after 统一等待,一本书限速冷却会让未限速书一起暂停;现在
             -- 冷却书在 chapters/fetch 层只读缓存、不发网络,未限速书照常拉取注入。
             local cached_annotations = {
-                fetch_chapter = function(_, bid, uid)
+                fetch_chapter = function(_, bid, uid, on_progress)
                     local fetch_started = os.time()
                     diagnostic("chapter_begin", "book=", tostring(bid),
                         "chapter=", tostring(uid), "index=", tostring(fetch_now.i))
@@ -1075,6 +1065,12 @@ function SyncTask:start(task, on_progress, on_done)
                                 "elapsed_s=", tostring(os.time() - fetch_started),
                                 "underlines=", tostring(data.underline_count or 0),
                                 "thoughts=", tostring(data.thought_entry_count or 0))
+                            if type(on_progress) == "function" then
+                                on_progress("cached", 1, 1, "", {
+                                    current_underlines = tonumber(data.underline_count) or 0,
+                                    current_thoughts = tonumber(data.thought_entry_count) or 0,
+                                })
+                            end
                             return data
                         end
                     end
@@ -1102,12 +1098,9 @@ function SyncTask:start(task, on_progress, on_done)
                             errors = {}, underline_request_ok = true, resumed = true,
                         }
                     end
-                    local data = fetcher:fetch_chapter(bid, uid, function(stage2, i2, n2, extra)
-                        if stage2 == "thoughts" then
-                            heartbeat("fetch", "想法批次 " .. tostring(i2) .. "/" .. tostring(n2)
-                                .. (extra and extra ~= "" and (" " .. tostring(extra)) or ""), fetch_percent())
-                        else
-                            heartbeat("fetch", nil, fetch_percent())
+                    local data = fetcher:fetch_chapter(bid, uid, function(stage2, i2, n2, extra, detail)
+                        if type(on_progress) == "function" then
+                            return on_progress(stage2, i2, n2, extra, detail)
                         end
                     end)
                     diagnostic("chapter_done", "book=", tostring(bid),
@@ -1262,7 +1255,8 @@ function SyncTask:start(task, on_progress, on_done)
                         percent = 0.84 + (n and n > 0 and i and i > 0 and (i / n) * 0.06 or 0)
                     elseif phase == "inject" then percent = 0.90 end
                     local state = {stage = phase, current = i, total = n, chapter = text,
-                        book_id = phase_book_id, percent = percent}
+                        book_id = phase_book_id, percent = percent,
+                        message = metrics and metrics.fetch_message or nil}
                     for key, value in pairs(metrics or {}) do
                         if value ~= nil then state[key] = value end
                     end

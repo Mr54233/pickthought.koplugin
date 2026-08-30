@@ -175,28 +175,49 @@ T.case("三阶段进度显示累计和当前文件明细", function()
     setmetatable(dialog, {__index = SyncProgress})
 
     dialog:set_state({stage = "fetch", current = 17, total = 1398,
+        chapter = "第 17 章", message = "想法批次 2/3",
+        current_fetch_underlines = 93, current_fetch_thoughts = 740,
         fetch_underlines = 2435, fetch_thoughts = 30338})
-    T.ok(dialog.status_text:find("本轮累计：划线 2,435 条，想法 30,338 条", 1, true),
-        "拉取阶段显示累计数据")
+    T.ok(dialog.status_text:find("第 17 章\n想法批次 2/3\n当前章节已拉取：划线 93 条，想法 740 条\n本轮累计已拉取：划线 2,435 条，想法 30,338 条", 1, true),
+        "拉取阶段先保留原文案再追加当前章和累计数据")
 
     dialog:set_state({stage = "map", current = 415, total = 1284,
+        chapter = "Text/0415.xhtml",
         current_file = "Text/0415.xhtml", current_file_underlines = 12,
-        current_file_thoughts = 37, matched_files = 415})
+        current_file_thoughts = 37, matched_files = 415,
+        fetch_chapters = 200, fetch_underlines = 12081, fetch_thoughts = 30338,
+        matched_underlines = 3420, matched_thoughts = 10206})
+    T.ok(dialog.status_text:find("本轮已拉取：章节 200 章，划线 12,081 条，想法 30,338 条", 1, true),
+        "匹配阶段显示拉取汇总")
     T.ok(dialog.status_text:find("当前文件：Text/0415.xhtml", 1, true),
         "匹配阶段显示当前正文文件")
     T.ok(dialog.status_text:find("当前文件关联：划线 12 条，想法 37 条", 1, true),
         "匹配阶段显示当前文件关联数量")
     T.ok(dialog.status_text:find("本轮累计已扫描：正文文件 415 个", 1, true),
         "匹配阶段显示累计扫描文件数")
+    T.ok(dialog.status_text:find("本轮累计已匹配：划线 3,420 条，想法 10,206 条", 1, true),
+        "匹配阶段显示累计匹配数量")
+    T.ok(not dialog.status_text:find("Text/0415.xhtml\nText/0415.xhtml", 1, true),
+        "匹配阶段不重复显示当前文件路径")
+    T.ok(dialog.status_text:find("书籍较大时，此阶段可能持续较长时间。\n具体耗时取决于书籍大小、设备性能和想法数量。\n进度会继续，请耐心等待，勿强制退出 KOReader。", 1, true),
+        "匹配阶段显示分行耗时提示")
 
     dialog:set_state({stage = "inject", current = 415, total = 1333,
+        chapter = "Text/0415.xhtml",
         current_file = "Text/0415.xhtml", current_file_target = true,
         current_file_underlines = 9, current_file_thoughts = 28,
-        injected_underlines = 3420, injected_thoughts = 10206})
+        injected_underlines = 3420, injected_thoughts = 10206,
+        fetch_chapters = 200, fetch_underlines = 12081, fetch_thoughts = 30338})
+    T.ok(dialog.status_text:find("本轮已拉取：章节 200 章，划线 12,081 条，想法 30,338 条", 1, true),
+        "注入阶段显示拉取汇总")
+    T.ok(dialog.status_text:find("当前文件：Text/0415.xhtml", 1, true),
+        "注入阶段显示当前正文文件")
     T.ok(dialog.status_text:find("当前文件注入：划线 9 条，想法 28 条", 1, true),
         "注入阶段显示当前文件实际数量")
     T.ok(dialog.status_text:find("本轮累计注入：划线 3,420 条，想法 10,206 条", 1, true),
         "注入阶段显示累计实际数量")
+    T.ok(dialog.status_text:find("书籍较大时，此阶段可能持续较长时间。\n具体耗时取决于书籍大小、设备性能和想法数量。\n进度会继续，请耐心等待，勿强制退出 KOReader。", 1, true),
+        "注入阶段显示分行耗时提示")
     T.eq(SyncProgress.format_count(1234567), "1,234,567", "大数字千位分隔")
 end)
 

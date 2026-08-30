@@ -5,6 +5,8 @@ local Http_ok, Http = pcall(require, "pickthought.http")
 -- 输出与原 Annotations:fetch_chapter 同形:
 -- {underlines, review_map, review_groups, underline_count, thought_count,
 --  thought_entry_count, errors, underline_request_ok}
+-- progress(stage, index, total, message, detail) 在划线响应和每个想法批次返回后回报
+-- 当前章节已获取数量;detail={current_underlines, current_thoughts}。
 --
 -- 历史:fork 时网关 403,把 underlines 换成 /web/book/bestbookmarks(web,整本热门 top),
 -- 但 bestbookmarks 只给热门划线 range,非热门段(却有想法)的 range 丢失,readreviews
@@ -142,6 +144,27 @@ function WebFetch.build_chapter(book_id, uid, marks_rows, reviews_data)
     }
 end
 
+local function response_review_rows(data)
+    local rows = type(data) == "table" and (data.reviews or data.updated) or nil
+    if type(rows) ~= "table" and type(data) == "table" and #data > 0 then rows = data end
+    return type(rows) == "table" and rows or nil
+end
+
+local function count_review_entries(rows)
+    local count = 0
+    for _, row in ipairs(rows or {}) do
+        if type(row) == "table" then
+            local entries = type(row.pageReviews) == "table" and row.pageReviews or {row}
+            for _, pr in ipairs(entries) do
+                local thought = (type(pr) == "table" and type(pr.review) == "table") and pr.review
+                    or (type(pr) == "table" and pr) or {}
+                if scalar_str(thought.content) ~= "" then count = count + 1 end
+            end
+        end
+    end
+    return count
+end
+
 function WebFetch:new(api)
     return setmetatable({api = api}, self)
 end
@@ -163,8 +186,10 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
             rate_limited = rate_limited or nil, rate_limit_wait = rate_limit_wait,
         }
     end
-    progress("underlines", 1, 1, "")
     local marks_rows = extract_underlines(data)
+    progress("underlines", 1, 1, "", {
+        current_underlines = #marks_rows, current_thoughts = 0,
+    })
     -- 提取该章划线的 range(去重保序),按 range 拉全部想法。
     local ranges, seen = {}, {}
     for _, row in ipairs(marks_rows) do
@@ -174,16 +199,16 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
     -- 远比 /web/review/list 的"章级热门前1-2条"完整。这是 fork 时换端点丢掉
     -- 的能力,现恢复(miuread/weread 原版均用此端点)。
     local all_reviews, errors = {}, {}
+    local all_review_entries = 0
     local rate_limited = false
     local rate_limit_wait
     if #ranges > 0 and self.api.readreviews then
         local batches = self.api:review_batches(ranges, 30)
         local function append_reviews(resp)
-            local rows = type(resp) == "table" and (resp.reviews or resp.updated) or nil
-            if type(rows) ~= "table" and type(resp) == "table" and #resp > 0 then rows = resp end
-            if type(rows) ~= "table" then return false end
+            local rows = response_review_rows(resp)
+            if not rows then return false, 0 end
             for _, row in ipairs(rows) do all_reviews[#all_reviews + 1] = row end
-            return true
+            return true, count_review_entries(rows)
         end
         local function split_batch(batch)
             local middle = math.floor(#batch / 2)
@@ -196,11 +221,19 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
         local function fetch_batch(batch, index, depth)
             depth = tonumber(depth) or 0
             progress("thoughts", index, #batches,
-                depth > 0 and ("缩小想法批次至 " .. tostring(#batch)) or "")
+                depth > 0 and ("缩小想法批次至 " .. tostring(#batch)) or "", {
+                    current_underlines = #marks_rows, current_thoughts = all_review_entries,
+                })
             local ok, resp = pcall(function()
                 return self.api:readreviews(book_id, chapter_uid, batch)
             end)
-            if ok and append_reviews(resp) then
+            local accepted, added = false, 0
+            if ok then accepted, added = append_reviews(resp) end
+            if accepted then
+                all_review_entries = all_review_entries + (added or 0)
+                progress("thoughts", index, #batches, "", {
+                    current_underlines = #marks_rows, current_thoughts = all_review_entries,
+                })
                 return true, false
             end
 
@@ -236,11 +269,14 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
             if stop then break end
         end
     end
-    progress("thoughts", 1, 1, "")
     local result = WebFetch.build_chapter(book_id, chapter_uid, marks_rows, {reviews = all_reviews})
     result.errors = errors
     result.rate_limited = rate_limited or nil
     result.rate_limit_wait = rate_limit_wait
+    progress("thoughts", 1, 1, "", {
+        current_underlines = result.underline_count,
+        current_thoughts = result.thought_entry_count,
+    })
     return result
 end
 

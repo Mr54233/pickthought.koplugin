@@ -27,7 +27,7 @@ function Assert-Command([string]$Name) {
 
 function Quote-Posix([string]$Value) {
     $singleQuote = [string][char]39
-    $escapedQuote = $singleQuote + "\" + $singleQuote + $singleQuote
+    $escapedQuote = $singleQuote + '\' + $singleQuote + $singleQuote
     return $singleQuote + $Value.Replace($singleQuote, $escapedQuote) + $singleQuote
 }
 

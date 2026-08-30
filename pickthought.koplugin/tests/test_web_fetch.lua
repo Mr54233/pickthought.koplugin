@@ -118,6 +118,29 @@ T.case("fetch_chapter: underlines + readreviews 全链路", function()
     T.eq(again.underline_count, 1, "119 章 1 划线")
 end)
 
+T.case("fetch_chapter: 子阶段回报当前章累计数量", function()
+    local events = {}
+    local fetcher = WebFetch:new(make_api(
+        function() return UNDERLINES_116 end,
+        readreviews_from(REVIEWS.reviews)
+    ))
+    local result = fetcher:fetch_chapter("b1", 116, function(stage, _, _, _, detail)
+        events[#events + 1] = {stage = stage, detail = detail}
+    end)
+    T.ok(events[1] and events[1].stage == "underlines", "划线阶段先回报")
+    T.eq(events[1].detail.current_underlines, 2, "划线返回后立即回报当前章划线数")
+    T.eq(events[1].detail.current_thoughts, 0, "划线返回时想法数为零")
+    local thought_done
+    for _, event in ipairs(events) do
+        if event.stage == "thoughts" and event.detail.current_thoughts == 2 then
+            thought_done = event
+        end
+    end
+    T.ok(thought_done, "想法批次返回后回报当前章想法数")
+    T.eq(result.thought_entry_count, thought_done.detail.current_thoughts,
+        "最终想法数与阶段回报一致")
+end)
+
 T.case("fetch_chapter: underlines 失败=硬失败,readreviews 失败不拖垮划线", function()
     local hard = WebFetch:new(make_api(
         function() error("HTTP 403") end,

@@ -1575,26 +1575,41 @@ function Plugin:_sync_run(path,bound)
                  metrics=type(metrics)=="table" and metrics or {}
                  local count=SyncProgress.format_count
                  if phase=="chapters" then msg=book_prefix.."正在获取章节列表…"
-                 elseif phase=="fetch" then msg=book_prefix..string.format("正在拉取划线与想法 %d/%d\n本轮累计：划线 %s 条，想法 %s 条\n%s\n(点按屏幕可取消)",
-                     i,n,count(metrics.fetch_underlines),count(metrics.fetch_thoughts),tostring(text or ""))
+                 elseif phase=="fetch" then msg=book_prefix..string.format("正在拉取划线与想法 %d/%d\n%s\n当前章节已拉取：划线 %s 条，想法 %s 条\n本轮累计已拉取：划线 %s 条，想法 %s 条\n%s\n(点按屏幕可取消)",
+                     i,n,tostring(text or ""),count(metrics.current_fetch_underlines),
+                     count(metrics.current_fetch_thoughts),count(metrics.fetch_underlines),count(metrics.fetch_thoughts),
+                     tostring(metrics.fetch_message or ""))
                  elseif phase=="map" then
                      if n and n>0 and i and i>0 then
                          msg=string.format("正在匹配本地章节 %d/%d 个正文文件",i,n)
+                         msg=msg.."\n本轮已拉取：章节 "..count(metrics.fetch_chapters)
+                             .." 章，划线 "..count(metrics.fetch_underlines)
+                             .." 条，想法 "..count(metrics.fetch_thoughts).." 条"
                          if metrics.current_file and metrics.current_file~="" then
-                             msg=msg.."\n当前文件关联：划线 "..count(metrics.current_file_underlines)
+                             msg=msg.."\n当前文件："..tostring(metrics.current_file)
+                                 .."\n当前文件关联：划线 "..count(metrics.current_file_underlines)
                                  .." 条，想法 "..count(metrics.current_file_thoughts).." 条"
                          end
-                         if n>200 then msg=msg.."\n大型书籍的文本匹配需要较长时间,请耐心等待" end
+                         msg=msg.."\n本轮累计已匹配：划线 "..count(metrics.matched_underlines)
+                             .." 条，想法 "..count(metrics.matched_thoughts).." 条"
+                         msg=msg.."\n本轮累计已扫描：正文文件 "..count(metrics.matched_files).." 个"
+                         if n>200 then msg=msg.."\n书籍较大时，此阶段可能持续较长时间。\n具体耗时取决于书籍大小、设备性能和想法数量。\n进度会继续，请耐心等待，勿强制退出 KOReader。" end
                      else msg="正在匹配本地章节…" end
                  else
                      msg="正在生成划线版并替换…"
+                     msg=msg.."\n本轮已拉取：章节 "..count(metrics.fetch_chapters)
+                         .." 章，划线 "..count(metrics.fetch_underlines)
+                         .." 条，想法 "..count(metrics.fetch_thoughts).." 条"
                      if metrics.current_file_target and metrics.current_file then
-                         msg=msg.."\n当前文件注入：划线 "..count(metrics.current_file_underlines)
+                         msg=msg.."\n当前文件："..tostring(metrics.current_file)
+                             .."\n当前文件注入：划线 "..count(metrics.current_file_underlines)
                              .." 条，想法 "..count(metrics.current_file_thoughts).." 条"
                      end
                      msg=msg.."\n本轮累计注入：划线 "..count(metrics.injected_underlines)
                          .." 条，想法 "..count(metrics.injected_thoughts).." 条"
-                         .."\n(书较大时需要一点时间)"
+                         .."\n书籍较大时，此阶段可能持续较长时间。"
+                         .."\n具体耗时取决于书籍大小、设备性能和想法数量。"
+                         .."\n进度会继续，请耐心等待，勿强制退出 KOReader。"
                  end
                  return Trapper:info(msg)
              end,

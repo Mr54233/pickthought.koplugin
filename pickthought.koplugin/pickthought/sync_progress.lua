@@ -37,7 +37,7 @@ function SyncProgress:init()
     self._title = self.title or "撷思同步"
 
     local frame_width = math.floor(Screen:getWidth() * 0.82)
-    local frame_height = math.floor(Screen:getHeight() * 0.60)
+    local frame_height = math.floor(Screen:getHeight() * 0.70)
     local content_width = frame_width - Size.padding.large * 2
     local content_height = frame_height - Size.padding.large * 2
     local group = VerticalGroup:new{align="center"}
@@ -207,24 +207,39 @@ function SyncProgress:set_state(state)
     rows[#rows + 1] = labels[state.stage] or tostring(state.stage or "处理中")
     if total > 0 and state.stage == "fetch" then
         rows[#rows + 1] = "章节 " .. tostring(current) .. " / " .. tostring(total)
-        if state.fetch_underlines ~= nil or state.fetch_thoughts ~= nil then
-            rows[#rows + 1] = "本轮累计：划线 " .. format_count(state.fetch_underlines)
+    elseif total > 0 and state.stage == "map" then
+        if state.fetch_chapters ~= nil or state.fetch_underlines ~= nil or state.fetch_thoughts ~= nil then
+            rows[#rows + 1] = "本轮已拉取：章节 " .. format_count(state.fetch_chapters)
+                .. " 章，划线 " .. format_count(state.fetch_underlines)
                 .. " 条，想法 " .. format_count(state.fetch_thoughts) .. " 条"
         end
-    elseif total > 0 and state.stage == "map" then
         rows[#rows + 1] = "正文文件 " .. tostring(current) .. " / " .. tostring(total)
         if state.current_file and state.current_file ~= "" then
             rows[#rows + 1] = "当前文件：" .. clean_status(state.current_file, 120)
             rows[#rows + 1] = "当前文件关联：划线 " .. format_count(state.current_file_underlines)
                 .. " 条，想法 " .. format_count(state.current_file_thoughts) .. " 条"
         end
+        if state.matched_underlines ~= nil or state.matched_thoughts ~= nil then
+            rows[#rows + 1] = "本轮累计已匹配：划线 " .. format_count(state.matched_underlines)
+                .. " 条，想法 " .. format_count(state.matched_thoughts) .. " 条"
+        end
         if state.matched_files ~= nil then
             rows[#rows + 1] = "本轮累计已扫描：正文文件 " .. format_count(state.matched_files) .. " 个"
         end
-        if total > 200 then rows[#rows + 1] = "大型书籍的文本匹配需要较长时间,请耐心等待" end
+        if total > 200 then
+            rows[#rows + 1] = "书籍较大时，此阶段可能持续较长时间。"
+            rows[#rows + 1] = "具体耗时取决于书籍大小、设备性能和想法数量。"
+            rows[#rows + 1] = "进度会继续，请耐心等待，勿强制退出 KOReader。"
+        end
     elseif total > 0 and current > 0 and state.stage == "inject" then
+        if state.fetch_chapters ~= nil or state.fetch_underlines ~= nil or state.fetch_thoughts ~= nil then
+            rows[#rows + 1] = "本轮已拉取：章节 " .. format_count(state.fetch_chapters)
+                .. " 章，划线 " .. format_count(state.fetch_underlines)
+                .. " 条，想法 " .. format_count(state.fetch_thoughts) .. " 条"
+        end
         rows[#rows + 1] = "写入文件 " .. tostring(current) .. " / " .. tostring(total)
         if state.current_file_target and state.current_file and state.current_file ~= "" then
+            rows[#rows + 1] = "当前文件：" .. clean_status(state.current_file, 120)
             rows[#rows + 1] = "当前文件注入：划线 " .. format_count(state.current_file_underlines)
                 .. " 条，想法 " .. format_count(state.current_file_thoughts) .. " 条"
         end
@@ -232,10 +247,25 @@ function SyncProgress:set_state(state)
             rows[#rows + 1] = "本轮累计注入：划线 " .. format_count(state.injected_underlines)
                 .. " 条，想法 " .. format_count(state.injected_thoughts) .. " 条"
         end
-        if total > 200 then rows[#rows + 1] = "大型书籍的注入与压缩需要几分钟,请耐心等待" end
+        if total > 200 then
+            rows[#rows + 1] = "书籍较大时，此阶段可能持续较长时间。"
+            rows[#rows + 1] = "具体耗时取决于书籍大小、设备性能和想法数量。"
+            rows[#rows + 1] = "进度会继续，请耐心等待，勿强制退出 KOReader。"
+        end
     end
-    if state.chapter and state.chapter ~= "" then rows[#rows + 1] = clean_status(state.chapter, 120) end
+    if state.chapter and state.chapter ~= "" and not ((state.stage == "map" or state.stage == "inject")
+        and state.current_file and state.current_file == state.chapter) then
+        rows[#rows + 1] = clean_status(state.chapter, 120)
+    end
     if state.message and state.message ~= "" then rows[#rows + 1] = clean_status(state.message, 180) end
+    if state.stage == "fetch" and (state.current_fetch_underlines ~= nil
+        or state.current_fetch_thoughts ~= nil or state.fetch_underlines ~= nil
+        or state.fetch_thoughts ~= nil) then
+        rows[#rows + 1] = "当前章节已拉取：划线 " .. format_count(state.current_fetch_underlines)
+            .. " 条，想法 " .. format_count(state.current_fetch_thoughts) .. " 条"
+        rows[#rows + 1] = "本轮累计已拉取：划线 " .. format_count(state.fetch_underlines)
+            .. " 条，想法 " .. format_count(state.fetch_thoughts) .. " 条"
+    end
     local percent_text = tostring(math.floor(percent * 100 + 0.5)) .. "%"
     local status_text = table.concat(rows, "\n")
     local signature = percent_text .. "\n" .. status_text
