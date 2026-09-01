@@ -1,15 +1,15 @@
 {
-  "version": "0.4.0",
-  "name": "撷思 PickThought 0.4.0",
+  "version": "0.4.1",
+  "name": "撷思 PickThought 0.4.1",
   "package_type": "full",
-  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.0/pickthought.koplugin.zip",
+  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.1/pickthought.koplugin.zip",
   "package_urls": [
-    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.0/pickthought.koplugin.zip",
-    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.0/pickthought.koplugin.zip",
-    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.0/pickthought.koplugin.zip",
-    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.0/pickthought.koplugin.zip"
+    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.1/pickthought.koplugin.zip",
+    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.1/pickthought.koplugin.zip",
+    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.1/pickthought.koplugin.zip",
+    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.1/pickthought.koplugin.zip"
   ],
-  "size": 907536,
-  "sha256": "7c3eab74a82dbdc5ba18d1bf7be557da8027bbb52061b75a165045ee00d7e5d5",
-  "notes": "本版本重点更新同步性能、内存控制和长时间任务可观测性，适合大部头书籍在 KPW4 上使用。\n\n性能优化：\n\n同步资源预算与内存保护\n按设备可用内存、缓存数据、划线和想法数量动态控制批次，在章节边界暂停并保留断点，降低大书同步的内存峰值。\n\n大书匹配与注入优化\n通过标题范围筛选、单遍正文索引、跨章节共享索引、轻量章节缓存、媒体磁盘中转和分步 GC，减少重复解析和 Lua 堆占用。\n\n滑窗耗时采样与降级让出 CPU（PR #17）\n检测连续慢处理单元并适度让出 CPU，减少低性能设备上的前台卡顿。\n\n新功能：\n\n原生位图想法弹窗\n支持居中或底部显示、长内容分页或滚动、物理翻页键和可选左右点按切换，并加入 Emoji 字体回退。\n\n多书绑定注入（PR #13）\n一本本地书可以绑定多个微信读书版本，分别维护缓存、游标和限速状态，最后合并注入并提供逐书明细。\n\n外部干净源重建（PR #20）\n原书备份缺失或不可用时，可使用外部干净 EPUB 重新建立注入基线，并保留失败回滚路径。\n\nSQLite 数据库完整性保护（PR #15）\n增加完整性检查、损坏数据库隔离、WAL 折叠和迁移失败保护，避免想法数据被静默清空。\n\n同步分阶段进度\n展示当前书目、当前章节、正文文件、拉取、匹配和注入阶段的累计明细，方便观察大书同步进度。\n\n问题修复：\n\n修复同步失败章节错误推进游标、想法缓存失败误报完成和限速状态丢失。\n修复取消信号无法及时贯穿章节读取、匹配和 EPUB 注入的问题。\n修复 EPUB writer 收尾失败、原子写入失败和备份换位失败时可能破坏当前书的问题。\n修复离线重注误用损坏或不完整缓存、绑定时间相同导致主绑定不稳定等问题。\n完善同步状态事务、断点恢复、多书标题和完成报告，避免任务状态与实际磁盘结果不一致。"
+  "size": 915498,
+  "sha256": "7f66062085b37d5eaae3dd2c29023c13c2b01a2566dbfa9a5e32afe392469ccd",
+  "notes": "性能优化：\n优化想法弹窗冷启动读取\n\n问题修复：\n完善想法数据库异常恢复"
 }
