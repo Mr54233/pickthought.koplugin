@@ -135,7 +135,21 @@ package.preload["libs/libkoreader-lfs"] = function()
         virtual_files = {}
         _G.__PICKTHOUGHT_TEST_FILES = virtual_files
     end
+    local virtual_dirs = rawget(_G, "__PICKTHOUGHT_TEST_DIRS")
+    if not virtual_dirs then
+        virtual_dirs = {}
+        _G.__PICKTHOUGHT_TEST_DIRS = virtual_dirs
+    end
+    local virtual_entries = rawget(_G, "__PICKTHOUGHT_TEST_DIR_ENTRIES")
+    if not virtual_entries then
+        virtual_entries = {}
+        _G.__PICKTHOUGHT_TEST_DIR_ENTRIES = virtual_entries
+    end
     local function attributes(path, field)
+        if virtual_dirs[path] then
+            if field == "mode" then return "directory" end
+            return { mode = "directory" }
+        end
         if virtual_files[path] then
             if field == "mode" then return "file" end
             if field == "modification" then return 0 end
@@ -157,7 +171,14 @@ package.preload["libs/libkoreader-lfs"] = function()
     return {
         attributes = attributes,
         symlinkattributes = attributes,
-        dir = function() return function() return nil end end,
+        dir = function(path)
+            local names = virtual_entries[path] or {}
+            local index = 0
+            return function()
+                index = index + 1
+                return names[index]
+            end
+        end,
         mkdir = function() return true end,
         rmdir = function() return true end,
     }
@@ -406,6 +427,10 @@ package.preload["lua-ljsqlite3/init"] = function()
         SQ3._prepared = {}; SQ3._checkpoint_calls = 0
         local virtual_files = rawget(_G, "__PICKTHOUGHT_TEST_FILES")
         if virtual_files then for path in pairs(virtual_files) do virtual_files[path] = nil end end
+        local virtual_dirs = rawget(_G, "__PICKTHOUGHT_TEST_DIRS")
+        if virtual_dirs then for path in pairs(virtual_dirs) do virtual_dirs[path] = nil end end
+        local virtual_entries = rawget(_G, "__PICKTHOUGHT_TEST_DIR_ENTRIES")
+        if virtual_entries then for path in pairs(virtual_entries) do virtual_entries[path] = nil end end
     end
     return SQ3
 end

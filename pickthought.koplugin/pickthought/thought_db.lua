@@ -611,39 +611,77 @@ function ThoughtDB.put_range(db, chapter_uid, range_str, texts)
 end
 
 -- 查一个 range 的全部想法,返回 texts 列表(同 compact_group 输出的 texts 形状)。
+-- 成功但没有结果时返回空表;查询阶段失败时返回 nil + 具体错误,不能与空结果混淆。
 function ThoughtDB.get_range(db, chapter_uid, range_str)
     local started = PopupDiagnostic.now()
-    if not db then return nil end
+    local function query_error(stage, detail)
+        return "想法数据库查询失败(" .. tostring(stage) .. "): " .. tostring(detail or "未知错误")
+    end
+    local function close_statement(stmt)
+        if not stmt then return true end
+        local ok, result = pcall(function() return stmt:close() end)
+        if not ok then return false, tostring(result) end
+        if result == false then return false, "close 返回失败" end
+        return true
+    end
+    local function fail(stmt, stage, detail)
+        pcall(close_statement, stmt)
+        local err = query_error(stage, detail)
+        PopupDiagnostic.log("db_range_query", {chapter=chapter_uid,
+            elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, error=err})
+        return nil, err
+    end
+    if not db then
+        return fail(nil, "open", "数据库句柄不可用")
+    end
     local ok, stmt = pcall(function()
         return db:prepare([[SELECT abstract, author, content, likes, review_id
             FROM review_items WHERE chapter_uid=? AND range=? ORDER BY item_index]])
     end)
     if not ok or not stmt then
-        PopupDiagnostic.log("db_range_query", {chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=false})
-        return nil
+        return fail(nil, "prepare", stmt or "prepare 返回空句柄")
     end
     local texts = {}
-    local step_ok, row = pcall(function()
-        return stmt:reset():bind(tostring(chapter_uid or ""), tostring(range_str or "")):step()
+    local reset_ok, reset_result = pcall(function() return stmt:reset() end)
+    if not reset_ok or not reset_result then
+        return fail(stmt, "reset", reset_ok and "reset 返回失败" or reset_result)
+    end
+    local bind_ok, bind_result = pcall(function()
+        return reset_result:bind(tostring(chapter_uid or ""), tostring(range_str or ""))
     end)
+    if not bind_ok or not bind_result then
+        return fail(stmt, "bind", bind_ok and "bind 返回失败" or bind_result)
+    end
+    local step_ok, row = pcall(function() return bind_result:step() end)
     if not step_ok then
-        pcall(function() stmt:close() end)
-        PopupDiagnostic.log("db_range_query", {chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=false})
-        return nil
+        return fail(stmt, "step", row)
+    end
+    if row == false then
+        return fail(stmt, "step", "step 返回失败")
     end
     while row do
+        if type(row) ~= "table" then
+            return fail(stmt, "row", "结果行格式异常")
+        end
         texts[#texts + 1] = {
             abstract = row[1], author = row[2], content = row[3],
             likes = tonumber(row[4]) or 0, review_id = row[5],
         }
         step_ok, row = pcall(function() return stmt:step() end)
         if not step_ok then
-            pcall(function() stmt:close() end)
-            PopupDiagnostic.log("db_range_query", {chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=false})
-            return nil
+            return fail(stmt, "step", row)
+        end
+        if row == false then
+            return fail(stmt, "step", "step 返回失败")
         end
     end
-    pcall(function() stmt:close() end)
+    local close_ok, close_err = close_statement(stmt)
+    if not close_ok then
+        local err = query_error("close", close_err)
+        PopupDiagnostic.log("db_range_query", {chapter=chapter_uid,
+            elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, error=err})
+        return nil, err
+    end
     PopupDiagnostic.log("db_range_query", {chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=true, rows=#texts})
     return texts
 end

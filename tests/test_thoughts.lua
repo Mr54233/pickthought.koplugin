@@ -162,3 +162,141 @@ T.case("find 冷缓存走只读路径,save 再升级为完整写句柄", functio
     local updated = Thoughts.find(store, "b", "1", "0-7")
     T.ok(updated and updated.texts[1].content == "新内容", "升级写入后数据可再次读取")
 end)
+
+T.case("find 查询失败返回明确错误并丢弃失效缓存", function()
+    SQ3._reset()
+    local store = store_with("/t/query-error-cache")
+    Thoughts.save(store, "b", "1", {
+        { range = "0-7", texts = { { content = "可恢复", author = "甲", review_id = "q1" } } },
+    })
+    local ThoughtDB = require("pickthought.thought_db")
+    local original_get_range = ThoughtDB.get_range
+    local before_error_checkpoints = SQ3._checkpoint_calls
+    ThoughtDB.get_range = function() return nil, "模拟读取失败" end
+    local group, err = Thoughts.find(store, "b", "1", "0-7")
+    ThoughtDB.get_range = original_get_range
+    T.ok(group == nil and tostring(err):find("模拟读取失败"),
+        "查询失败透传具体错误")
+    T.eq(SQ3._checkpoint_calls, before_error_checkpoints,
+        "查询失败丢弃句柄时不执行 checkpoint")
+
+    local recovered = Thoughts.find(store, "b", "1", "0-7")
+    T.ok(recovered and recovered.texts[1].content == "可恢复",
+        "失败后重新打开数据库可以读取")
+    T.eq(SQ3._opens[#SQ3._opens].mode, "ro", "失败后没有复用失效句柄")
+    Thoughts.clear_memory_cache()
+end)
+
+T.case("旧 JSON 迁移:成功删除,失败保留并可重试", function()
+    SQ3._reset()
+    Thoughts.clear_memory_cache()
+    local store = store_with("/t/legacy-retry")
+    local dir = "/t/legacy-retry/thoughts"
+    local paths = { dir .. "/1.json", dir .. "/2.json", dir .. "/3.json", dir .. "/4.json", dir .. "/5.json" }
+    local present = {}
+    local content = {
+        [paths[1]] = "[{\"range\":\"0-7\",\"texts\":[{\"content\":\"旧数据一\",\"author\":\"甲\",\"review_id\":\"l1\"}]}]",
+        [paths[2]] = "[{\"range\":\"0-7\",\"texts\":[{\"content\":\"旧数据二\",\"author\":\"乙\",\"review_id\":\"l2\"}]}]",
+        [paths[3]] = "不是合法 JSON",
+        [paths[4]] = "[{\"range\":\"0-7\",\"texts\":[{\"content\":\"删除失败仍保留\",\"author\":\"丙\",\"review_id\":\"l4\"}]}]",
+    }
+    for path in ipairs(paths) do present[paths[path]] = true end
+    local old_lfs = require("libs/libkoreader-lfs")
+    local old_attributes = old_lfs.attributes
+    local old_list = require("pickthought.util").list
+    local U = require("pickthought.util")
+    local old_read_file, old_file_exists = U.read_file, U.file_exists
+    local old_remove = os.remove
+    local old_put = require("pickthought.thought_db").put_chapter
+    local fail_second = true
+    local remove_blocked = true
+    local ok, failure
+    local function restore()
+        old_lfs.attributes = old_attributes
+        U.list = old_list
+        U.read_file, U.file_exists = old_read_file, old_file_exists
+        os.remove = old_remove
+        require("pickthought.thought_db").put_chapter = old_put
+    end
+    old_lfs.attributes = function(path, field)
+        if path == dir and field == "mode" then return "directory" end
+        return old_attributes(path, field)
+    end
+    U.list = function(path)
+        if path == dir then
+            local result = {}
+            for _, item in ipairs(paths) do
+                if present[item] then result[#result + 1] = item end
+            end
+            return result
+        end
+        return old_list(path)
+    end
+    U.read_file = function(path, binary)
+        if path == paths[5] then return nil, "模拟读取失败" end
+        if content[path] then return content[path] end
+        return old_read_file(path, binary)
+    end
+    U.file_exists = function(path)
+        if present[path] ~= nil then return present[path] end
+        return old_file_exists(path)
+    end
+    os.remove = function(path)
+        if present[path] ~= nil then
+            if not present[path] then return nil, "文件不存在" end
+            if path == paths[4] and remove_blocked then return nil, "模拟删除失败" end
+            present[path] = false
+            return true
+        end
+        return old_remove(path)
+    end
+    require("pickthought.thought_db").put_chapter = function(db, uid, rows)
+        if uid == "2" and fail_second then return false end
+        return old_put(db, uid, rows)
+    end
+    ok, failure = xpcall(function()
+        local first = Thoughts.find(store, "b", "1", "0-7")
+        T.ok(first and first.texts[1].content == "旧数据一", "有效 JSON 已迁移并可读取")
+        T.ok(not present[paths[1]], "成功迁移的源文件已删除")
+        T.ok(present[paths[2]], "写入失败的源文件保留")
+        T.ok(present[paths[3]] and present[paths[5]], "解析/读取失败的源文件保留")
+        fail_second = false
+        remove_blocked = false
+        local retried = Thoughts.save(store, "b", "99", {})
+        T.ok(retried ~= nil, "下一次写操作触发剩余 JSON 重试")
+        local second, second_err = Thoughts.find(store, "b", "2", "0-7")
+        T.ok(second and second.texts[1].content == "旧数据二",
+            "下一次读取可读到重试迁移的数据: " .. tostring(second_err))
+        T.ok(not present[paths[2]], "重试成功后删除源文件")
+        T.ok(not present[paths[4]], "删除失败文件在重试成功后删除")
+        T.ok(present[paths[3]] and present[paths[5]], "持续失败文件继续保留")
+    end, debug.traceback)
+    restore()
+    Thoughts.clear_memory_cache()
+    T.ok(ok, failure)
+end)
+
+T.case("merge 查询失败时不写入或删除数据", function()
+    SQ3._reset()
+    local store = store_with("/t/merge-query-error")
+    Thoughts.save(store, "b", "1", {
+        { range = "from", texts = { { content = "来源", author = "甲", review_id = "m1" } } },
+        { range = "into", texts = { { content = "目标", author = "乙", review_id = "m2" } } },
+    })
+    local ThoughtDB = require("pickthought.thought_db")
+    local original_get_range = ThoughtDB.get_range
+    local original_put_range = ThoughtDB.put_range
+    local original_delete_range = ThoughtDB.delete_range
+    local writes, deletes = 0, 0
+    ThoughtDB.get_range = function() return nil, "模拟合并查询失败" end
+    ThoughtDB.put_range = function(...) writes = writes + 1; return original_put_range(...) end
+    ThoughtDB.delete_range = function(...) deletes = deletes + 1; return original_delete_range(...) end
+    local merged = Thoughts.merge(store, "b", "1", "from", "into")
+    ThoughtDB.get_range = original_get_range
+    ThoughtDB.put_range = original_put_range
+    ThoughtDB.delete_range = original_delete_range
+    T.ok(not merged, "查询失败时合并返回失败")
+    T.eq(writes, 0, "查询失败时不写入目标 range")
+    T.eq(deletes, 0, "查询失败时不删除来源 range")
+    Thoughts.clear_memory_cache()
+end)

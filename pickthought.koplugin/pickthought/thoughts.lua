@@ -19,7 +19,7 @@ local Thoughts = {}
 local db_cache = {}
 local db_cache_order = {}   -- LRU 顺序:表头最久未用,表尾最近使用
 local DB_CACHE_MAX = 4
-local migrated = {}  -- book_dir → 已检查旧 JSON 迁移(进程内不重复扫)
+local migrated = {}  -- book_dir → 最近一次检查确认没有残留旧 JSON
 
 local function db_cache_touch(book_dir)
     for i, v in ipairs(db_cache_order) do
@@ -85,27 +85,84 @@ end
 -- 一次性迁移:旧版按章存 thoughts/{uid}.json,新版 per-book SQLite。
 -- 首次打开某书数据库时,若旧目录还有 JSON,全部导入后删旧文件。
 -- chapter_uid 都是数字字符串,U.id_name 对其恒等,文件名(去 .json)即 uid。
+-- 逐文件迁移旧 JSON。只有写入 SQLite 成功且源文件删除成功,该文件才算完成;
+-- 任一文件失败都保留源文件,不影响同批其他文件,后续可再次重试。
 local function migrate_legacy(book_id, book_dir, db)
     local dir = book_dir .. "/thoughts"
-    if lfs.attributes(dir, "mode") ~= "directory" then return end
-    local any = false
-    for _, path in ipairs(U.list(dir)) do
+    local attr_ok, mode, attr_err = pcall(lfs.attributes, dir, "mode")
+    if not attr_ok then
+        logger.warn("[撷思][Thoughts] legacy JSON directory check failed", "book=", tostring(book_id),
+            "error=", tostring(mode))
+        return false, 0, 1
+    end
+    if mode ~= "directory" then
+        local text = tostring(attr_err or ""):lower()
+        if text ~= "" and not text:find("no such file", 1, true)
+            and not text:find("not exist", 1, true) and not text:find("不存在", 1, true) then
+            logger.warn("[撷思][Thoughts] legacy JSON directory unavailable", "book=", tostring(book_id),
+                "error=", tostring(attr_err))
+            return false, 0, 1
+        end
+        return true, 0, 0
+    end
+    local list_ok, paths = pcall(U.list, dir)
+    if not list_ok or type(paths) ~= "table" then
+        logger.warn("[撷思][Thoughts] legacy JSON listing failed", "book=", tostring(book_id),
+            "error=", tostring(list_ok and "目录列表格式异常" or paths))
+        return false, 0, 1
+    end
+    local all_ok, migrated_count, failed_count = true, 0, 0
+    for _, path in ipairs(paths) do
         local uid = path:match("([^/]+)%.json$")
         if uid then
-            local raw = U.read_file(path, true)
-            if raw then
-                local ok, rows = pcall(Json.decode, raw)
-                if ok and type(rows) == "table" and #rows > 0 then
-                    ThoughtDB.put_chapter(db, uid, rows)
-                    any = true
+            local file_ok, reason
+            local read_call, raw, read_err = pcall(U.read_file, path, true)
+            if not read_call or not raw then
+                reason = "读取失败:" .. tostring(read_call and read_err or raw)
+            else
+                local decode_call, rows = pcall(Json.decode, raw)
+                if not decode_call then
+                    reason = "解析失败:" .. tostring(rows)
+                elseif type(rows) ~= "table" then
+                    reason = "数据格式不是数组"
+                else
+                    -- 空数组没有可迁移内容;保持旧行为为 no-op,避免误清理已有章节。
+                    local write_call, written, write_err = true, true, nil
+                    if #rows > 0 then
+                        write_call, written, write_err = pcall(ThoughtDB.put_chapter, db, uid, rows)
+                    end
+                    if not write_call or written ~= true then
+                        reason = "写入 SQLite 失败:" .. tostring(write_call and write_err or written)
+                    else
+                        local remove_call, removed, remove_err = pcall(os.remove, path)
+                        local exists_call, still_exists = pcall(U.file_exists, path)
+                        if not remove_call then
+                            reason = "删除源文件失败:" .. tostring(removed)
+                        elseif not exists_call then
+                            reason = "无法确认源文件是否删除:" .. tostring(still_exists)
+                        elseif not still_exists and (removed == true or removed == nil) then
+                            file_ok = true
+                        else
+                            reason = "删除源文件失败:" .. tostring(remove_err or "文件仍存在")
+                        end
+                    end
                 end
             end
-            os.remove(path)
+            if file_ok then
+                migrated_count = migrated_count + 1
+            else
+                all_ok = false
+                failed_count = failed_count + 1
+                logger.warn("[撷思][Thoughts] legacy JSON migration deferred",
+                    "book=", tostring(book_id), "file=", tostring(path), "error=", tostring(reason))
+            end
         end
     end
-    if any then
-        logger.info("[撷思][Thoughts] legacy JSON migrated to sqlite", "book=", tostring(book_id))
+    if all_ok and migrated_count > 0 then
+        logger.info("[撷思][Thoughts] legacy JSON migrated to sqlite", "book=", tostring(book_id),
+            "files=", tostring(migrated_count))
     end
+    return all_ok, migrated_count, failed_count
 end
 
 local function close_cached_db(book_dir)
@@ -117,31 +174,80 @@ local function close_cached_db(book_dir)
     end
 end
 
+-- 查询失败时丢弃句柄,不做 checkpoint 或任何可能的二次写入。
+local function discard_cached_db(book_dir, expected_db)
+    local db = db_cache[book_dir]
+    if expected_db and db ~= expected_db then return end
+    if db then pcall(ThoughtDB.close_no_checkpoint, db) end
+    db_cache[book_dir] = nil
+    for i, value in ipairs(db_cache_order) do
+        if value == book_dir then table.remove(db_cache_order, i); break end
+    end
+end
+
 local function legacy_json_exists(book_dir)
     local dir = book_dir .. "/thoughts"
-    if lfs.attributes(dir, "mode") ~= "directory" then return false end
-    for _, path in ipairs(U.list(dir)) do
+    local ok, mode, attr_err = pcall(lfs.attributes, dir, "mode")
+    if not ok then return true end
+    if mode ~= "directory" then
+        local text = tostring(attr_err or ""):lower()
+        return text ~= "" and not text:find("no such file", 1, true)
+            and not text:find("not exist", 1, true) and not text:find("不存在", 1, true)
+    end
+    local list_ok, paths = pcall(U.list, dir)
+    if not list_ok or type(paths) ~= "table" then return true end
+    for _, path in ipairs(paths) do
         if path:match("[^/]+%.json$") then return true end
     end
     return false
 end
 
+local function legacy_migration_pending(book_dir, force)
+    -- 正常阅读复用迁移完成标记,避免每次点击都扫目录;写入请求则强制重查,
+    -- 以捕获失败后留下的文件或进程运行期间重新出现的旧 JSON。
+    if migrated[book_dir] and not force then return false end
+    return legacy_json_exists(book_dir)
+end
+
+local function maybe_migrate_legacy(book_id, book_dir, db, force)
+    if not force and migrated[book_dir] then return true end
+    if not legacy_json_exists(book_dir) then
+        migrated[book_dir] = true
+        return true
+    end
+    local call_ok, ok_mig = pcall(migrate_legacy, book_id, book_dir, db)
+    if not call_ok then
+        migrated[book_dir] = nil
+        logger.warn("[撷思][Thoughts] legacy JSON migration crashed",
+            "book=", tostring(book_id), "error=", tostring(ok_mig))
+        return false
+    end
+    if ok_mig then migrated[book_dir] = true else migrated[book_dir] = nil end
+    return ok_mig
+end
+
 local function open_db(store, book_id, writable)
     local book_dir = store:book_dir(book_id)
     local db = db_cache[book_dir]
+    local legacy_pending
     if db then
-        if writable and ThoughtDB.is_readonly(db) then
+        -- 只在写入请求时检查缓存期间新出现的旧 JSON;普通读取不能因迁移失败
+        -- 每次点击都重新扫描目录或升级到完整打开。
+        legacy_pending = writable and legacy_migration_pending(book_dir, true)
+        if (writable or legacy_pending) and ThoughtDB.is_readonly(db) then
             close_cached_db(book_dir)
             db = nil
         end
     end
     if db then
+        if writable and legacy_pending then maybe_migrate_legacy(book_id, book_dir, db, true) end
         db_cache_touch(book_dir)
         PopupDiagnostic.log("thoughts_db_cache_hit", {book=book_id})
         return db
     end
     local started = PopupDiagnostic.now()
-    local needs_migration = writable or not migrated[book_dir] and legacy_json_exists(book_dir)
+    legacy_pending = legacy_migration_pending(book_dir, writable)
+    local needs_migration = writable or legacy_pending
     local open_err
     if needs_migration then
         db, open_err = ThoughtDB.open(book_dir)
@@ -154,10 +260,10 @@ local function open_db(store, book_id, writable)
     db_cache[book_dir] = db
     db_cache_touch(book_dir)
     db_cache_evict()
-    if not migrated[book_dir] then
+    if needs_migration and legacy_pending then
+        maybe_migrate_legacy(book_id, book_dir, db, true)
+    else
         migrated[book_dir] = true
-        local ok_mig = pcall(migrate_legacy, book_id, book_dir, db)
-        if not ok_mig then logger.warn("[撷思][Thoughts] migrate_legacy failed", tostring(book_id)) end
     end
     return db
 end
@@ -227,9 +333,21 @@ function Thoughts.merge(store, book_id, chapter_uid, from_range, into_range)
     local db = open_db(store, book_id, true)
     if not db then return false end  -- 失败静默:merge 上层仅判真/假,无错误通道(保持原契约)
     local uid = tostring(chapter_uid or "")
-    local from_texts = ThoughtDB.get_range(db, uid, from_range)
-    if not from_texts or #from_texts == 0 then return false end
-    local into_texts = ThoughtDB.get_range(db, uid, into_range) or {}
+    local from_texts, from_err = ThoughtDB.get_range(db, uid, from_range)
+    if not from_texts then
+        discard_cached_db(store:book_dir(book_id), db)
+        logger.warn("[撷思][Thoughts] merge source query failed", "book=", tostring(book_id),
+            "error=", tostring(from_err))
+        return false
+    end
+    if #from_texts == 0 then return false end
+    local into_texts, into_err = ThoughtDB.get_range(db, uid, into_range)
+    if not into_texts then
+        discard_cached_db(store:book_dir(book_id), db)
+        logger.warn("[撷思][Thoughts] merge target query failed", "book=", tostring(book_id),
+            "error=", tostring(into_err))
+        return false
+    end
     -- 复用已测的纯函数(操作 rows 结构)做去重合并。
     local rows = { { range = from_range, texts = from_texts },
         { range = into_range, texts = into_texts } }
@@ -249,10 +367,17 @@ function Thoughts.find(store, book_id, chapter_uid, range)
         return nil, dberr or "想法数据库不可用"
     end
     local query_started = PopupDiagnostic.now()
-    local texts = ThoughtDB.get_range(db, tostring(chapter_uid or ""), tostring(range or ""))
+    local texts, query_err = ThoughtDB.get_range(db, tostring(chapter_uid or ""), tostring(range or ""))
     PopupDiagnostic.log("thoughts_range_query", {book=book_id, chapter=chapter_uid,
-        elapsed_ms=PopupDiagnostic.elapsed(query_started), rows=type(texts)=="table" and #texts or 0})
-    if not texts or #texts == 0 then
+        elapsed_ms=PopupDiagnostic.elapsed(query_started), rows=type(texts)=="table" and #texts or 0,
+        error=query_err})
+    if not texts then
+        discard_cached_db(store:book_dir(book_id), db)
+        PopupDiagnostic.log("thoughts_find", {book=book_id, chapter=chapter_uid,
+            elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, error=query_err})
+        return nil, query_err or "想法数据库读取失败"
+    end
+    if #texts == 0 then
         PopupDiagnostic.log("thoughts_find", {book=book_id, chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=false})
         return nil, "没有找到该划线对应的想法"
     end

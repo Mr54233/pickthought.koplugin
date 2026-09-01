@@ -48,6 +48,20 @@ class UpdateContractTests(unittest.TestCase):
         self.assertIn("ProgressWidget", progress)
         self.assertIn('text="取消下载"', progress)
 
+    def test_reset_clears_isolation_marker_without_targeting_corrupt_backups(self):
+        source = self.read("pickthought.koplugin/main.lua")
+        self.assertIn('"thoughts.db.isolated"', source)
+        self.assertNotIn('"*.corrupt-*"', source)
+
+        reset_body = source.split("function Plugin:_do_reset_book_data", 1)[1].split(
+            "function Plugin:_dir_size", 1
+        )[0]
+        self.assertLess(
+            reset_body.index("Thoughts.clear_memory_cache()"),
+            reset_body.index("for _, name in ipairs(RESET_TARGETS)"),
+            "重置应先关闭 SQLite 句柄再删除数据库文件",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

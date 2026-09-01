@@ -68,6 +68,88 @@ T.case("空 content 的条目被丢弃(与 compact_group 一致)", function()
     ThoughtDB.close(db)
 end)
 
+T.case("get_range:查询成功但无行返回空表", function()
+    local db = {
+        prepare = function()
+            return {
+                reset = function(self) return self end,
+                bind = function(self) return self end,
+                step = function() return nil end,
+                close = function() end,
+            }
+        end,
+    }
+    local rows, err = ThoughtDB.get_range(db, "empty", "0-1")
+    T.ok(rows and #rows == 0, "空查询返回空表")
+    T.eq(err, nil, "空查询没有错误")
+end)
+
+T.case("get_range:prepare/bind/step 异常返回具体错误", function()
+    local prepared, prepare_err = ThoughtDB.get_range({
+        prepare = function() error("mock prepare failure") end,
+    }, "1", "0-1")
+    T.ok(prepared == nil and tostring(prepare_err):find("prepare"),
+        "prepare 异常不会伪装成空结果")
+
+    local bound, bind_err = ThoughtDB.get_range({
+        prepare = function()
+            return {
+                reset = function(self) return self end,
+                bind = function() error("mock bind failure") end,
+                close = function() end,
+            }
+        end,
+    }, "1", "0-1")
+    T.ok(bound == nil and tostring(bind_err):find("bind"),
+        "bind 异常不会伪装成空结果")
+
+    local stepped, step_err = ThoughtDB.get_range({
+        prepare = function()
+            return {
+                reset = function(self) return self end,
+                bind = function(self) return self end,
+                step = function() error("mock step failure") end,
+                close = function() end,
+            }
+        end,
+    }, "1", "0-1")
+    T.ok(stepped == nil and tostring(step_err):find("step"),
+        "step 异常不会伪装成空结果")
+end)
+
+T.case("get_range:后续 step 和 statement close 异常也返回错误", function()
+    local calls = 0
+    local rows, step_err = ThoughtDB.get_range({
+        prepare = function()
+            return {
+                reset = function(self) return self end,
+                bind = function(self) return self end,
+                step = function()
+                    calls = calls + 1
+                    if calls == 1 then return { "a", "b", "第一条", 0, "r1" } end
+                    error("mock later step failure")
+                end,
+                close = function() end,
+            }
+        end,
+    }, "1", "0-1")
+    T.ok(rows == nil and tostring(step_err):find("step"),
+        "后续 step 异常不会返回部分结果")
+
+    local closed, close_err = ThoughtDB.get_range({
+        prepare = function()
+            return {
+                reset = function(self) return self end,
+                bind = function(self) return self end,
+                step = function() return nil end,
+                close = function() error("mock close failure") end,
+            }
+        end,
+    }, "1", "0-1")
+    T.ok(closed == nil and tostring(close_err):find("close"),
+        "statement close 异常返回具体错误")
+end)
+
 T.case("db_path / remove_db", function()
     T.eq(ThoughtDB.db_path("/b"), "/b/thoughts.db", "db_path 命名")
     -- remove_db 在 mock 下不抛错即可

@@ -1742,7 +1742,7 @@ end
 
 -- 重置本书:清该书所有同步缓存/想法/映射 + 还原原书(若有注入)。
 -- 双重确认(破坏性)。回到"未同步+原版书"状态,保留绑定关系。重新同步即可恢复。
-local RESET_TARGETS = {"sync-cache", "thoughts", "thoughts.db", "thoughts.db-wal", "thoughts.db-shm"}
+local RESET_TARGETS = {"sync-cache", "thoughts", "thoughts.db", "thoughts.db-wal", "thoughts.db-shm", "thoughts.db.isolated"}
 
 function Plugin:reset_book_data(path)
     if self:_sync_mutation_blocked("同步任务进行中,请等它完成或取消后再重置本书") then return end
@@ -1810,15 +1810,16 @@ end
 
 function Plugin:_do_reset_book_data(book_dirs, path, title)
     local cleared, size_bytes = 0, 0
+    local was_open = path == self:current_doc_path()
+    -- 先关闭 SQLite 句柄,再删除数据库文件,避免关闭时重新触碰已删除的 WAL。
+    Thoughts.clear_memory_cache()
     for _, book_dir in ipairs(book_dirs) do
         size_bytes = size_bytes + self:_dir_size(book_dir)
         for _, name in ipairs(RESET_TARGETS) do
             if U.remove_tree(book_dir .. "/" .. name) then cleared = cleared + 1 end
         end
     end
-    Thoughts.clear_memory_cache()
     self._sync_state_cache = nil
-    local was_open = path == self:current_doc_path()
     local restored = self:_restore_original_file(path)
     local msg = "已重置《"..title.."》\n\n"
     if cleared > 0 then msg = msg .. string.format("清理 %d 项,约 %.1f MB\n", cleared, size_bytes/1048576) end
@@ -1856,6 +1857,8 @@ function Plugin:_do_clear_all()
     local lfs = require("libs/libkoreader-lfs")
     local root = self.store.cache_books_dir
     local total_size, book_count, restored_count = 0, 0, 0
+    -- 先关闭所有 SQLite 句柄,再删除数据库文件,避免关闭时重新触碰已删除的 WAL。
+    Thoughts.clear_memory_cache()
     if lfs.attributes(root, "mode") == "directory" then
         for name in lfs.dir(root) do
             if name ~= "." and name ~= ".." then
@@ -1873,7 +1876,6 @@ function Plugin:_do_clear_all()
     for doc_path in pairs(bindings) do
         if self:_restore_original_file(doc_path) then restored_count = restored_count + 1 end
     end
-    Thoughts.clear_memory_cache()
     self._sync_state_cache = nil
     self:info(string.format("已重置全部书籍\n\n%d 本书,约 %.1f MB\n还原 %d 本原书\n各书重新同步即可恢复",
         book_count, total_size/1048576, restored_count))
