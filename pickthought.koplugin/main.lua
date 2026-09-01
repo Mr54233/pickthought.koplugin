@@ -28,6 +28,7 @@ local BatchSync=require("pickthought.batch_sync")
 local AnnotationCompat=require("pickthought.annotation_compat")
 local AnnotationStyle=require("pickthought.annotation_style")
 local Event=require("ui/event")
+local PopupDiagnostic=require("pickthought.diagnostic")
 local _=Text.tr
 local unpack_args=unpack or table.unpack
 local source=debug.getinfo(1,"S").source:gsub("^@",""); local ROOT=source:match("^(.*)/main%.lua$") or "."
@@ -55,6 +56,7 @@ function Plugin:init()
     AnnotationCompat.install()
     math.randomseed(os.time()+math.floor(collectgarbage("count")))
     self.store=Store:new()
+    PopupDiagnostic.set_enabled(self.store:preferences().debug_mode==true)
     logger.info("[撷思] initialized", "version=", tostring(Config.VERSION),
         "schema=", tostring(Config.SCHEMA), "root=", tostring(ROOT))
     sanitize_saved_auth(self.store)
@@ -398,6 +400,7 @@ function Plugin:settings_menu()
             local p=self.store:preferences()
             p.debug_mode=not (p.debug_mode==true)
             self.store:save_preferences(p)
+            PopupDiagnostic.set_enabled(p.debug_mode==true)
             self:toast(p.debug_mode and "调试模式已开启,下次同步生效"
                 or "调试模式已关闭,下次同步生效")
         end},
@@ -1949,33 +1952,61 @@ function Plugin:_show_thought_href(href)
     local info=Thoughts.parse_href(href); if not info then return false end
     if self._thought_popup_busy then return true end
     self._thought_popup_busy=true
-    local started=os.clock()
+    PopupDiagnostic.set_enabled(self.store:preferences().debug_mode==true)
+    local owns_request=PopupDiagnostic.current_id()==nil
+    if owns_request then PopupDiagnostic.begin() end
+    local started=PopupDiagnostic.now()
+    PopupDiagnostic.log("show_begin", {book=info.book_id, chapter=info.chapter_uid, range=info.range})
     local ok,unexpected=xpcall(function()
+        local find_started=PopupDiagnostic.now()
         local group,err=Thoughts.find(self.store,info.book_id,info.chapter_uid,info.range)
+        PopupDiagnostic.log("thought_find", {elapsed_ms=PopupDiagnostic.elapsed(find_started), ok=group~=nil})
         if not group then self:info(tostring(err or "没有想法内容")); return end
+        local items_started=PopupDiagnostic.now()
         local items=Thoughts.popup_items(group)
+        PopupDiagnostic.log("popup_items", {elapsed_ms=PopupDiagnostic.elapsed(items_started), count=#items})
         if #items==0 then self:info("没有想法内容"); return end
+        local require_started=PopupDiagnostic.now()
         local ThoughtPopup=require("pickthought.thought_popup")
+        PopupDiagnostic.log("popup_module_require", {elapsed_ms=PopupDiagnostic.elapsed(require_started)})
+        local config_started=PopupDiagnostic.now()
         local PopupConfig=require("pickthought.thought_popup.popup_config")
-        ThoughtPopup.show(PopupConfig.build(self,items))
+        local options=PopupConfig.build(self,items)
+        PopupDiagnostic.log("popup_config_build", {elapsed_ms=PopupDiagnostic.elapsed(config_started)})
+        local popup_started=PopupDiagnostic.now()
+        ThoughtPopup.show(options)
+        PopupDiagnostic.log("popup_show_return", {elapsed_ms=PopupDiagnostic.elapsed(popup_started), total_ms=PopupDiagnostic.elapsed(started)})
         logger.info("[撷思][ThoughtPopup] opened",
             "book=",tostring(info.book_id),"chapter=",tostring(info.chapter_uid),
             "comments=",tostring(#(group.texts or {})),
-            "elapsed_ms=",tostring(math.floor((os.clock()-started)*1000+.5)))
+            "elapsed_ms=",tostring(PopupDiagnostic.elapsed(started)))
     end,debug.traceback)
     self._thought_popup_busy=false
     if not ok then
         logger.err("[撷思][ThoughtPopup] open failed",tostring(unexpected))
         self:info("想法弹窗打开失败：\n"..U.first_line(unexpected,220))
     end
+    PopupDiagnostic.log("show_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=ok})
+    if owns_request then PopupDiagnostic.finish() end
     return true
 end
 
 function Plugin:_on_thought_tap(ges)
     if not self.ui or not self.ui.link or not self.ui.link.getLinkFromGes then return false end
-    local ok,link=pcall(self.ui.link.getLinkFromGes,self.ui.link,ges); if not ok or not link then return false end
-    local href=extract_thought_href(link,{},0); if not href then return false end
-    return self:_show_thought_href(href)
+    PopupDiagnostic.set_enabled(self.store:preferences().debug_mode==true)
+    PopupDiagnostic.begin()
+    PopupDiagnostic.log("tap_begin", {})
+    local link_started=PopupDiagnostic.now()
+    local ok,link=pcall(self.ui.link.getLinkFromGes,self.ui.link,ges)
+    PopupDiagnostic.log("link_lookup", {elapsed_ms=PopupDiagnostic.elapsed(link_started), ok=ok, found=link~=nil})
+    if not ok or not link then PopupDiagnostic.finish(); return false end
+    local parse_started=PopupDiagnostic.now()
+    local href=extract_thought_href(link,{},0)
+    PopupDiagnostic.log("link_parse", {elapsed_ms=PopupDiagnostic.elapsed(parse_started), found=href~=nil})
+    if not href then PopupDiagnostic.finish(); return false end
+    local result=self:_show_thought_href(href)
+    PopupDiagnostic.finish()
+    return result
 end
 
 function Plugin:_setup_thought_tap()

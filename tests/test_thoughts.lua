@@ -121,18 +121,44 @@ T.case("Thoughts.open_db 透传 ThoughtDB.open 的具体错误(作者第8轮 #3)
     -- mock ThoughtDB.open 返回 nil + 具体错误(如损坏隔离/迁移失败描述)。
     local ThoughtDB = require("pickthought.thought_db")
     local orig_open = ThoughtDB.open
+    local orig_open_fast = ThoughtDB.open_fast
     local SPECIFIC = "损坏库已隔离到 .corrupt-*,请重同步(target=...) "
     ThoughtDB.open = function(_dir) return nil, SPECIFIC end
+    ThoughtDB.open_fast = function(_dir) return nil, SPECIFIC end
 
     local cnt, serr = Thoughts.save(store, "b", "1", {
         { range = "0-7", texts = { { content = "x", author = "a", review_id = "" } } },
     })
-    T.ok(cnt == nil, "save 在 open 失败时返回 nil")
-    T.ok(serr == SPECIFIC, "save 透传具体错误(非通用文案): " .. tostring(serr))
+    local save_ok = cnt == nil and serr == SPECIFIC
 
     local grp, ferr = Thoughts.find(store, "b", "1", "0-7")
-    T.ok(grp == nil, "find 在 open 失败时返回 nil")
-    T.ok(ferr == SPECIFIC, "find 透传具体错误: " .. tostring(ferr))
 
     ThoughtDB.open = orig_open
+    ThoughtDB.open_fast = orig_open_fast
+    T.ok(save_ok, "save 透传具体错误(非通用文案): " .. tostring(serr))
+    T.ok(grp == nil, "find 在 open_fast 失败时返回 nil")
+    T.ok(ferr == SPECIFIC, "find 透传具体错误: " .. tostring(ferr))
+end)
+
+T.case("find 冷缓存走只读路径,save 再升级为完整写句柄", function()
+    SQ3._reset()
+    local store = store_with("/t/readonly-upgrade")
+    Thoughts.save(store, "b", "1", {
+        { range = "0-7", texts = { { content = "旧内容", author = "甲", review_id = "old" } } },
+    })
+    Thoughts.clear_memory_cache()
+    local group = Thoughts.find(store, "b", "1", "0-7")
+    T.ok(group and group.texts[1].content == "旧内容", "只读快速路径返回原有数据")
+    local before_save_checkpoints = SQ3._checkpoint_calls
+    Thoughts.save(store, "b", "1", {
+        { range = "0-7", texts = { { content = "新内容", author = "乙", review_id = "new" } } },
+    })
+    local modes = {}
+    for _, item in ipairs(SQ3._opens) do modes[#modes + 1] = item.mode or "default" end
+    T.eq(modes[1], "default", "首次保存使用完整打开")
+    T.eq(modes[2], "ro", "冷缓存读取使用只读打开")
+    T.eq(modes[3], "default", "写入前从只读升级为完整打开")
+    T.eq(SQ3._checkpoint_calls, before_save_checkpoints, "只读句柄升级时不额外 checkpoint")
+    local updated = Thoughts.find(store, "b", "1", "0-7")
+    T.ok(updated and updated.texts[1].content == "新内容", "升级写入后数据可再次读取")
 end)

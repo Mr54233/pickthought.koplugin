@@ -9,6 +9,7 @@ local U = require("pickthought.util")
 local ThoughtDB = require("pickthought.thought_db")
 local logger = require("logger")
 local lfs = require("libs/libkoreader-lfs")
+local PopupDiagnostic = require("pickthought.diagnostic")
 
 local Thoughts = {}
 
@@ -107,14 +108,48 @@ local function migrate_legacy(book_id, book_dir, db)
     end
 end
 
-local function open_db(store, book_id)
+local function close_cached_db(book_dir)
+    local db = db_cache[book_dir]
+    if db then pcall(ThoughtDB.close, db) end
+    db_cache[book_dir] = nil
+    for i, value in ipairs(db_cache_order) do
+        if value == book_dir then table.remove(db_cache_order, i); break end
+    end
+end
+
+local function legacy_json_exists(book_dir)
+    local dir = book_dir .. "/thoughts"
+    if lfs.attributes(dir, "mode") ~= "directory" then return false end
+    for _, path in ipairs(U.list(dir)) do
+        if path:match("[^/]+%.json$") then return true end
+    end
+    return false
+end
+
+local function open_db(store, book_id, writable)
     local book_dir = store:book_dir(book_id)
     local db = db_cache[book_dir]
     if db then
+        if writable and ThoughtDB.is_readonly(db) then
+            close_cached_db(book_dir)
+            db = nil
+        end
+    end
+    if db then
         db_cache_touch(book_dir)
+        PopupDiagnostic.log("thoughts_db_cache_hit", {book=book_id})
         return db
     end
-    db, open_err = ThoughtDB.open(book_dir)
+    local started = PopupDiagnostic.now()
+    local needs_migration = writable or not migrated[book_dir] and legacy_json_exists(book_dir)
+    local open_err
+    if needs_migration then
+        db, open_err = ThoughtDB.open(book_dir)
+    else
+        db, open_err = ThoughtDB.open_fast(book_dir)
+    end
+    PopupDiagnostic.log("thoughts_db_open", {book=book_id, elapsed_ms=PopupDiagnostic.elapsed(started), ok=db~=nil,
+        writable=needs_migration})
     if not db then return nil, open_err end  -- 透传 ThoughtDB.open 的具体错误(作者第8轮意见 #3)
     db_cache[book_dir] = db
     db_cache_touch(book_dir)
@@ -128,7 +163,7 @@ local function open_db(store, book_id)
 end
 
 function Thoughts.save(store, book_id, chapter_uid, groups)
-    local db, dberr = open_db(store, book_id)
+    local db, dberr = open_db(store, book_id, true)
     if not db then return nil, dberr or "想法数据库不可用" end
     local count = 0
     for _, g in ipairs(groups or {}) do
@@ -189,7 +224,7 @@ end
 function Thoughts.merge(store, book_id, chapter_uid, from_range, into_range)
     from_range, into_range = tostring(from_range or ""), tostring(into_range or "")
     if from_range == "" or into_range == "" or from_range == into_range then return false end
-    local db = open_db(store, book_id)
+    local db = open_db(store, book_id, true)
     if not db then return false end  -- 失败静默:merge 上层仅判真/假,无错误通道(保持原契约)
     local uid = tostring(chapter_uid or "")
     local from_texts = ThoughtDB.get_range(db, uid, from_range)
@@ -207,10 +242,21 @@ function Thoughts.merge(store, book_id, chapter_uid, from_range, into_range)
 end
 
 function Thoughts.find(store, book_id, chapter_uid, range)
-    local db, dberr = open_db(store, book_id)
-    if not db then return nil, dberr or "想法数据库不可用" end
+    local started = PopupDiagnostic.now()
+    local db, dberr = open_db(store, book_id, false)
+    if not db then
+        PopupDiagnostic.log("thoughts_find", {book=book_id, chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=false})
+        return nil, dberr or "想法数据库不可用"
+    end
+    local query_started = PopupDiagnostic.now()
     local texts = ThoughtDB.get_range(db, tostring(chapter_uid or ""), tostring(range or ""))
-    if not texts or #texts == 0 then return nil, "没有找到该划线对应的想法" end
+    PopupDiagnostic.log("thoughts_range_query", {book=book_id, chapter=chapter_uid,
+        elapsed_ms=PopupDiagnostic.elapsed(query_started), rows=type(texts)=="table" and #texts or 0})
+    if not texts or #texts == 0 then
+        PopupDiagnostic.log("thoughts_find", {book=book_id, chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=false})
+        return nil, "没有找到该划线对应的想法"
+    end
+    PopupDiagnostic.log("thoughts_find", {book=book_id, chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=true, rows=#texts})
     return { range = tostring(range), texts = texts }
 end
 
@@ -283,14 +329,7 @@ end
 -- 之后若再点该书的锚点,open_db 会重新打开,无害。
 function Thoughts.close_book(store, book_id)
     local book_dir = store:book_dir(book_id)
-    local db = db_cache[book_dir]
-    if db then
-        pcall(ThoughtDB.close, db)
-        db_cache[book_dir] = nil
-        for i, v in ipairs(db_cache_order) do
-            if v == book_dir then table.remove(db_cache_order, i); break end
-        end
-    end
+    close_cached_db(book_dir)
 end
 
 return Thoughts

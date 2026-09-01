@@ -130,7 +130,17 @@ package.preload["libs/libkoreader-lfs"] = function()
     -- 注:本桩仅识别文件,不识别目录(目录检测依赖 lfs.dir);调用方以
     --   lfs.attributes(p,"mode")=="directory" 判目录时,桩对目录返回 nil,与旧桩一致,
     --   故不改变既有目录相关测试行为。
+    local virtual_files = rawget(_G, "__PICKTHOUGHT_TEST_FILES")
+    if not virtual_files then
+        virtual_files = {}
+        _G.__PICKTHOUGHT_TEST_FILES = virtual_files
+    end
     local function attributes(path, field)
+        if virtual_files[path] then
+            if field == "mode" then return "file" end
+            if field == "modification" then return 0 end
+            return { mode = "file" }
+        end
         local f = io.open(path, "r")
         local exists = f ~= nil
         if f then f:close() end
@@ -296,7 +306,8 @@ function M.written(writer) return writer.entries end
 -- CREATE/DROP/BEGIN/COMMIT/ROLLBACK(exec)、DELETE WHERE / INSERT / SELECT。
 -- _last_path 供测试断言路径。
 package.preload["lua-ljsqlite3/init"] = function()
-    local SQ3 = { _stores = {}, _last_path = nil }
+    local SQ3 = { _stores = {}, _last_path = nil, _last_mode = nil, _opens = {}, _execs = {},
+        _prepared = {}, _checkpoint_calls = 0 }
 
     local function store_of(path)
         local s = SQ3._stores[path]
@@ -354,6 +365,7 @@ package.preload["lua-ljsqlite3/init"] = function()
                     return { "ok" }
                 end
                 if sql:find("wal_checkpoint") then
+                    SQ3._checkpoint_calls = SQ3._checkpoint_calls + 1
                     return { 0, 0, 0 }  -- total_frames, ckpt_frames, status(0=成功)
                 end
                 if sql:find("user_version") then return { store.user_version or 0 } end
@@ -365,12 +377,18 @@ package.preload["lua-ljsqlite3/init"] = function()
         return stmt
     end
 
-    function SQ3.open(path)
+    function SQ3.open(path, mode)
         SQ3._last_path = path
+        SQ3._last_mode = mode
+        SQ3._opens[#SQ3._opens + 1] = { path = path, mode = mode }
+        local virtual_files = rawget(_G, "__PICKTHOUGHT_TEST_FILES")
+        if virtual_files then virtual_files[path] = true end
         local store = store_of(path)
         local db = {}
+        db._mode = mode
         function db:exec(sql)
             sql = tostring(sql or "")
+            SQ3._execs[#SQ3._execs + 1] = { path = path, mode = mode, sql = sql }
             if sql:find("CREATE TABLE") then store.schema = true
             elseif sql:find("DROP TABLE") then store.schema = false; store.rows = {}
             elseif sql:find("user_version=") then
@@ -379,13 +397,21 @@ package.preload["lua-ljsqlite3/init"] = function()
             -- PRAGMA / BEGIN / COMMIT / ROLLBACK:无操作语义,放行。
             return true
         end
-        function db:prepare(sql) return make_stmt(store, sql) end
+        function db:prepare(sql)
+            SQ3._prepared[#SQ3._prepared + 1] = { path = path, mode = mode, sql = tostring(sql or "") }
+            return make_stmt(store, sql)
+        end
         function db:close() return true end
         return db
     end
 
     -- 测试辅助:重置所有内存库(每个 case 之间清状态)。
-    function SQ3._reset() SQ3._stores = {}; SQ3._last_path = nil end
+    function SQ3._reset()
+        SQ3._stores = {}; SQ3._last_path = nil; SQ3._last_mode = nil; SQ3._opens = {}; SQ3._execs = {}
+        SQ3._prepared = {}; SQ3._checkpoint_calls = 0
+        local virtual_files = rawget(_G, "__PICKTHOUGHT_TEST_FILES")
+        if virtual_files then for path in pairs(virtual_files) do virtual_files[path] = nil end end
+    end
     return SQ3
 end
 

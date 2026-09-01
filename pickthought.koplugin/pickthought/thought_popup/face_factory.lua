@@ -23,6 +23,7 @@ local FontList = require("fontlist")
 local Font = require("ui/font")
 local Freetype = require("ffi/freetype")
 local logger = require("logger")
+local PopupDiagnostic = require("pickthought.diagnostic")
 
 local FaceFactory = {
     initialized = false,
@@ -41,13 +42,19 @@ FaceFactory.VARIANTS = {
 }
 
 function FaceFactory:init()
-    if self.initialized then return end
+    if self.initialized then
+        PopupDiagnostic.log("face_factory_init_cache_hit", {})
+        return
+    end
+    local started = PopupDiagnostic.now()
+    PopupDiagnostic.log("face_factory_init_begin", {})
     -- The cre engine resolves document font file paths.
     pcall(function()
         require("document/credocument"):engineInit()
     end)
     self:findEmojiFont()
     self.initialized = true
+    PopupDiagnostic.log("face_factory_init_end", {elapsed_ms=PopupDiagnostic.elapsed(started), emoji=self.emoji_path~=nil})
 end
 
 --- Locate the NotoEmoji font shipped with the plugin (it lives outside
@@ -252,7 +259,11 @@ function FaceFactory:getFace(doc_font_name, size, variant)
     variant = variant or "content"
     local key = string.format("%s|%d|%s", doc_font_name or "", size or 0, variant)
     local cached = self.face_cache[key]
-    if cached then return cached end
+    if cached then
+        PopupDiagnostic.log("face_get_cache_hit", {variant=variant})
+        return cached
+    end
+    local started = PopupDiagnostic.now()
 
     local ratio = self.VARIANTS[variant] or 1.0
     local v_size = math.max(8, math.floor(size * ratio + 0.5))
@@ -303,6 +314,7 @@ function FaceFactory:getFace(doc_font_name, size, variant)
     if face then
         self.face_cache[key] = face
     end
+    PopupDiagnostic.log("face_get", {elapsed_ms=PopupDiagnostic.elapsed(started), variant=variant, ok=face~=nil})
     return face
 end
 

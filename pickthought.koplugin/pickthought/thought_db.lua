@@ -9,6 +9,7 @@
 -- open/close/put_chapter/put_range/get_range/delete_range/remove_db。
 local logger = require("logger")
 local U = require("pickthought.util")
+local PopupDiagnostic = require("pickthought.diagnostic")
 
 local ThoughtDB = {}
 
@@ -104,10 +105,17 @@ end
 -- 仅打开连接(不做任何 schema 写入),供 open 复用。
 -- 关键:不在打开时执行 CREATE TABLE / user_version 写入,保证随后
 -- 的 integrity_check 是“无写入的只读核验”(作者意见 #5:发现损坏前绝不修改原库)。
-local function do_open(path)
+local readonly_handles = setmetatable({}, { __mode = "k" })
+
+local function do_open(path, mode)
     local SQ3 = get_sq3()
     if not SQ3 then return nil end
-    local ok, db = pcall(SQ3.open, path)
+    local ok, db
+    if mode then
+        ok, db = pcall(SQ3.open, path, mode)
+    else
+        ok, db = pcall(SQ3.open, path)
+    end
     if not ok or not db then return nil end
     return db
 end
@@ -399,6 +407,8 @@ end
 -- "无法确认",作者第4轮意见 #2),不再保留单独的 is_isolated 函数。
 
 function ThoughtDB.open(book_dir)
+    local started = PopupDiagnostic.now()
+    PopupDiagnostic.log("db_open_begin", {path=book_dir})
     if type(book_dir) ~= "string" or book_dir == "" then return nil end
     local SQ3 = get_sq3()
     if not SQ3 then return nil end
@@ -434,18 +444,24 @@ function ThoughtDB.open(book_dir)
     if not db then return nil end
     -- 打开即核验完整性:先做一次无写入的只读核验(作者意见 #5),
     -- 确认健康后再做连接级 PRAGMA + schema 初始化 / user_version 写入,绝不先改原库。
+    local integrity_started = PopupDiagnostic.now()
     local ic_ok, healthy, detail = pcall(ThoughtDB.integrity_check, db)
+    PopupDiagnostic.log("db_integrity_check", {elapsed_ms=PopupDiagnostic.elapsed(integrity_started),
+        pcall_ok=ic_ok, healthy=healthy==true})
     if not ic_ok then
         logger.warn("[撷思][ThoughtDB] integrity_check 过程失败,保留原库", base, tostring(healthy))
         ThoughtDB.close_no_checkpoint(db)  -- 隔离前不 checkpoint(作者意见 #1)
+        PopupDiagnostic.log("db_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, reason="integrity_check"})
         return nil, "integrity_check 过程失败: " .. tostring(healthy)
     elseif healthy ~= true then
         logger.warn("[撷思][ThoughtDB] integrity_check 检出损坏,隔离而非删除", base, tostring(detail))
         ThoughtDB.close_no_checkpoint(db)  -- 隔离前不 checkpoint(作者意见 #1)
         local iso, iso_err = ThoughtDB.isolate_corrupt(book_dir)
         if iso then
-            return nil, "已隔离损坏库至 " .. iso .. ";想法可由本地注入源(离线缓存)重建"
+        PopupDiagnostic.log("db_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, reason="corrupt"})
+        return nil, "已隔离损坏库至 " .. iso .. ";想法可由本地注入源(离线缓存)重建"
         end
+        PopupDiagnostic.log("db_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, reason="isolate_failed"})
         return nil, "损坏库隔离失败(" .. tostring(iso_err or "无法重命名") .. ");请手动检查 " .. base
     end
     -- 健康:此时才设置连接级 PRAGMA + schema 初始化 / user_version 写入。
@@ -453,6 +469,7 @@ function ThoughtDB.open(book_dir)
     pcall(function() db:exec("PRAGMA synchronous=NORMAL") end)
     if not ensure_schema(db) then
         ThoughtDB.close_no_checkpoint(db)
+        PopupDiagnostic.log("db_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, reason="schema"})
         return nil, "schema 初始化失败"
     end
     -- 健康库建立成功:清理可能残留的隔离标记(作者意见 #2)。
@@ -461,12 +478,61 @@ function ThoughtDB.open(book_dir)
         local mk = io.open(base .. ".isolated", "r")
         if mk then mk:close(); os.remove(base .. ".isolated") end
     end)
+    PopupDiagnostic.log("db_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=true})
     return db
+end
+
+-- 普通想法点击只读取已经存在的库。完整性检查、schema 写入和 WAL checkpoint
+-- 留给同步写入/维护路径，避免把整库扫描放在 KOReader 前台触摸回调中。
+function ThoughtDB.open_fast(book_dir)
+    local started = PopupDiagnostic.now()
+    PopupDiagnostic.log("db_fast_open_begin", {path=book_dir})
+    if type(book_dir) ~= "string" or book_dir == "" then return nil end
+    if not get_sq3() then return nil end
+    local base = ThoughtDB.db_path(book_dir)
+    local iso_present, iso_state = path_exists_distinct(base .. ".isolated")
+    if iso_present then
+        PopupDiagnostic.log("db_fast_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, reason="isolated"})
+        return nil, "数据库已被隔离(损坏),禁止读取;请恢复或重新同步"
+    end
+    if iso_state == "uncheckable" then
+        PopupDiagnostic.log("db_fast_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, reason="isolated_uncheckable"})
+        return nil, "隔离标记状态无法确认(权限/IO),阻断读取以保护数据"
+    end
+    local main_present, main_state = path_exists_distinct(base)
+    if main_state == "uncheckable" then
+        PopupDiagnostic.log("db_fast_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, reason="main_uncheckable"})
+        return nil, "主库状态无法确认(权限/IO),阻断读取以保护数据"
+    end
+    if not main_present then
+        for _, ext in ipairs({ "-wal", "-shm" }) do
+            local exists, state = path_exists_distinct(base .. ext)
+            if exists or state == "uncheckable" then
+                PopupDiagnostic.log("db_fast_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, reason="orphan_sidecar"})
+                return nil, "主库缺失但存在孤立 sidecar(" .. ext .. "),阻断读取"
+            end
+        end
+        PopupDiagnostic.log("db_fast_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, reason="missing"})
+        return nil, "想法数据库尚不存在"
+    end
+    local db = do_open(base, "ro")
+    if not db then
+        PopupDiagnostic.log("db_fast_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=false, reason="open_failed"})
+        return nil, "想法数据库只读打开失败"
+    end
+    readonly_handles[db] = true
+    PopupDiagnostic.log("db_fast_open_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=true})
+    return db
+end
+
+function ThoughtDB.is_readonly(db)
+    return db ~= nil and readonly_handles[db] == true
 end
 
 function ThoughtDB.close(db)
     if db then
-        pcall(ThoughtDB.checkpoint, db)
+        if not readonly_handles[db] then pcall(ThoughtDB.checkpoint, db) end
+        readonly_handles[db] = nil
         pcall(function() db:close() end)
     end
 end
@@ -474,7 +540,10 @@ end
 -- 仅关闭句柄,不做 WAL checkpoint。用于损坏 / 过程失败路径,避免在隔离前
 -- 修改或截断主库 / WAL,保证 .corrupt-* 是原始损坏证据(作者意见 #1)。
 function ThoughtDB.close_no_checkpoint(db)
-    if db then pcall(function() db:close() end) end
+    if db then
+        readonly_handles[db] = nil
+        pcall(function() db:close() end)
+    end
 end
 
 local function insert_rows(db, chapter_uid, groups)
@@ -543,26 +612,39 @@ end
 
 -- 查一个 range 的全部想法,返回 texts 列表(同 compact_group 输出的 texts 形状)。
 function ThoughtDB.get_range(db, chapter_uid, range_str)
+    local started = PopupDiagnostic.now()
     if not db then return nil end
     local ok, stmt = pcall(function()
         return db:prepare([[SELECT abstract, author, content, likes, review_id
             FROM review_items WHERE chapter_uid=? AND range=? ORDER BY item_index]])
     end)
-    if not ok or not stmt then return nil end
+    if not ok or not stmt then
+        PopupDiagnostic.log("db_range_query", {chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=false})
+        return nil
+    end
     local texts = {}
     local step_ok, row = pcall(function()
         return stmt:reset():bind(tostring(chapter_uid or ""), tostring(range_str or "")):step()
     end)
-    if not step_ok then pcall(function() stmt:close() end); return nil end
+    if not step_ok then
+        pcall(function() stmt:close() end)
+        PopupDiagnostic.log("db_range_query", {chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=false})
+        return nil
+    end
     while row do
         texts[#texts + 1] = {
             abstract = row[1], author = row[2], content = row[3],
             likes = tonumber(row[4]) or 0, review_id = row[5],
         }
         step_ok, row = pcall(function() return stmt:step() end)
-        if not step_ok then pcall(function() stmt:close() end); return nil end
+        if not step_ok then
+            pcall(function() stmt:close() end)
+            PopupDiagnostic.log("db_range_query", {chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=false})
+            return nil
+        end
     end
     pcall(function() stmt:close() end)
+    PopupDiagnostic.log("db_range_query", {chapter=chapter_uid, elapsed_ms=PopupDiagnostic.elapsed(started), ok=true, rows=#texts})
     return texts
 end
 

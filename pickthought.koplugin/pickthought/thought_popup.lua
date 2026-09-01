@@ -21,6 +21,7 @@ same thought rebuilds nothing.
 
 local FaceFactory = require("pickthought.thought_popup.face_factory")
 local UIManager = require("ui/uimanager")
+local PopupDiagnostic = require("pickthought.diagnostic")
 
 FaceFactory:init()
 
@@ -45,6 +46,9 @@ end
 ---                    doc_margins, height_ratio, dialog, close_callback }
 function M.show(opts)
     opts = opts or {}
+    local started = PopupDiagnostic.now()
+    local items = opts.items or opts.pages
+    PopupDiagnostic.log("popup_show_begin", {position=opts.position or "center", items=type(items)=="table" and #items or 0})
     opts.pages = opts.pages or opts.items
     if type(opts.pages) ~= "table" or #opts.pages == 0 then
         error("thought popup: invalid pages")
@@ -76,6 +80,7 @@ function M.show(opts)
     if pooled then
         pooled:_reopen(opts)
         UIManager:show(pooled)
+        PopupDiagnostic.log("popup_show_end", {elapsed_ms=PopupDiagnostic.elapsed(started), pooled=true})
         return pooled
     end
 
@@ -93,6 +98,7 @@ function M.show(opts)
     }
     _pool[position] = popup
     UIManager:show(popup)
+    PopupDiagnostic.log("popup_show_end", {elapsed_ms=PopupDiagnostic.elapsed(started), pooled=false})
     return popup
 end
 

@@ -56,7 +56,8 @@ class MenuContractTests(unittest.TestCase):
             'local PopupConfig=require("pickthought.thought_popup.popup_config")',
             source,
         )
-        self.assertIn("ThoughtPopup.show(PopupConfig.build(self,items))", source)
+        self.assertIn("local options=PopupConfig.build(self,items)", source)
+        self.assertIn("ThoughtPopup.show(options)", source)
         self.assertIn('require("pickthought.thought_popup").cleanup()', source)
 
 

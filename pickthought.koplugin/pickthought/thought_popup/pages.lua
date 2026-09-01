@@ -27,6 +27,7 @@ local FaceFactory = require("pickthought.thought_popup.face_factory")
 local Paginator = require("pickthought.thought_popup.paginator")
 local Screen = Device.screen
 local logger = require("logger")
+local PopupDiagnostic = require("pickthought.diagnostic")
 
 local PAGE_BB_CACHE_MAX = 8
 local PIECE_CACHE_MAX = 200
@@ -208,6 +209,8 @@ function PageRenderer:paginate()
     logger.info(string.format(
         "[撷思][ThoughtPopup] paginated in %.1fms (blocks %.1fms) items=%d content_h=%d",
         (t2 - t0) * 1000, (t1 - t0) * 1000, #self.items, content_h))
+    PopupDiagnostic.log("popup_paginate", {elapsed_ms=math.floor((t2-t0)*1000+0.5),
+        blocks_ms=math.floor((t1-t0)*1000+0.5), items=#self.items, content_h=content_h})
     return {
         pieces = pieces,
         boundaries = boundaries,

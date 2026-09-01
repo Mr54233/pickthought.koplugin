@@ -93,6 +93,75 @@ T.case("open 健康库:正常返回 db,不触发隔离/删除", function()
     if db then ThoughtDB.close(db) end
 end)
 
+T.case("open_fast:已存在库使用只读模式且不做完整性扫描", function()
+    local dir = tmp_dir()
+    local f = io.open(dir .. "/thoughts.db", "w")
+    f:write("MOCK SQLITE")
+    f:close()
+    SQ3._reset()
+    local db, err = ThoughtDB.open_fast(dir)
+    T.ok(db ~= nil, "已有库可以快速打开: " .. tostring(err))
+    T.eq(SQ3._last_mode, "ro", "快速路径使用 ro 模式")
+    local has_integrity, has_schema = false, false
+    for _, item in ipairs(SQ3._prepared) do
+        has_integrity = has_integrity or item.sql:find("integrity_check", 1, true) ~= nil
+        has_schema = has_schema or item.sql:find("CREATE TABLE", 1, true) ~= nil
+    end
+    T.ok(not has_integrity, "快速路径不执行 integrity_check")
+    T.ok(not has_schema and #SQ3._execs == 0, "快速路径不执行 schema 写入")
+    T.ok(ThoughtDB.is_readonly(db), "快速句柄被标记为只读")
+    local checkpoints = SQ3._checkpoint_calls
+    ThoughtDB.close(db)
+    T.eq(SQ3._checkpoint_calls, checkpoints, "关闭只读句柄不执行 WAL checkpoint")
+    rm_tmp(dir)
+end)
+
+T.case("open_fast:数据库不存在时不自动创建空库", function()
+    local dir = tmp_dir()
+    SQ3._reset()
+    local db, err = ThoughtDB.open_fast(dir)
+    T.ok(db == nil, "缺失数据库不返回句柄")
+    T.ok(tostring(err):find("尚不存在"), "返回数据库缺失原因: " .. tostring(err))
+    T.ok(SQ3._stores[ThoughtDB.db_path(dir)] == nil, "缺失数据库未被 SQLite mock 创建")
+    T.ok(not file_exists(ThoughtDB.db_path(dir)), "缺失数据库未落盘")
+    rm_tmp(dir)
+end)
+
+T.case("open_fast:隔离标记和孤立 sidecar 仍阻断读取", function()
+    local dir = tmp_dir()
+    local marker = io.open(dir .. "/thoughts.db.isolated", "w")
+    marker:close()
+    SQ3._reset()
+    local db, err = ThoughtDB.open_fast(dir)
+    T.ok(db == nil and tostring(err):find("隔离"), "隔离标记阻断快速读取")
+    os.remove(dir .. "/thoughts.db.isolated")
+    local sidecar = io.open(dir .. "/thoughts.db-wal", "w")
+    sidecar:write("ORPHAN")
+    sidecar:close()
+    SQ3._reset()
+    db, err = ThoughtDB.open_fast(dir)
+    T.ok(db == nil and tostring(err):find("sidecar"), "孤立 sidecar 阻断快速读取")
+    rm_tmp(dir)
+end)
+
+T.case("open:完整路径仍执行 integrity_check", function()
+    local dir = tmp_dir()
+    local f = io.open(dir .. "/thoughts.db", "w")
+    f:write("MOCK SQLITE")
+    f:close()
+    SQ3._reset()
+    local db = ThoughtDB.open(dir)
+    T.ok(db ~= nil, "完整路径可以打开")
+    local has_integrity = false
+    for _, item in ipairs(SQ3._prepared) do
+        has_integrity = has_integrity or item.sql:find("integrity_check", 1, true) ~= nil
+    end
+    T.ok(has_integrity, "完整路径仍执行 integrity_check")
+    T.ok(not ThoughtDB.is_readonly(db), "完整路径返回可写句柄")
+    ThoughtDB.close(db)
+    rm_tmp(dir)
+end)
+
 -- 真实临时文件测试:验证 os.rename 真的把主库 / WAL / SHM 移动到了 .corrupt-*,
 -- 而非只调用了 API(作者意见 #6:旧测试 os.rename 实际失败也能通过)。
 T.case("open 遇确认损坏:真实文件被隔离到 .corrupt-*,绝不删除", function()
