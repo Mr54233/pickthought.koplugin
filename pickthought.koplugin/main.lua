@@ -29,6 +29,7 @@ local AnnotationCompat=require("pickthought.annotation_compat")
 local AnnotationStyle=require("pickthought.annotation_style")
 local Event=require("ui/event")
 local PopupDiagnostic=require("pickthought.diagnostic")
+local PopupConfig=require("pickthought.thought_popup.popup_config")
 local _=Text.tr
 local unpack_args=unpack or table.unpack
 local source=debug.getinfo(1,"S").source:gsub("^@",""); local ROOT=source:match("^(.*)/main%.lua$") or "."
@@ -512,8 +513,8 @@ function Plugin:thought_popup_menu()
     end
     return {
         {text="位置："..position,callback=self:safe("thought_popup_position",function() self:show_thought_popup_position_picker() end)},
-        {text="高度："..tostring(popup_percent(thoughts.height_ratio,0.70)).."%",callback=self:safe("thought_popup_height",function() self:show_thought_popup_height_picker() end)},
-        {text="宽度："..tostring(popup_percent(thoughts.width_ratio,0.80)).."%",enabled_func=function() return self:_thought_popup_preferences().position~="bottom" end,callback=self:safe("thought_popup_width",function() self:show_thought_popup_width_picker() end)},
+        {text="高度："..tostring(popup_percent(thoughts.height_ratio,PopupConfig.DEFAULTS.height_ratio)).."%",callback=self:safe("thought_popup_height",function() self:show_thought_popup_height_picker() end)},
+        {text="宽度："..tostring(popup_percent(thoughts.width_ratio,PopupConfig.DEFAULTS.width_ratio)).."%",enabled_func=function() return self:_thought_popup_preferences().position~="bottom" end,callback=self:safe("thought_popup_width",function() self:show_thought_popup_width_picker() end)},
         {text="字号："..font_label,callback=self:safe("thought_popup_font",function() self:show_thought_popup_font_size_picker() end)},
         {text="字体对比度："..contrast_label,callback=self:safe("thought_popup_contrast",function() self:show_thought_popup_contrast_picker() end)},
         {text="点击左右区域翻页",checked_func=function() return self:_thought_popup_preferences().tap_to_page==true end,callback=self:safe("thought_popup_tap",function()
@@ -545,7 +546,9 @@ function Plugin:_show_thought_popup_ratio_picker(kind, title, minimum, maximum, 
     local thoughts=self:_thought_popup_preferences()
     local current=popup_percent(thoughts[kind],fallback)
     local spin=SpinWidget:new{
-        value=current,value_min=minimum,value_max=maximum,value_step=5,precision="%d%%",
+        value=current,value_min=minimum,value_max=maximum,
+        value_step=PopupConfig.LIMITS.ratio_step,precision="%d%%",
+        default_value=popup_percent(fallback),
         ok_text="确定",title_text=title,
         info_text=title.."占屏幕"..(kind=="width_ratio" and "宽度" or "高度").."的比例。",
         callback=function(widget)
@@ -557,7 +560,9 @@ function Plugin:_show_thought_popup_ratio_picker(kind, title, minimum, maximum, 
 end
 
 function Plugin:show_thought_popup_height_picker()
-    self:_show_thought_popup_ratio_picker("height_ratio","想法弹窗高度",20,90,0.70)
+    local limits=PopupConfig.LIMITS
+    self:_show_thought_popup_ratio_picker("height_ratio","想法弹窗高度",
+        limits.min_height_ratio*100,limits.max_height_ratio*100,PopupConfig.DEFAULTS.height_ratio)
 end
 
 function Plugin:show_thought_popup_width_picker()
@@ -565,7 +570,9 @@ function Plugin:show_thought_popup_width_picker()
         self:toast("底部想法弹窗使用全屏宽度")
         return
     end
-    self:_show_thought_popup_ratio_picker("width_ratio","想法弹窗宽度",40,100,0.80)
+    local limits=PopupConfig.LIMITS
+    self:_show_thought_popup_ratio_picker("width_ratio","想法弹窗宽度",
+        limits.min_width_ratio*100,limits.max_width_ratio*100,PopupConfig.DEFAULTS.width_ratio)
 end
 
 function Plugin:show_thought_popup_font_size_picker()

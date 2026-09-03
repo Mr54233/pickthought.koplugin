@@ -48,6 +48,16 @@ class MenuContractTests(unittest.TestCase):
         self.assertNotIn("function Plugin:thought_font_menu()", source)
         for label in ("位置：", "高度：", "宽度：", "字号：", "字体对比度：", "点击左右区域翻页"):
             self.assertIn(label, source, f"想法弹窗设置缺少：{label}")
+        self.assertNotIn('text="恢复默认尺寸"', source, "恢复默认尺寸不应占用设置菜单入口")
+        self.assertIn("default_value=popup_percent(fallback)", source, "宽高调节页应提供原生默认值按钮")
+
+        config = (ROOT / "pickthought.koplugin/pickthought/config.lua").read_text(encoding="utf-8")
+        self.assertIn("width_ratio = 0.90", config)
+        self.assertIn("height_ratio = 0.80", config)
+        self.assertIn("min_width_ratio = 0.60", config)
+        self.assertIn("min_height_ratio = 0.50", config)
+        self.assertIn("ratio_step = 5", config)
+        self.assertIn("value_step=PopupConfig.LIMITS.ratio_step", source)
 
     def test_thought_popup_entry_uses_shared_config_and_document_cleanup(self):
         source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")

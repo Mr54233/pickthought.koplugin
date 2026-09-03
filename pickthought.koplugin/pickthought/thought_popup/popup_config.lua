@@ -1,6 +1,10 @@
 -- 撷思想法弹窗的统一配置。阅读入口只传入 plugin 和 SQLite 规范化后的 items，
 -- 这里负责把当前书籍字体、页面边距和用户偏好收敛成弹窗参数。
 local M = {}
+local Config = require("pickthought.config")
+
+M.DEFAULTS = Config.THOUGHT_POPUP_DEFAULTS
+M.LIMITS = Config.THOUGHT_POPUP_LIMITS
 
 local function clamp(value, min_value, max_value, fallback)
     value = tonumber(value)
@@ -12,9 +16,11 @@ local function popupSettings(plugin)
     local preferences = plugin and plugin.store and plugin.store:preferences() or {}
     local settings = preferences.thoughts or {}
     return {
-        height_ratio = clamp(settings.height_ratio, 0.20, 0.90, 0.70),
+        height_ratio = clamp(settings.height_ratio, M.LIMITS.min_height_ratio,
+            M.LIMITS.max_height_ratio, M.DEFAULTS.height_ratio),
         position = settings.position == "bottom" and "bottom" or "center",
-        width_ratio = clamp(settings.width_ratio, 0.40, 1.00, 0.80),
+        width_ratio = clamp(settings.width_ratio, M.LIMITS.min_width_ratio,
+            M.LIMITS.max_width_ratio, M.DEFAULTS.width_ratio),
         font_size = tonumber(settings.font_size),
         font_size_relative = clamp(settings.font_size_relative, -10, 5, 0),
         contrast = clamp(settings.contrast, -3, 9, 9),

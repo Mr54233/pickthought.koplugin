@@ -55,7 +55,7 @@ T.case("想法弹窗配置对非法偏好做安全回退", function()
     local settings = PopupConfig.settings(plugin)
     T.eq(settings.position, "center", "非法位置回退居中")
     T.eq(settings.height_ratio, .90, "高度限制到最大值")
-    T.eq(settings.width_ratio, .40, "宽度限制到最小值")
+    T.eq(settings.width_ratio, .60, "宽度限制到最小值")
     T.eq(settings.font_size_relative, 5, "相对字号限制到最大值")
     T.eq(settings.contrast, -3, "对比度限制到最小值")
     T.ok(not settings.tap_to_page, "仅 true 开启左右点击翻页")
@@ -82,7 +82,14 @@ package.preload["libs/libkoreader-lfs"] = function()
     return {attributes = function(_, field) return field and "directory" or {mode = "directory"} end, mkdir = function() return true end}
 end
 package.preload["pickthought.config"] = function()
-    return {SCHEMA = 1, DATA_DIR = "pickthought", UPDATE_MANIFEST = "test"}
+    return {
+        SCHEMA = 1, DATA_DIR = "pickthought", UPDATE_MANIFEST = "test",
+        THOUGHT_POPUP_DEFAULTS = {width_ratio = .90, height_ratio = .80},
+        THOUGHT_POPUP_LIMITS = {
+            min_width_ratio = .60, max_width_ratio = 1.00,
+            min_height_ratio = .50, max_height_ratio = .90, ratio_step = 5,
+        },
+    }
 end
 package.preload["pickthought.batch_sync"] = function() return {DEFAULT_AUTO = false} end
 package.preload["pickthought.json"] = function() return {} end
@@ -115,8 +122,8 @@ T.case("新安装偏好直接使用上游最终默认值并可持久化", functi
     backing = {schema = 1}
     local store = Store:new{data_dir = "/data/fresh", settings_path = "/settings/fresh.lua"}
     local thoughts = store:preferences().thoughts
-    T.eq(thoughts.height_ratio, .70, "默认高度 70%")
-    T.eq(thoughts.width_ratio, .80, "默认宽度 80%")
+    T.eq(thoughts.height_ratio, .80, "默认高度 80%")
+    T.eq(thoughts.width_ratio, .90, "默认宽度 90%")
     T.eq(thoughts.font_size_relative, 0, "默认字号跟随正文")
     T.eq(thoughts.contrast, 9, "默认字体纯黑")
     thoughts.position = "bottom"

@@ -17,6 +17,7 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local Blitbuffer = require("ffi/blitbuffer")
 local ButtonTable = require("ui/widget/buttontable")
 local CenterContainer = require("ui/widget/container/centercontainer")
+local Config = require("pickthought.config")
 local Device = require("device")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local Font = require("ui/font")
@@ -34,6 +35,8 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 
 local Screen = Device.screen
 local function _(text) return text end
+local POPUP_DEFAULTS = Config.THOUGHT_POPUP_DEFAULTS
+local POPUP_LIMITS = Config.THOUGHT_POPUP_LIMITS
 
 local PADDING_TOP = Size.padding.large
 local PADDING_BOTTOM = Size.padding.large
@@ -49,8 +52,8 @@ local CenterThoughtPopupWidget = InputContainer:extend{
         top = Screen:scaleBySize(10),
         bottom = Screen:scaleBySize(10),
     },
-    height_ratio = 0.70,
-    width_ratio = 0.8,
+    height_ratio = POPUP_DEFAULTS.height_ratio,
+    width_ratio = POPUP_DEFAULTS.width_ratio,
     contrast = 9,
     -- 配置层默认关闭；只有用户显式开启时才拦截窗口左右点按翻页。
     tap_to_page = false,
@@ -67,8 +70,10 @@ local CenterThoughtPopupWidget = InputContainer:extend{
 }
 
 function CenterThoughtPopupWidget:init()
-    self.height_ratio = math.max(0.1, math.min(0.9, self.height_ratio or 0.70))
-    self.width_ratio = math.max(0.4, math.min(1.0, self.width_ratio or 0.8))
+    self.height_ratio = math.max(POPUP_LIMITS.min_height_ratio,
+        math.min(POPUP_LIMITS.max_height_ratio, self.height_ratio or POPUP_DEFAULTS.height_ratio))
+    self.width_ratio = math.max(POPUP_LIMITS.min_width_ratio,
+        math.min(POPUP_LIMITS.max_width_ratio, self.width_ratio or POPUP_DEFAULTS.width_ratio))
     self.width = math.floor(Screen:getWidth() * self.width_ratio)
     self.height = math.floor(Screen:getHeight() * self.height_ratio)
 
@@ -140,8 +145,10 @@ function CenterThoughtPopupWidget:_reopen(opts)
     if opts.tap_to_page ~= nil then self.tap_to_page = opts.tap_to_page end
     if opts.dialog then self.dialog = opts.dialog end
     self.close_callback = opts.close_callback
-    self.height_ratio = math.max(0.1, math.min(0.9, self.height_ratio or 0.70))
-    self.width_ratio = math.max(0.4, math.min(1.0, self.width_ratio or 0.8))
+    self.height_ratio = math.max(POPUP_LIMITS.min_height_ratio,
+        math.min(POPUP_LIMITS.max_height_ratio, self.height_ratio or POPUP_DEFAULTS.height_ratio))
+    self.width_ratio = math.max(POPUP_LIMITS.min_width_ratio,
+        math.min(POPUP_LIMITS.max_width_ratio, self.width_ratio or POPUP_DEFAULTS.width_ratio))
     self.width = math.floor(Screen:getWidth() * self.width_ratio)
     self.height = math.floor(Screen:getHeight() * self.height_ratio)
 

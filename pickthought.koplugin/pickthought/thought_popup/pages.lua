@@ -171,23 +171,33 @@ function PageRenderer:paginate()
         local n_lines = paginated.n_lines
         local piece_h = n_lines * line_h + extra
         local piece_y = y
+        local line_bounds = {}
+        for k = 1, n_lines do
+            local line_top = piece_y + (k - 1) * line_h
+            local line_bottom = piece_y + k * line_h
+            -- extra is the actual glyph tail reserved by the text bitmap;
+            -- attach it to the final line so a page boundary cannot split it.
+            if k == n_lines then line_bottom = piece_y + piece_h end
+            line_bounds[k] = { top = line_top, bottom = line_bottom }
+        end
         pieces[#pieces + 1] = {
             kind = "text", variant = variant, text = text, fg = fg,
             face = face, width = width, x = x, y = piece_y,
             n_lines = n_lines, line_h = line_h, piece_h = piece_h,
             baseline = baseline, xtext = paginated.xtext, lines = paginated.lines,
+            line_bounds = line_bounds,
         }
         if keep_next and n_lines >= 1 then
             boundaries[#boundaries + 1] = {
                 top = piece_y,
-                bottom = piece_y + piece_h,
+                bottom = line_bounds[n_lines].bottom,
                 keep_next = true,
             }
         else
-            for k = 1, n_lines do
+            for k, bounds in ipairs(line_bounds) do
                 boundaries[#boundaries + 1] = {
-                    top = piece_y + (k - 1) * line_h,
-                    bottom = piece_y + k * line_h,
+                    top = bounds.top,
+                    bottom = bounds.bottom,
                 }
             end
         end
@@ -291,7 +301,21 @@ function PageRenderer:renderPage(page_idx, page_starts)
         if r and piece.kind == "text" then
             local text_bb = self:_getPieceTextBB(piece)
             if text_bb then
-                bb:blitFrom(text_bb, piece.x, r.dest_y, 0, r.src_y, piece.width, r.src_h)
+                local source_height = text_bb.getHeight and text_bb:getHeight() or piece.piece_h
+                local source_width = text_bb.getWidth and text_bb:getWidth() or piece.width
+                local src_y = math.max(0, math.floor(r.src_y + 0.5))
+                local src_end = math.min(source_height,
+                    math.ceil(r.src_y + r.src_h - 0.5))
+                local dest_y = math.floor(r.dest_y + 0.5)
+                if dest_y < 0 then
+                    src_y = src_y - dest_y
+                    dest_y = 0
+                end
+                local blit_h = math.min(src_end - src_y, h - dest_y)
+                local blit_w = math.min(piece.width, source_width, self.text_w)
+                if src_y < src_end and blit_h > 0 and blit_w > 0 and dest_y < h then
+                    bb:blitFrom(text_bb, piece.x, dest_y, 0, src_y, blit_w, blit_h)
+                end
             else
                 logger.warn("[撷思][ThoughtPopup] text render failed:",
                     "y=", piece.y, "n_lines=", piece.n_lines,

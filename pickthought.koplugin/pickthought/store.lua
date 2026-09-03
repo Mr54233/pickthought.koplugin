@@ -9,9 +9,11 @@ local Store={}; Store.__index=Store
 -- 想法弹窗重做后的设置。保留在原有 preferences.thoughts 下，避免破坏
 -- 已安装用户的偏好文件和其他模块的读取路径。
 local THOUGHT_POPUP_DEFAULTS={
- position="center",height_ratio=0.70,width_ratio=0.80,
+ position="center",height_ratio=Config.THOUGHT_POPUP_DEFAULTS.height_ratio,
+ width_ratio=Config.THOUGHT_POPUP_DEFAULTS.width_ratio,
  font_size_relative=0,font_size=nil,contrast=9,tap_to_page=false,
 }
+local THOUGHT_POPUP_LIMITS=Config.THOUGHT_POPUP_LIMITS
 local PREVIOUS_SYNC_MIN_AVAILABLE_KB=128*1024
 local PREVIOUS_WORKER_SYNC_MIN_AVAILABLE_KB=96*1024
 local LEGACY_SYNC_MAX_CACHE_BYTES=24*1024*1024
@@ -93,10 +95,12 @@ function Store:normalize_thought_popup_preferences()
     if thoughts.position~="center" and thoughts.position~="bottom" then
         thoughts.position=THOUGHT_POPUP_DEFAULTS.position; changed=true
     end
-    local height=clamp_number(thoughts.height_ratio,0.20,0.90)
+    local height=clamp_number(thoughts.height_ratio,
+        THOUGHT_POPUP_LIMITS.min_height_ratio, THOUGHT_POPUP_LIMITS.max_height_ratio)
     if height==nil then height=THOUGHT_POPUP_DEFAULTS.height_ratio end
     if thoughts.height_ratio~=height then thoughts.height_ratio=height; changed=true end
-    local width=clamp_number(thoughts.width_ratio,0.40,1.00)
+    local width=clamp_number(thoughts.width_ratio,
+        THOUGHT_POPUP_LIMITS.min_width_ratio, THOUGHT_POPUP_LIMITS.max_width_ratio)
     if width==nil then width=THOUGHT_POPUP_DEFAULTS.width_ratio end
     if thoughts.width_ratio~=width then thoughts.width_ratio=width; changed=true end
 

@@ -272,17 +272,40 @@ function Paginator.pieceVisibleRange(piece, p0, p1)
     local pbot = math.min(p1, piece.y + piece.piece_h)
     if pbot <= ptop then return nil end
 
-    local k0 = math.max(0, math.floor((ptop - piece.y) / piece.line_h))
-    local k1 = math.min(piece.n_lines - 1,
-        math.ceil((pbot - piece.y) / piece.line_h) - 1)
-    if k1 < k0 then return nil end
+    -- Page boundaries normally coincide with line bounds. Keep the exact
+    -- pixel intersection here as a defensive guard for rounding or a future
+    -- caller that supplies a boundary inside a text line.
+    local line_bounds = piece.line_bounds
+    if not line_bounds then
+        line_bounds = {}
+        for k = 1, piece.n_lines or 0 do
+            local line_top = piece.y + (k - 1) * piece.line_h
+            local line_bottom = piece.y + k * piece.line_h
+            if k == piece.n_lines then line_bottom = piece.y + piece.piece_h end
+            line_bounds[k] = { top = line_top, bottom = line_bottom }
+        end
+    end
+    local first, last
+    for k, bounds in ipairs(line_bounds) do
+        if bounds.bottom > ptop and bounds.top < pbot then
+            first = first or k
+            last = k
+        end
+    end
+    if not first or not last then return nil end
+
+    local src_top = math.max(0, ptop - piece.y)
+    local src_bottom = math.min(piece.piece_h, pbot - piece.y)
+    local src_y = math.floor(src_top + 0.5)
+    local src_end = math.ceil(src_bottom - 0.5)
+    if src_end <= src_y then return nil end
 
     return {
-        k0 = k0,
-        k1 = k1,
-        src_y = k0 * piece.line_h,
-        src_h = (k1 - k0 + 1) * piece.line_h,
-        dest_y = ptop - p0,
+        k0 = first - 1,
+        k1 = last - 1,
+        src_y = src_y,
+        src_h = src_end - src_y,
+        dest_y = math.floor(ptop - p0 + 0.5),
     }
 end
 

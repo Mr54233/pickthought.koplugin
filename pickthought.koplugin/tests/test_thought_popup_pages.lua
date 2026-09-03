@@ -55,8 +55,9 @@ package.preload["libs/libkoreader-xtext"] = function()
             xtext.measure = function() end
             xtext.makeLine = function(_, offset, width)
                 if offset > size then return nil end
-                -- 每 24 字节一行，保证长内容形成多个页面。
-                local finish = math.min(size, offset + 23)
+                -- 行长随排版宽度变化，保证宽高矩阵生成不同分页。
+                local line_bytes = math.max(12, math.floor(width / 12))
+                local finish = math.min(size, offset + line_bytes - 1)
                 return {
                     offset = offset, end_offset = finish,
                     next_start_offset = finish < size and finish + 1 or size + 1,
@@ -125,7 +126,7 @@ package.preload["pickthought.thought_popup.face_factory"] = function()
             return {
                 variant = variant,
                 size = 20,
-                ftsize = {getHeightAndAscender = function() return 24, 20 end},
+                ftsize = {getHeightAndAscender = function() return 30, 20 end},
                 getFallbackFont = function() return nil end,
             }
         end,
@@ -155,6 +156,31 @@ local function new_renderer()
     }
 end
 
+local function assert_piece_ranges_contiguous(renderer, pages, piece)
+    local Paginator = require('pickthought.thought_popup.paginator')
+    local ranges = {}
+    for page_index = 1, #pages do
+        local p0 = pages[page_index]
+        local p1 = pages[page_index + 1] or renderer.content_h
+        local range = Paginator.pieceVisibleRange(piece, p0, p1)
+        if range then
+            T.ok(range.src_y >= 0, '源起点不为负')
+            T.ok(range.src_h > 0, '源高度为正')
+            T.ok(range.src_y + range.src_h <= piece.piece_h, '源区间不越过文本位图')
+            T.ok(range.dest_y >= 0, '目标起点不为负')
+            ranges[#ranges + 1] = range
+        end
+    end
+    T.ok(#ranges > 0, '文本块至少出现在一页')
+    T.eq(ranges[1].src_y, 0, '文本块首段从位图起点开始')
+    for index = 2, #ranges do
+        T.eq(ranges[index - 1].src_y + ranges[index - 1].src_h,
+            ranges[index].src_y, '相邻页面文本源区间无重叠且无缺口')
+    end
+    T.eq(ranges[#ranges].src_y + ranges[#ranges].src_h, piece.piece_h,
+        '文本块末段覆盖位图结尾')
+end
+
 T.case("想法页面渲染器公开布局字段和长内容分页", function()
     local renderer = new_renderer()
     renderer:ensureLayout()
@@ -167,6 +193,82 @@ T.case("想法页面渲染器公开布局字段和长内容分页", function()
     local last = renderer:renderPage(#pages, pages)
     T.ok(first and first.getHeight, "首页生成位图")
     T.ok(last and last.getHeight, "尾页生成位图")
+end)
+
+T.case("分页边界覆盖文本块最后一行的实际位图尾部", function()
+    local renderer = PageRenderer:new{
+        items = {{abstract = "", author = "甲", content = string.rep("长", 80)}},
+        doc_font_size = 18,
+        doc_margins = {left = 20, right = 20, top = 10, bottom = 10},
+        height_ratio = .60, contrast = 9, skip_quote = true,
+    }
+    renderer:ensureLayout()
+    local content_piece
+    for _, piece in ipairs(renderer.layout.pieces) do
+        if piece.variant == "content" then content_piece = piece end
+    end
+    T.ok(content_piece and content_piece.line_bounds, "正文保存视觉行边界")
+    local last = content_piece.line_bounds[#content_piece.line_bounds]
+    T.eq(last.bottom, content_piece.y + content_piece.piece_h,
+        "最后一行边界覆盖实际位图尾部")
+
+    local pages = renderer:computePages(content_piece.line_bounds[#content_piece.line_bounds - 1].bottom)
+    T.ok(#pages >= 2, "文本块最后一行尾部需要时进入下一页")
+    local previous_end = pages[2]
+    local last_slice = require("pickthought.thought_popup.paginator").pieceVisibleRange(
+        content_piece, previous_end, content_piece.y + content_piece.piece_h)
+    T.eq(last_slice.src_y, content_piece.line_bounds[#content_piece.line_bounds - 1].bottom
+        - content_piece.y, "下一页从最后一行起点开始")
+    T.eq(last_slice.src_h, content_piece.piece_h
+        - (content_piece.line_bounds[#content_piece.line_bounds - 1].bottom - content_piece.y),
+        "下一页包含最后一行完整尾部")
+
+    local ranges = {}
+    local paginator = require("pickthought.thought_popup.paginator")
+    for page_index = 1, #pages do
+        local p0 = pages[page_index]
+        local p1 = pages[page_index + 1] or renderer.content_h
+        local range = paginator.pieceVisibleRange(content_piece, p0, p1)
+        if range then ranges[#ranges + 1] = range end
+    end
+    T.ok(#ranges > 1, "正文实际跨越多个页面")
+    T.eq(ranges[1].src_y, 0, "跨页正文源区间从零开始")
+    for index = 2, #ranges do
+        T.eq(ranges[index - 1].src_y + ranges[index - 1].src_h,
+            ranges[index].src_y, "相邻页面正文源区间连续")
+    end
+    T.eq(ranges[#ranges].src_y + ranges[#ranges].src_h, content_piece.piece_h,
+        "跨页正文源区间覆盖到位图末尾")
+end)
+
+T.case("全部合法宽高组合均不重复或裁切跨页正文", function()
+    for width_percent = 60, 100, 5 do
+        for height_percent = 50, 90, 5 do
+            local renderer = PageRenderer:new{
+                items = items,
+                doc_font_size = 18,
+                doc_margins = {left = 20, right = 20, top = 10, bottom = 10},
+                height_ratio = height_percent / 100,
+                content_width = math.floor(600 * width_percent / 100),
+                contrast = 9,
+                skip_quote = true,
+            }
+            renderer:ensureLayout()
+            local viewport_h = math.max(1, math.floor(800 * height_percent / 100) - 180)
+            local pages = renderer:computePages(viewport_h)
+            T.ok(#pages > 1, width_percent .. "x" .. height_percent .. " 长内容跨页")
+            for index = 2, #pages do
+                T.ok(pages[index] > pages[index - 1], "页起点单调递增")
+            end
+            for page_index = 1, #pages do
+                local page_bb = renderer:renderPage(page_index, pages)
+                T.ok(page_bb and page_bb.getHeight, "每种宽高组合均生成页面位图")
+            end
+            for _, piece in ipairs(renderer.layout.pieces) do
+                assert_piece_ranges_contiguous(renderer, pages, piece)
+            end
+        end
+    end
 end)
 
 T.case("相同内容复用布局，尺寸或对比度变化会重新布局", function()

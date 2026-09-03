@@ -110,6 +110,13 @@ T.case("想法弹窗分页只在文本行边界切分", function()
     }
     local orphan_pages = Paginator.computePages(orphan, 300, 366)
     T.eq(orphan_pages[2], 183, "作者行不会孤立在页底")
+
+    local with_tail = {
+        {top = 0, bottom = 24}, {top = 24, bottom = 48},
+        {top = 48, bottom = 54},
+    }
+    local tail_pages = Paginator.computePages(with_tail, 48, 54)
+    T.eq(tail_pages[2], 48, "末行下溢空间不会被错误提前放到下一页")
 end)
 
 T.case("超长单条想法跨多页且每页索引到同一文本块", function()
@@ -155,4 +162,17 @@ T.case("想法弹窗 xtext 缓存可被显式释放", function()
     T.eq(Paginator.paginateLines("hello\n", {size = 20}, 400), 2,
         "末尾硬换行保留额外空行")
     hard_newline = false
+end)
+
+T.case("跨页正文使用连续像素区间,不重复或裁切末行尾部", function()
+    local piece = {
+        y = 0, line_h = 20, piece_h = 65, n_lines = 3,
+    }
+    local first = Paginator.pieceVisibleRange(piece, 0, 40)
+    local second = Paginator.pieceVisibleRange(piece, 40, 65)
+    T.eq(first.src_y, 0, "第一页从正文位图起点裁剪")
+    T.eq(first.src_h, 40, "第一页覆盖前两行")
+    T.eq(second.src_y, 40, "第二页从第三行起点裁剪")
+    T.eq(second.src_h, 25, "第二页覆盖第三行及尾部空间")
+    T.eq(first.src_y + first.src_h, second.src_y, "两页源像素区间连续")
 end)

@@ -15,6 +15,7 @@ bottom/tap/Back gestures.
 local Blitbuffer = require("ffi/blitbuffer")
 local BottomContainer = require("ui/widget/container/bottomcontainer")
 local ButtonDialog = require("ui/widget/buttondialog")
+local Config = require("pickthought.config")
 local Device = require("device")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
@@ -30,6 +31,8 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Screen = Device.screen
 local function _(text) return text end
+local POPUP_DEFAULTS = Config.THOUGHT_POPUP_DEFAULTS
+local POPUP_LIMITS = Config.THOUGHT_POPUP_LIMITS
 
 local TOP_BORDER_SIZE = Size.line.thick
 local PADDING_TOP = Size.padding.large
@@ -45,7 +48,7 @@ local ThoughtPopupWidget = InputContainer:extend{
         top = Screen:scaleBySize(10),
         bottom = Screen:scaleBySize(10),
     },
-    height_ratio = 0.70,
+    height_ratio = POPUP_DEFAULTS.height_ratio,
     contrast = 9,
     tap_to_page = false,
     close_callback = nil,
@@ -58,7 +61,8 @@ local ThoughtPopupWidget = InputContainer:extend{
 }
 
 function ThoughtPopupWidget:init()
-    self.height_ratio = math.max(0.1, math.min(0.9, self.height_ratio or 0.70))
+    self.height_ratio = math.max(POPUP_LIMITS.min_height_ratio,
+        math.min(POPUP_LIMITS.max_height_ratio, self.height_ratio or POPUP_DEFAULTS.height_ratio))
     self.width = Screen:getWidth()
     self.height = math.floor(Screen:getHeight() * self.height_ratio)
 
@@ -124,7 +128,8 @@ function ThoughtPopupWidget:_reopen(opts)
     if opts.tap_to_page ~= nil then self.tap_to_page = opts.tap_to_page end
     if opts.dialog then self.dialog = opts.dialog end
     self.close_callback = opts.close_callback
-    self.height_ratio = math.max(0.1, math.min(0.9, self.height_ratio or 0.70))
+    self.height_ratio = math.max(POPUP_LIMITS.min_height_ratio,
+        math.min(POPUP_LIMITS.max_height_ratio, self.height_ratio or POPUP_DEFAULTS.height_ratio))
     self.height = math.floor(Screen:getHeight() * self.height_ratio)
 
     self._pages:setContent(self.items, self.doc_font_name, self.doc_font_size,
