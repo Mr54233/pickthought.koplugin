@@ -9,7 +9,7 @@
     "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.2/pickthought.koplugin.zip",
     "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.2/pickthought.koplugin.zip"
   ],
-  "size": 928670,
-  "sha256": "7a4648bfe7c44cc51dc908a6e2ef9c6dac0747aedfdc31b0565acc53d7e3580a",
-  "notes": "问题修复：\n修复跨页裁切并完善尺寸设置"
+  "size": 918197,
+  "sha256": "f0e16ff37f0e7547754fecbe958720eb77300aec854bc0c7ddf3169f18c9b6c3",
+  "notes": "问题修复：\n修复跨页裁切并完善尺寸设置（Issue #21）"
 }
