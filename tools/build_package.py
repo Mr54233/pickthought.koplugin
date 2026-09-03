@@ -15,6 +15,8 @@ from typing import Dict, Iterable, Optional
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
 TEXT_SUFFIXES = {".lua", ".txt", ".md", ".json", ".css", ".xml", ".html", ".htm", ".svg"}
 TEXT_FILENAMES = {"LICENSE", "NOTICE"}
+EXCLUDED_DIR_NAMES = {"__pycache__"}
+EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
 
 
 class PackageError(RuntimeError):
@@ -58,8 +60,15 @@ def read_source_version(source_root: Path) -> str:
 
 def _package_files(plugin_root: Path) -> Iterable[Path]:
     for path in sorted(plugin_root.rglob("*")):
-        if path.is_file():
+        if path.is_file() and not _is_generated_cache(path):
             yield path
+
+
+def _is_generated_cache(path: Path) -> bool:
+    return (
+        any(part in EXCLUDED_DIR_NAMES for part in path.parts)
+        or path.suffix.lower() in EXCLUDED_SUFFIXES
+    )
 
 
 def _package_bytes(path: Path) -> bytes:

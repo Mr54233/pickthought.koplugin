@@ -50,6 +50,26 @@ class BuildPackageTests(unittest.TestCase):
                 for name in archive.namelist():
                     self.assertNotIn(b"\r", archive.read(name))
 
+    def test_python_cache_files_are_excluded_from_archive(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._source(root)
+            cache_dir = root / "pickthought.koplugin" / "tests" / "__pycache__"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / "test_build_package.cpython-313.pyc").write_bytes(b"cache")
+            (root / "pickthought.koplugin" / "tests" / "legacy.pyc").write_bytes(b"cache")
+
+            archive_path = root / "package.zip"
+            build_package(root, archive_path, expected_version="1.2.3")
+
+            import zipfile
+
+            with zipfile.ZipFile(archive_path) as archive:
+                names = archive.namelist()
+
+            self.assertNotIn("pickthought.koplugin/tests/__pycache__/test_build_package.cpython-313.pyc", names)
+            self.assertNotIn("pickthought.koplugin/tests/legacy.pyc", names)
+
 
 if __name__ == "__main__":
     unittest.main()
