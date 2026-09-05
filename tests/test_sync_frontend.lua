@@ -134,6 +134,29 @@ T.case("多书同步使用本地书名和绑定书名快照", function()
     }
     function self:doc_title_guess() return "剑来" end
     function self:current_doc_path() return nil end
+    -- main.lua:_start_sync_task 经 _book_ids 取全部绑定书(多书接线)
+    function self:_book_ids(p)
+        local list = self.store.get(self, "bindings", {})[p] or {}
+        local ids = {}
+        for _, rec in pairs(list) do ids[#ids + 1] = rec.book_id end
+        table.sort(ids, function(a, b2) return a < b2 end)
+        return ids
+    end
+    function self:_binding_titles(p)
+        local list = self.store.get(self, "bindings", {})[p] or {}
+        local titles = {}
+        for bid, rec in pairs(list) do titles[tostring(bid)] = rec.title end
+        return titles
+    end
+    function self:_sync_display_title(path, bound, book_ids, titles)
+        if #book_ids > 1 then
+            return self:doc_title_guess() .. "（多书同步，共 " .. #book_ids .. " 个绑定书目）"
+        end
+        return bound.title
+    end
+    function self:_persist_sync_state(state)
+        self.store.set(self.store, "sync_runtime", state)
+    end
 
     local bound = {book_id = "b3", title = "剑来3"}
     T.ok(Plugin._start_sync_task(self, path, bound, "sync", {background = true}),
@@ -780,4 +803,145 @@ T.case("多书限速冷却:A 零划线缓存(全章 deferred),B 正常完成,不
     rm_glob(IS_WINDOWS and "tests\\sync-progress-*.json" or "tests/sync-progress-*.json")
     rm_glob(IS_WINDOWS and "tests\\sync-result-*.json" or "tests/sync-result-*.json")
     rm_glob(IS_WINDOWS and "tests\\sync-cancel-*" or "tests/sync-cancel-*")
+end)
+
+
+-- ===== 以下用例自 pickthought.koplugin/tests 旧副本合并移植(2026-09-05) =====
+local SyncProgress = require("pickthought.sync_progress")
+
+T.case("三阶段进度显示累计和当前文件明细", function()
+    local dialog = {_title = "正在同步《剑来》"}
+    dialog.title_widget = {setText = function() end}
+    dialog.progress = {setPercentage = function() end}
+    dialog.percent_widget = {setText = function() end}
+    dialog.status_widget = {setText = function(_, text) dialog.status_text = text end}
+    function dialog:_redraw() end
+    setmetatable(dialog, {__index = SyncProgress})
+
+    dialog:set_state({stage = "fetch", current = 17, total = 1398,
+        chapter = "第 17 章", message = "想法批次 2/3",
+        current_fetch_underlines = 93, current_fetch_thoughts = 740,
+        fetch_underlines = 2435, fetch_thoughts = 30338})
+    T.ok(dialog.status_text:find("第 17 章\n想法批次 2/3\n当前章节已拉取：划线 93 条，想法 740 条\n本轮累计已拉取：划线 2,435 条，想法 30,338 条", 1, true),
+        "拉取阶段先保留原文案再追加当前章和累计数据")
+
+    dialog:set_state({stage = "map", current = 415, total = 1284,
+        chapter = "Text/0415.xhtml",
+        current_file = "Text/0415.xhtml", current_file_underlines = 12,
+        current_file_thoughts = 37, matched_files = 415,
+        fetch_chapters = 200, fetch_underlines = 12081, fetch_thoughts = 30338,
+        matched_underlines = 3420, matched_thoughts = 10206})
+    T.ok(dialog.status_text:find("本轮已拉取：章节 200 章，划线 12,081 条，想法 30,338 条", 1, true),
+        "匹配阶段显示拉取汇总")
+    T.ok(dialog.status_text:find("当前文件：Text/0415.xhtml", 1, true),
+        "匹配阶段显示当前正文文件")
+    T.ok(dialog.status_text:find("当前文件关联：划线 12 条，想法 37 条", 1, true),
+        "匹配阶段显示当前文件关联数量")
+    T.ok(dialog.status_text:find("本轮累计已扫描：正文文件 415 个", 1, true),
+        "匹配阶段显示累计扫描文件数")
+    T.ok(dialog.status_text:find("本轮累计已匹配：划线 3,420 条，想法 10,206 条", 1, true),
+        "匹配阶段显示累计匹配数量")
+    T.ok(not dialog.status_text:find("Text/0415.xhtml\nText/0415.xhtml", 1, true),
+        "匹配阶段不重复显示当前文件路径")
+    T.ok(dialog.status_text:find("书籍较大时，此阶段可能持续较长时间。\n具体耗时取决于书籍大小、设备性能和想法数量。\n进度会继续，请耐心等待，勿强制退出 KOReader。", 1, true),
+        "匹配阶段显示分行耗时提示")
+
+    dialog:set_state({stage = "inject", current = 415, total = 1333,
+        chapter = "Text/0415.xhtml",
+        current_file = "Text/0415.xhtml", current_file_target = true,
+        current_file_underlines = 9, current_file_thoughts = 28,
+        injected_underlines = 3420, injected_thoughts = 10206,
+        fetch_chapters = 200, fetch_underlines = 12081, fetch_thoughts = 30338})
+    T.ok(dialog.status_text:find("本轮已拉取：章节 200 章，划线 12,081 条，想法 30,338 条", 1, true),
+        "注入阶段显示拉取汇总")
+    T.ok(dialog.status_text:find("当前文件：Text/0415.xhtml", 1, true),
+        "注入阶段显示当前正文文件")
+    T.ok(dialog.status_text:find("当前文件注入：划线 9 条，想法 28 条", 1, true),
+        "注入阶段显示当前文件实际数量")
+    T.ok(dialog.status_text:find("本轮累计注入：划线 3,420 条，想法 10,206 条", 1, true),
+        "注入阶段显示累计实际数量")
+    T.ok(dialog.status_text:find("书籍较大时，此阶段可能持续较长时间。\n具体耗时取决于书籍大小、设备性能和想法数量。\n进度会继续，请耐心等待，勿强制退出 KOReader。", 1, true),
+        "注入阶段显示分行耗时提示")
+    T.eq(SyncProgress.format_count(1234567), "1,234,567", "大数字千位分隔")
+end)
+
+T.case("多书同步任务保留启动时的书名快照", function()
+    local path = "tests/剑来.epub"
+    local persisted
+    local started
+    local self = {
+        store = {
+            get = function(_, key, default)
+                if key == "bindings" then
+                    return {[path] = {
+                        b1 = {book_id = "b1", title = "剑来1", bound_at = 1},
+                        b2 = {book_id = "b2", title = "剑来2", bound_at = 2},
+                    }}
+                end
+                return default
+            end,
+            set = function(_, key, value)
+                if key == "sync_runtime" then persisted = value end
+            end,
+        },
+        sync_task = {
+            start = function(_, options)
+                started = options
+                return true
+            end,
+            descriptor = function() return {pid = 123} end,
+            set_backgrounded = function() end,
+        },
+    }
+    self._book_ids = function() return {"b1", "b2"} end
+    self._binding_titles = function() return {b1 = "剑来1", b2 = "剑来2"} end
+    function self:doc_title_guess() return "剑来" end
+    function self:_sync_display_title() return "剑来1" end
+    function self:_persist_sync_state(runtime) persisted = runtime end
+
+    T.ok(Plugin._start_sync_task(self, path, {book_id = "b2", title = "剑来2"},
+        "sync", {background = true}), "多书同步任务应成功启动")
+    T.eq(started.titles.b1, "剑来1", "后台任务保留第一本书名快照")
+    T.eq(started.titles.b2, "剑来2", "后台任务保留第二本书名快照")
+    T.eq(started.title, "剑来1", "任务初始标题使用第一本书")
+    T.eq(persisted.titles.b1, "剑来1", "持久化状态保留第一本书名快照")
+end)
+
+T.case("多书同步初始标题使用同步队列的第一本书", function()
+    local self = {doc_title_guess = function() return "剑来合集" end}
+    T.eq(Plugin._sync_display_title(self, "tests/剑来.epub", {title = "剑来3"},
+        {"b1", "b2", "b3"}, {b1 = "剑来1", b2 = "剑来2", b3 = "剑来3"}),
+        "剑来1", "初始标题与首个实际同步书目一致")
+    T.eq(Plugin._sync_display_title(self, "tests/剑来.epub", {title = "剑来"},
+        {"b1"}, {}), "剑来", "缺少快照时回退主绑定书名")
+end)
+
+T.case("多书同步当前书目动态显示在标题,正文不重复显示", function()
+    T.eq(SyncProgress._title_for_state({stage = "fetch", book_title = "剑来2"}),
+        "正在同步《剑来2》", "拉取阶段标题显示当前书名")
+    T.eq(SyncProgress._title_for_state({stage = "chapters", book_title = "剑来3"}),
+        "正在同步《剑来3》", "获取章节列表阶段标题显示当前书名")
+    T.eq(SyncProgress._title_for_state({stage = "map", book_title = "剑来2"}), nil,
+        "映射阶段不伪造当前远端书目")
+
+    local dialog = {_title = "正在同步《剑来1》"}
+    dialog.title_widget = {setText = function(_, text) dialog.title_text = text end}
+    dialog.progress = {setPercentage = function(_, value) dialog.percent = value end}
+    dialog.percent_widget = {setText = function(_, text) dialog.percent_text = text end}
+    dialog.status_widget = {setText = function(_, text) dialog.status_text = text end}
+    function dialog:_redraw() self.redraws = (self.redraws or 0) + 1 end
+    setmetatable(dialog, {__index = SyncProgress})
+
+    dialog:set_state({stage = "fetch", current = 2, total = 30, percent = 0.40,
+        book_id = "b2", book_index = 2, book_count = 3, book_title = "剑来2"})
+    T.eq(dialog.title_text, "正在同步《剑来2》", "第二本书更新弹窗标题")
+    T.eq(dialog.status_text, "拉取划线与想法\n章节 2 / 30",
+        "正文只保留阶段和章节进度")
+    T.ok(not dialog.status_text:find("当前书目", 1, true), "正文不重复显示当前书目")
+
+    dialog:set_state({stage = "fetch", current = 1, total = 30, percent = 0.55,
+        book_id = "b3", book_index = 3, book_count = 3, book_title = "剑来3"})
+    T.eq(dialog.title_text, "正在同步《剑来3》", "切换书目后标题继续更新")
+    dialog:set_state({stage = "map", current = 1, total = 100, percent = 0.84})
+    T.eq(dialog.title_text, "正在同步《剑来3》", "合集映射阶段保留最后一个拉取书目标题")
 end)

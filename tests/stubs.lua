@@ -2,7 +2,9 @@
 -- 用法:tests/run.lua 最先 require 本文件。
 local M = {}
 
+-- 插件源码路径(pickthought.*);根目录 tests 优先已由 run.lua 设置。
 package.path = "pickthought.koplugin/?.lua;" .. package.path
+
 
 package.preload["logger"] = function()
     local function noop() end

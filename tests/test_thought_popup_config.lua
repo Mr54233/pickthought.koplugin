@@ -92,6 +92,9 @@ package.preload["pickthought.config"] = function()
     }
 end
 package.preload["pickthought.batch_sync"] = function() return {DEFAULT_AUTO = false} end
+-- 空 json 桩仅本用例使用;用完必须恢复,否则会毒化后续测试的 pickthought.json。
+local ORIGINAL_JSON_PRELOAD = package.preload["pickthought.json"]
+local ORIGINAL_JSON_LOADED = package.loaded["pickthought.json"]
 package.preload["pickthought.json"] = function() return {} end
 -- 前面的前台同步集成测试会为 Store 安装专用假实现；本用例必须加载真实
 -- Store，才能验证其启动期归一化逻辑。
@@ -133,3 +136,11 @@ T.case("新安装偏好直接使用上游最终默认值并可持久化", functi
     T.eq(restored.position, "bottom", "位置保存后可恢复")
     T.ok(restored.tap_to_page, "点击翻页设置保存后可恢复")
 end)
+
+-- 恢复 json 引擎,后续测试(如 test_review_comments)依赖完整的 encode/decode。
+package.preload["pickthought.json"] = ORIGINAL_JSON_PRELOAD
+package.loaded["pickthought.json"] = ORIGINAL_JSON_LOADED
+print("[cfg-probe] restored:", type(ORIGINAL_JSON_PRELOAD), type(ORIGINAL_JSON_LOADED),
+      "loaded now:", type(package.loaded["pickthought.json"]),
+      "encode:", type(package.loaded["pickthought.json"] and
+          package.loaded["pickthought.json"].encode))
