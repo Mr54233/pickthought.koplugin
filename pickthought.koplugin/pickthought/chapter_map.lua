@@ -261,6 +261,11 @@ local function build_with_scanner(spine, chapters, scan, options)
     end
 
     local scores = {}       -- [ci] = {{href, score}, ...}(spine 顺序)
+    -- 全部目标章节命中后提前结束扫描:剩余正文文件不再读取/解压,
+    -- 以 "已取消" 信号停止扫描,由 build_with_scanner 按成功收尾。
+    local matched_ci_seen = {}
+    local all_matched_early = false
+    local recent_hit_streak = 0  -- 连续"命中目标的文件"计数(提前退出保守判据)
     local title_hits = {}   -- [ci] = {href, ...}(已排除目录页)
     local title_hit_seen = {} -- [ci][href] = true,同文件重复标题只算一个目标
     local metrics = {
@@ -321,6 +326,22 @@ local function build_with_scanner(spine, chapters, scan, options)
     end
 
     local function process_item(spine_index, item, html, read_err, phase, target_set)
+        -- 主阶段入口检查:所有目标章节都已命中,且"最近一个文件"也命中了
+        -- 至少一个目标(拆分章可能让一个文件只承载部分目标,连续两个无新命中
+        -- 的文件才能证明剩余正文不含目标),才允许提前结束扫描。
+        -- 条件保守:宁可多扫几个文件,绝不因提前退出漏掉拆分章的第二目标。
+        if phase == nil or phase == "primary" then
+            local all_hit = #chapters > 0
+            if all_hit then
+                for ci = 1, #chapters do
+                    if not matched_ci_seen[ci] then all_hit = false; break end
+                end
+            end
+            if all_hit and recent_hit_streak >= 2 then
+                all_matched_early = true
+                return false, "all_matched"
+            end
+        end
         local text = html and ChapterMap.normalize(html) or nil
         if not text then
             logger.warn("[撷思][ChapterMap] 读取章节失败",
@@ -432,6 +453,7 @@ local function build_with_scanner(spine, chapters, scan, options)
                         end
                     end
                     if score > 0 then
+                        if not matched_ci_seen[ci] then matched_ci_seen[ci] = true end
                         scores[ci] = scores[ci] or {}
                         scores[ci][#scores[ci] + 1] = {
                             href = item.href, score = score, spine_index = spine_index,
@@ -458,6 +480,11 @@ local function build_with_scanner(spine, chapters, scan, options)
             if phase == "fallback" then
                 for _ in pairs(target_set or {}) do metrics.fallback_chapters = metrics.fallback_chapters + 1 end
             end
+            -- 命中计数:本文件为任一目标贡献了候选 → 连续命中 +1,否则清零。
+            local contributed = false
+            for _ in pairs(candidates) do contributed = true; break end
+            if contributed then recent_hit_streak = recent_hit_streak + 1
+            else recent_hit_streak = 0 end
         end
         text = nil
         collectgarbage("step", 400)
@@ -466,7 +493,13 @@ local function build_with_scanner(spine, chapters, scan, options)
     end
 
     local scan_ok, scan_err = scan(process_item, "primary")
-    if scan_ok == nil or scan_ok == false then error(scan_err or "无法读取 EPUB 正文") end
+    if scan_ok == nil or scan_ok == false then
+        -- "all_matched" = 所有目标章节已命中,提前结束扫描,不是错误;
+        -- 其余 false(用户取消/读取取消)按错误向上抛出。
+        if not (all_matched_early and scan_err == "all_matched") then
+            error(scan_err or "无法读取 EPUB 正文")
+        end
+    end
 
     -- 标题索引未覆盖的章节才启动兼容回退。正常有结构书籍不会进入这里;
     -- 标题被改写、正文没有 h 标签或 EPUB 结构异常时仍能复用旧定位语义。
@@ -566,9 +599,12 @@ function ChapterMap.build(spine, read_text, chapters, options)
         for index, item in ipairs(spine or {}) do
             local ok, html, err = pcall(read_text, item.href)
             if ok and html == false then return false, "已取消" end
-            if visit(index, item, ok and html or nil, ok and err or html,
-                    phase, target_set) == false then
-                return false, "已取消"
+            local visit_ok, visit_err = visit(index, item, ok and html or nil,
+                ok and err or html, phase, target_set)
+            if visit_ok == false then
+                -- 保留原始信号:all_matched(全部命中提前结束)不能被改写成
+                -- "已取消",否则 build_with_scanner 会误判为取消而抛错。
+                return false, visit_err or "已取消"
             end
         end
         return true
