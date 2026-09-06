@@ -91,6 +91,13 @@ def parse_subject(subject: str) -> Tuple[str | None, str | None]:
     if re.match(r"^合并:", subject):
         description = NORMALIZED_TRANSLATIONS.get(subject, clean(subject.split(":", 1)[1]))
         return "feat", description
+    # PR 合并提交("Merge pull request #N from owner/branch"):仓库改用
+    # PR 工作流后,feat/fix 提交都在分支上,主线第一父链只剩 merge 提交。
+    # merge subject 本身不含标题,返回 (kind="merge", 描述=PR 号),由
+    # generate_release_notes 从 pull_fetcher 取 PR 标题作为条目描述。
+    match = re.match(r"^Merge pull request #(\d+)\s+from\s+\S+$", subject, re.I)
+    if match:
+        return "merge", f"#{match.group(1)}"
     return None, None
 
 
@@ -127,6 +134,21 @@ def generate_release_notes(
         kind, description = parse_subject(subject)
         if not kind or not description:
             continue
+        # merge 提交:用关联 PR 的标题作为描述(kind 由 PR 标题的前缀决定,
+        # 无前缀时默认 feat),refs 从 PR body 挖取,贡献者记 PR 作者。
+        pr_from_merge = None
+        if kind == "merge":
+            discovered = list(pull_fetcher(sha))
+            if not discovered:
+                continue
+            pr_from_merge = discovered[0]
+            title = clean(str(pr_from_merge.get("title") or ""))
+            kind, description = parse_subject(title)
+            if not kind:
+                kind, description = "feat", title
+            if not description:
+                continue
+
         if not re.search(r"[\u3400-\u9fff]", description):
             raise ReleaseNotesError(
                 f"发现未翻译的发布提交，请先改为中文：{raw_subject}"
@@ -138,13 +160,13 @@ def generate_release_notes(
         seen.add(key)
 
         prs, issues = _refs(subject, description)
-        commit_data = commit_fetcher(sha)
-        commit_author = (commit_data.get("author") or {}).get("login")
-        if commit_author:
-            contributors.add(str(commit_author))
-
-        discovered_prs = list(pull_fetcher(sha))
         manual_prs = set(prs)
+        discovered_prs = [pr_from_merge] if pr_from_merge else list(pull_fetcher(sha))
+        if not pr_from_merge:
+            commit_data = commit_fetcher(sha)
+            commit_author = (commit_data.get("author") or {}).get("login")
+            if commit_author:
+                contributors.add(str(commit_author))
         for pr in discovered_prs:
             number = int(pr["number"])
             if not manual_prs:
