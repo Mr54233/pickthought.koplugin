@@ -126,14 +126,15 @@ jobs:
         shell: bash
         env:
           VER: ${{ steps.version.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          python3 - "$VER" <<'PY'
+          python3 - "$VER" "$REPOSITORY" <<'PY'
           import json
           import sys
           from pathlib import Path
 
-          version = sys.argv[1]
+          version, repository = sys.argv[1], sys.argv[2]
           notes = json.loads(Path("release-notes.json").read_text(encoding="utf-8"))
           manifest = json.loads(Path("update.json").read_text(encoding="utf-8"))
           if manifest["notes"].strip() != notes["notes"].strip():
@@ -142,30 +143,25 @@ jobs:
           body = f"""## 本次更新
 
           {notes["notes"]}
-
-          ---
-
-          ## Contributors（本次更新的贡献者）
-
-          {notes["contributors_text"]}
-
-          ---
-
-          ## 安装
-
-          1. 下载 `pickthought.koplugin.zip` 并解压
-          2. 把 `pickthought.koplugin` 目录放到 KOReader 插件目录：
-             `koreader/plugins/pickthought.koplugin`
-          3. 完全重启 KOReader，在「工具」菜单找到「撷思」
-
-          ## 环境要求
-
-          KOReader ≥ v2026.03（需要内建的 `ffi/archiver` 与 `lua-ljsqlite3`）。
-
-          ---
-
-          本插件衍生自 [miuread-koreader](https://github.com/miumiupy98-art/miuread-koreader) 与 [weread.koplugin](https://github.com/finlater/weread.koplugin)，基于 AGPL-3.0 许可证发布。
           """
+          # Contributors 仅在存在仓库所有者之外的贡献者时展示；
+          # 安装与环境要求段落不再出现在 Release 正文（README 已有）。
+          owner = repository.rsplit("/", 1)[0].lower() if repository else ""
+          others = [
+              login
+              for login in notes.get("contributors", [])
+              if login.lower() != owner
+          ]
+          if others:
+              listed = "\n".join(f"- @{login}" for login in notes["contributors"])
+              body += f"""
+
+              ---
+
+              ## Contributors（本次更新的贡献者）
+
+              {listed}
+              """
           # The indented heredoc above keeps the workflow readable; release text should not inherit it.
           body = "\n".join(line.strip() for line in body.splitlines()) + "\n"
           Path("release-body.md").write_text(body, encoding="utf-8")

@@ -45,7 +45,7 @@ git push origin v0.3.1
 2. 确认 tag 指向 `origin/main` 当前提交。
 3. 下载质量检查生成的包并重新校验。
 4. 校验包内版本、`update.json` 版本、大小和 SHA-256 完全一致。
-5. 生成中文更新摘要、Issue/PR 关联和 Contributors。
+5. 生成中文更新摘要与 Issue/PR 关联；Release 正文只含更新内容，Contributors 仅在存在仓库所有者之外的贡献者时展示。
 6. 创建 GitHub Release，并附带 ZIP 包和 SHA-256 文件。
 
 Release workflow 不会切换到 `main`，也不会自动修改、提交或推送版本文件和 `update.json`。因此版本提交、tag 和正式包之间的关系是可审计的。
