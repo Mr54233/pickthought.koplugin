@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Sensitive-information scan for tracked files.
+"""Sensitive-information scan for git files.
 
-检查（与 CONTRIBUTING.md「隐私」一致）：任何 git 跟踪的文件不得包含
-真实的微信读书凭据——API key（wrk-…）、Cookie 值（wr_skey/wr_rt/wr_vid/
-ptcz）、反滥用头（x-wrpa-*）、thirdwx 会话标识。测试夹具一律使用
-`XXX` 或明显假的占位值，扫描器会放行形如 `wr_skey=XXX` 的写法。
+检查（与 CONTRIBUTING.md「隐私」一致）：入库文件不得包含真实的微信读书
+凭据——API key（wrk-…）、Cookie 值（wr_skey/wr_rt/wr_vid/ptcz）、反滥用头
+（x-wrpa-*）、thirdwx 会话标识。测试夹具一律使用 `XXX` 或明显假的占位值，
+扫描器会放行形如 `wr_skey=XXX` 的写法。
+
+扫描范围：git 跟踪文件 + 未被忽略的未跟踪文件（新增文件在提交前就能扫到）。
+EXEMPT_FILES 列出的文件整体豁免——目前只有扫描器自己的单测夹具
+（tests/test_check_tools.py），其中刻意构造了以假乱真的凭据样例。
 
 用法：python3 tools/check_secrets.py
 """
@@ -13,6 +17,11 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+# 整体豁免的文件（相对仓库根）：内容即扫描器的测试夹具。
+EXEMPT_FILES = {
+    "tests/test_check_tools.py",
+}
 
 PATTERNS = [
     (
@@ -38,19 +47,21 @@ PATTERNS = [
 MAX_BYTES = 2_000_000
 
 
-def tracked_files():
+def candidate_files():
+    """跟踪文件 + 未被忽略的未跟踪文件（新增文件提交前即可扫到）。"""
     out = subprocess.run(
-        ["git", "ls-files", "-z"],
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         capture_output=True,
         check=True,
     ).stdout
-    return [name for name in out.decode("utf-8", "replace").split("\0") if name]
+    names = [name for name in out.decode("utf-8", "replace").split("\0") if name]
+    return [name for name in names if name not in EXEMPT_FILES]
 
 
 def main() -> int:
     failures = []
     scanned = 0
-    for name in tracked_files():
+    for name in candidate_files():
         path = Path(name)
         if not path.is_file():
             continue
