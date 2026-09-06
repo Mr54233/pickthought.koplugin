@@ -1,15 +1,15 @@
 {
-  "version": "0.4.2",
-  "name": "撷思 PickThought 0.4.2",
+  "version": "0.5.0",
+  "name": "撷思 PickThought 0.5.0",
   "package_type": "full",
-  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.2/pickthought.koplugin.zip",
+  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.0/pickthought.koplugin.zip",
   "package_urls": [
-    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.2/pickthought.koplugin.zip",
-    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.2/pickthought.koplugin.zip",
-    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.2/pickthought.koplugin.zip",
-    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.4.2/pickthought.koplugin.zip"
+    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.0/pickthought.koplugin.zip",
+    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.0/pickthought.koplugin.zip",
+    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.0/pickthought.koplugin.zip",
+    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.0/pickthought.koplugin.zip"
   ],
-  "size": 918197,
-  "sha256": "f0e16ff37f0e7547754fecbe958720eb77300aec854bc0c7ddf3169f18c9b6c3",
-  "notes": "问题修复：\n修复跨页裁切并完善尺寸设置（Issue #21）"
+  "size": 830804,
+  "sha256": "eaf1bae40fec5c534ba3e0affced0ae15aef9ab526f5e33414a22eace5e0d8c9",
+  "notes": "新功能：\n想法评论查看：长按想法查看评论，列表显示评论数（懒加载）\n中间点击直接打开评论（需开启点击翻页）\n问题修复：\n修复休眠唤醒后首次请求误报登录过期\n修复弹窗高度变化时的屏幕残影"
 }
