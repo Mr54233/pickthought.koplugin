@@ -72,7 +72,8 @@ for _, name in ipairs({
     "ui/font", "ui/geometry", "ui/gesturerange", "ui/widget/container/inputcontainer",
     "pickthought.thought_popup.pages", "pickthought.thought_popup.page_viewport", "ui/size",
     "ui/widget/titlebar", "ui/uimanager", "ui/widget/verticalgroup", "ui/widget/verticalspan",
-    "ui/widget/container/widgetcontainer", "pickthought.thought_popup.center_widget",
+    "ui/widget/container/widgetcontainer", "pickthought.thought_popup.base_widget",
+    "pickthought.thought_popup.center_widget",
 }) do package.loaded[name] = nil end
 package.preload["pickthought.thought_popup.center_widget"] = nil
 package.preload["pickthought.thought_popup.pages"] = nil

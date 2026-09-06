@@ -31,6 +31,7 @@ local Event=require("ui/event")
 local PopupDiagnostic=require("pickthought.diagnostic")
 local PopupConfig=require("pickthought.thought_popup.popup_config")
 local ReviewComments=require("pickthought.review_comments")
+local Menus=require("pickthought.ui.menus")
 local EnsureOnline=require("pickthought.ensure_online")
 local _=Text.tr
 local unpack_args=unpack or table.unpack
@@ -44,13 +45,6 @@ local Plugin=WidgetContainer:extend{name="pickthought",is_doc_only=false,version
 -- (min_interval 0.45s)兜底,不在此叠加等待。
 local COMMENT_PREFETCH_STEP_DELAY=0.05
 local COMMENT_PREFETCH_FIRST_DELAY=0.6
-
-local ANNOTATION_STYLE_LABELS={
-    default="默认样式",
-    thin_solid="细实线",
-    thin_dashed="细虚线",
-    hidden="隐藏划线",
-}
 
 local function sanitize_saved_auth(store)
     local auth=store:auth()
@@ -115,66 +109,15 @@ end
 function Plugin:logged_in() local a=self.store:auth(); return a.api_key~="" and next(a.cookies or {})~=nil end
 function Plugin:require_login() if not self:logged_in() then self:info(_("Not logged in")); return false end return true end
 
-function Plugin:_sync_status_item()
-    if not (self.sync_task and self.sync_task:busy()) then return nil end
-    return {text="同步进行中…(点按查看进度)",callback=self:safe("sync_status",function() self:_show_active_sync_dialog() end)}
-end
-
-function Plugin:annotation_style_item()
-    return {text="划线样式（"..self:annotation_style_label().."）",
-        sub_item_table_func=function() return self:annotation_style_menu() end}
-end
-
-function Plugin:home_menu()
-    local items={}
-    items[#items+1]=self:_sync_status_item()
-    items[#items+1]={text="选择书籍同步想法",callback=self:safe("fm_sync",function()
-        self:pick_book("选择要同步的 EPUB(长按文件名选中)",function(path) self:sync_entry(path) end)
-    end)}
-    items[#items+1]={text="选择书籍绑定微信读书",callback=self:safe("fm_bind",function()
-        self:pick_book("选择要绑定的 EPUB(长按文件名选中)",function(path) self:bind_book(path) end)
-    end)}
-    items[#items+1]={text="选择书籍更多操作(重注 / 续拉 / 还原)",callback=self:safe("fm_actions",function()
-        self:pick_book("选择 EPUB(长按文件名选中)",function(path) self:book_actions(path) end)
-    end)}
-    items[#items+1]=self:annotation_style_item()
-    items[#items+1]={text="账户",sub_item_table_func=function() return self:account_menu() end}
-    items[#items+1]={text="设置",sub_item_table_func=function() return self:settings_menu() end}
-    items[#items+1]={text="更新",sub_item_table_func=function() return self:update_about_menu() end}
-    items[#items+1]={text="重置全部书籍",callback=self:safe("clear_all",function() self:clear_all_data() end)}
-    items[#items+1]={text="关于",callback=self:safe("about",function() self:show_about() end)}
-    return items
-end
-
-function Plugin:reader_menu()
-    local items={}
-    items[#items+1]=self:_sync_status_item()
-    items[#items+1]={text="绑定微信读书",callback=self:safe("bind",function() self:bind_book() end)}
-    items[#items+1]={text="同步划线与想法",callback=self:safe("sync_thoughts",function() self:sync_thoughts() end)}
-    local doc_path=self:current_doc_path()
-    local doc_bound=doc_path and Binding.get(self.store,doc_path)
-    if doc_bound then
-        items[#items+1]=self:annotation_style_item()
-        -- 多书聚合:任何一本有待同步章节都提供「继续拉取」,不只看第一本(P1#4);
-        -- 失败书/剩余未知书同样保留入口,不让聚合 0 吞掉失败态(评审五轮 P1#2)。
-        local agg=self:_aggregate_sync_state(doc_path)
-        if agg.pending>0 or agg.books_failed>0 or agg.books_unknown>0 then
-            items[#items+1]={text=self:_continue_sync_label(agg),
-                callback=self:safe("continue_sync",function() self:sync_entry(doc_path,"sync") end)}
-        end
-    end
-    if doc_path and self:_has_reinject_cache(doc_path) then
-        items[#items+1]={text="重新注入(用上次数据,离线)",callback=self:safe("reinject",function() self:reinject_with_clean(doc_path) end)}
-    end
-    if doc_bound or (doc_path and U.file_exists(doc_path..".orig")) then
-        items[#items+1]={text="重置本书(清数据+还原原版)",callback=self:safe("reset",function() self:reset_book_data(doc_path) end)}
-    end
-    items[#items+1]={text="账户",sub_item_table_func=function() return self:account_menu() end}
-    items[#items+1]={text="设置",sub_item_table_func=function() return self:settings_menu() end}
-    items[#items+1]={text="更新",sub_item_table_func=function() return self:update_about_menu() end}
-    items[#items+1]={text="重置全部书籍",callback=self:safe("clear_all",function() self:clear_all_data() end)}
-    items[#items+1]={text="关于",callback=self:safe("about",function() self:show_about() end)}
-    return items
+-- 菜单构造器已抽离到 pickthought/ui/menus.lua(需求 R4);此处只保留
+-- 入口分发与 book_actions 等流程需要的少量委托,菜单项构成见 menus.lua。
+function Plugin:home_menu() return Menus.home_menu(self) end
+function Plugin:reader_menu() return Menus.reader_menu(self) end
+function Plugin:settings_menu() return Menus.settings_menu(self) end
+function Plugin:annotation_style_menu() return Menus.annotation_style_menu(self) end
+function Plugin:update_about_menu() return Menus.update_about_menu(self) end
+function Plugin:annotation_style_label()
+    return Menus.annotation_style_label(self)
 end
 
 -- 文件管理器里直接选一本 EPUB,不必先打开书。
@@ -367,16 +310,6 @@ function Plugin:bind_search(path,on_bound)
     UIManager:show(d); d:onShowKeyboard()
 end
 
-function Plugin:account_menu()
-    local out={
-        {text=_("QR login"),callback=self:safe("login",function() self.auth_flow:start() end)},
-        {text=_("Manual credentials"),callback=self:safe("manual",function() self:manual_credentials() end)},
-        {text=_("Account status"),callback=function() local a=self.store:auth(); self:info((self:logged_in() and _("Logged in") or _("Not logged in")).."\n"..tostring(a.account.name or "").."\nVID: "..tostring(a.account.vid or "")) end},
-    }
-    if self:logged_in() then out[#out+1]={text=_("Clear account data"),callback=function() UIManager:show(ConfirmBox:new{text="清除当前账户信息？\n\n将退出微信读书账户。",ok_callback=function() self.auth_flow:cancel(); self.store:clear_auth(); self:toast(_("Logout")) end}) end} end
-    return out
-end
-
 function Plugin:manual_credentials()
     local d; d=InputDialog:new{title=_("Enter API key"),input=self.store:auth().api_key or "",buttons={{{text=_("Cancel"),id="close",callback=function() UIManager:close(d) end},{text=_("Confirm"),is_enter_default=true,callback=function() local key=U.trim(d:getInputText()); UIManager:close(d); self:manual_cookie(key) end}}}}; UIManager:show(d); d:onShowKeyboard()
 end
@@ -385,73 +318,12 @@ function Plugin:manual_cookie(key)
     local d; d=InputDialog:new{title=_("Enter Cookie header"),input="",buttons={{{text=_("Cancel"),id="close",callback=function() UIManager:close(d) end},{text=_("Confirm"),is_enter_default=true,callback=function() local jar=Cookies.parse_header(d:getInputText()); self.store:save_auth({api_key=key,cookies=jar,account={name="Manual",vid=jar.wr_vid or "",logged_at=os.time()}}); UIManager:close(d); self:toast(_("Logged in")) end}}}}; UIManager:show(d); d:onShowKeyboard()
 end
 
-function Plugin:settings_menu()
-    return {
-        {text="想法弹窗设置",sub_item_table_func=function() return self:thought_popup_menu() end},
-        {text="阅读时自动分批拉取后续章节",checked_func=function()
-            return BatchSync.auto_enabled(self.store:preferences())
-        end,callback=function()
-            local p=self.store:preferences()
-            p.auto_batch_sync_opt_in=not BatchSync.auto_enabled(p)
-            self.store:save_preferences(p)
-        end},
-        {text="同步时保持唤醒(防锁屏中断)",checked_func=function()
-            return self.store:preferences().sync_keep_awake~=false
-        end,callback=function()
-            local p=self.store:preferences()
-            local enabled=not (p.sync_keep_awake~=false)
-            p.sync_keep_awake=enabled
-            self.store:save_preferences(p)
-            -- 对进行中的任务即时生效,不必等下次同步。
-            if self.sync_task then self.sync_task:set_keep_awake(enabled) end
-        end},
-        {text="调试模式(记录详细同步日志)",checked_func=function()
-            return self.store:preferences().debug_mode==true
-        end,callback=function()
-            local p=self.store:preferences()
-            p.debug_mode=not (p.debug_mode==true)
-            self.store:save_preferences(p)
-            PopupDiagnostic.set_enabled(p.debug_mode==true)
-            self:toast(p.debug_mode and "调试模式已开启,下次同步生效"
-                or "调试模式已关闭,下次同步生效")
-        end},
-    }
-end
-
 function Plugin:annotation_style_label()
-    local key=AnnotationStyle.normalize_runtime_style(
-        self.store:preferences().annotation_style)
-    return ANNOTATION_STYLE_LABELS[key] or ANNOTATION_STYLE_LABELS.default
+    return Menus.annotation_style_label(self)
 end
 
 function Plugin:annotation_style_menu()
-    local choices={
-        {"default",ANNOTATION_STYLE_LABELS.default},
-        {"thin_solid",ANNOTATION_STYLE_LABELS.thin_solid},
-        {"thin_dashed",ANNOTATION_STYLE_LABELS.thin_dashed},
-        {"hidden",ANNOTATION_STYLE_LABELS.hidden},
-    }
-    local rows={}
-    for _,choice in ipairs(choices) do
-        local key,label=choice[1],choice[2]
-        rows[#rows+1]={text=label,radio=true,checked_func=function()
-            return AnnotationStyle.normalize_runtime_style(
-                self.store:preferences().annotation_style) == key
-        end,callback=function()
-            local p=self.store:preferences()
-            p.annotation_style=key
-            self.store:save_preferences(p)
-            local ok,err=self:apply_annotation_style()
-            if ok then
-                self:toast("划线样式已切换为："..label)
-            elseif self.ui and self.ui.document then
-                self:info("划线样式已保存,但当前页面未刷新：\n"..tostring(err or "未知错误"))
-            else
-                self:toast("划线样式已保存,下次打开书籍时生效")
-            end
-        end}
-    end
-    return rows
+    return Menus.annotation_style_menu(self)
 end
 
 function Plugin:_annotation_stylesheet()
@@ -493,10 +365,6 @@ function Plugin:apply_annotation_style()
     return true
 end
 
-local function popup_percent(value, fallback)
-    return math.floor(((tonumber(value) or fallback) * 100) + .5)
-end
-
 function Plugin:_thought_popup_preferences()
     return self.store:preferences().thoughts or {}
 end
@@ -507,52 +375,6 @@ function Plugin:_save_thought_popup_preferences(update)
     for key,value in pairs(update or {}) do preferences.thoughts[key]=value end
     self.store:save_preferences(preferences)
     return preferences.thoughts
-end
-
--- 评论缓存有效期文案(需求文档:关闭/5/10/30 分钟/1 小时)。
--- 注意:必须定义在 thought_popup_menu 之前(local 作用域,后置定义不可见)。
-local function comment_cache_label(value)
-    local ttl=ReviewComments.normalize_ttl(value)
-    if ttl==0 then return "关闭" end
-    if ttl<3600 then return tostring(math.floor(ttl/60)).." 分钟" end
-    return "1 小时"
-end
-
-function Plugin:thought_popup_menu()
-    local thoughts=self:_thought_popup_preferences()
-    local position=thoughts.position=="bottom" and "底部" or "居中"
-    local contrast=tonumber(thoughts.contrast) or 9
-    local contrast_label=contrast==9 and "纯黑（默认）" or ((contrast>0 and "+" or "")..tostring(contrast))
-    local font_label
-    if thoughts.font_size~=nil then
-        font_label="固定 "..tostring(math.floor(tonumber(thoughts.font_size) or 0))
-    else
-        local relative=tonumber(thoughts.font_size_relative) or 0
-        font_label=relative==0 and "跟随正文" or ((relative>0 and "+" or "")..tostring(relative))
-    end
-    return {
-        {text="位置："..position,callback=self:safe("thought_popup_position",function() self:show_thought_popup_position_picker() end)},
-        {text="高度："..tostring(popup_percent(thoughts.height_ratio,PopupConfig.DEFAULTS.height_ratio)).."%",callback=self:safe("thought_popup_height",function() self:show_thought_popup_height_picker() end)},
-        {text="宽度："..tostring(popup_percent(thoughts.width_ratio,PopupConfig.DEFAULTS.width_ratio)).."%",enabled_func=function() return self:_thought_popup_preferences().position~="bottom" end,callback=self:safe("thought_popup_width",function() self:show_thought_popup_width_picker() end)},
-        {text="字号："..font_label,callback=self:safe("thought_popup_font",function() self:show_thought_popup_font_size_picker() end)},
-        {text="字体对比度："..contrast_label,callback=self:safe("thought_popup_contrast",function() self:show_thought_popup_contrast_picker() end)},
-        {text="点击左右区域翻页",checked_func=function() return self:_thought_popup_preferences().tap_to_page==true end,callback=self:safe("thought_popup_tap",function()
-            local enabled=not (self:_thought_popup_preferences().tap_to_page==true)
-            self:_save_thought_popup_preferences({tap_to_page=enabled})
-            self:toast(enabled and "想法弹窗左右点击翻页已开启" or "想法弹窗左右点击翻页已关闭")
-        end)},
-        {text="点击中间区域打开评论",enabled_func=function() return self:_thought_popup_preferences().tap_to_page==true end,checked_func=function() return self:_thought_popup_preferences().comment_tap_open==true end,callback=self:safe("thought_popup_center_tap",function()
-            local enabled=not (self:_thought_popup_preferences().comment_tap_open==true)
-            self:_save_thought_popup_preferences({comment_tap_open=enabled})
-            self:toast(enabled and "点击中间区域打开评论已开启" or "点击中间区域打开评论已关闭")
-        end)},
-        {text="评论缓存："..comment_cache_label(thoughts.comment_cache_seconds),callback=self:safe("thought_popup_comment_cache",function() self:show_comment_cache_picker() end)},
-        {text="评论数获取提示",checked_func=function() return self:_thought_popup_preferences().comment_fetch_notice~=false end,callback=self:safe("thought_popup_fetch_notice",function()
-            local enabled=not (self:_thought_popup_preferences().comment_fetch_notice~=false)
-            self:_save_thought_popup_preferences({comment_fetch_notice=enabled})
-            self:toast(enabled and "评论数获取提示已开启" or "评论数获取提示已关闭")
-        end)},
-    }
 end
 
 function Plugin:show_comment_cache_picker()
@@ -605,11 +427,11 @@ end
 function Plugin:_show_thought_popup_ratio_picker(kind, title, minimum, maximum, fallback)
     local SpinWidget=require("ui/widget/spinwidget")
     local thoughts=self:_thought_popup_preferences()
-    local current=popup_percent(thoughts[kind],fallback)
+    local current=Menus.popup_percent(thoughts[kind],fallback)
     local spin=SpinWidget:new{
         value=current,value_min=minimum,value_max=maximum,
         value_step=PopupConfig.LIMITS.ratio_step,precision="%d%%",
-        default_value=popup_percent(fallback),
+        default_value=Menus.popup_percent(fallback),
         ok_text="确定",title_text=title,
         info_text=title.."占屏幕"..(kind=="width_ratio" and "宽度" or "高度").."的比例。",
         callback=function(widget)
@@ -684,33 +506,7 @@ function Plugin:show_thought_popup_contrast_picker()
 end
 
 function Plugin:update_about_menu()
-    local function update_preference(name)
-        return (self.store:preferences().update or {})[name]==true
-    end
-    return {
-        {text="检查更新（当前版本 · "..tostring(self.version).."）",callback=self:safe("update",function() self:check_update() end)},
-        {text="查看更新日志",callback=self:safe("update-log",function() self:show_update_log() end)},
-        {text="自动更新",checked_func=function() return update_preference("auto_update") end,
-            callback=function()
-                local p=self.store:preferences(); p.update=p.update or {}
-                p.update.auto_update=not (p.update.auto_update==true)
-                self.store:save_preferences(p)
-                self:toast(p.update.auto_update and "自动更新已开启" or "自动更新已关闭")
-                if p.update.auto_update==true or p.update.notify_update==true then
-                    UIManager:scheduleIn(0.1,function() self:maybe_auto_check_update(true) end)
-                end
-            end},
-        {text="通知有可用更新",checked_func=function() return update_preference("notify_update") end,
-            callback=function()
-                local p=self.store:preferences(); p.update=p.update or {}
-                p.update.notify_update=not (p.update.notify_update==true)
-                self.store:save_preferences(p)
-                self:toast(p.update.notify_update and "更新通知已开启" or "更新通知已关闭")
-                if p.update.auto_update==true or p.update.notify_update==true then
-                    UIManager:scheduleIn(0.1,function() self:maybe_auto_check_update(true) end)
-                end
-        end},
-    }
+    return Menus.update_about_menu(self)
 end
 
 -- 启动后静默检查更新(每 24h 一次,失败 6h 后重试)。

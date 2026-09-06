@@ -130,6 +130,7 @@ for _, name in ipairs({
     "ui/widget/verticalgroup", "ui/widget/verticalspan",
     "ui/widget/container/widgetcontainer",
     "pickthought.thought_popup.comments_view",
+    "pickthought.thought_popup.base_widget",
     "pickthought.thought_popup.center_widget", "pickthought.thought_popup.widget",
 }) do package.loaded[name] = nil end
 package.preload["pickthought.thought_popup.center_widget"] = nil

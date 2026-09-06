@@ -14,20 +14,18 @@ bottom/tap/Back gestures.
 
 local Blitbuffer = require("ffi/blitbuffer")
 local BottomContainer = require("ui/widget/container/bottomcontainer")
-local ButtonDialog = require("ui/widget/buttondialog")
 local CommentsView = require("pickthought.thought_popup.comments_view")
 local Config = require("pickthought.config")
 local Device = require("device")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
-local InfoMessage = require("ui/widget/infomessage")
-local InputContainer = require("ui/widget/container/inputcontainer")
+local BaseThoughtPopupWidget = require("pickthought.thought_popup.base_widget")
 local LineWidget = require("ui/widget/linewidget")
 local PageRenderer = require("pickthought.thought_popup.pages")
+local PopupDiagnostic = require("pickthought.diagnostic")
 local ScrollContainer = require("pickthought.thought_popup.scroll_container")
 local Size = require("ui/size")
-local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
 local VerticalGroup = require("ui/widget/verticalgroup")
@@ -41,7 +39,7 @@ local TOP_BORDER_SIZE = Size.line.thick
 local PADDING_TOP = Size.padding.large
 local PADDING_BOTTOM = Size.padding.large
 
-local ThoughtPopupWidget = InputContainer:extend{
+local ThoughtPopupWidget = BaseThoughtPopupWidget:extend{
     items = nil,
     doc_font_name = nil,
     doc_font_size = Screen:scaleBySize(18),
@@ -251,21 +249,6 @@ function ThoughtPopupWidget:onCloseWidget()
     end
 end
 
-function ThoughtPopupWidget:onClose()
-    -- 底部布局没有 X 按钮,Back 键承担同样的返回语义:
-    -- 评论视图第一次 Back 返回想法视图,再次才关闭。
-    self:_handleCloseAction()
-    return true
-end
-
---- 关闭请求入口:Back 键 / 横向滑动共用(底部布局的 X 等价操作)。
-function ThoughtPopupWidget:_handleCloseAction()
-    if self._comment_view then
-        return self:_backToThoughts()
-    end
-    UIManager:close(self)
-end
-
 function ThoughtPopupWidget:onTapClose(_, ges)
     if ges.pos:notIntersectWith(self.container.dimen) then
         -- 底部布局没有 X 按钮,点击弹窗外承担同样的返回语义:
@@ -302,106 +285,6 @@ function ThoughtPopupWidget:onHoldThought(_, ges)
     return true
 end
 
-function ThoughtPopupWidget:_findItemAtContentY(y)
-    local pieces = self._pages and self._pages.layout and self._pages.layout.pieces
-    if not pieces then return nil end
-    local item_idx = 0
-    -- items[1] 不渲染 meta 行时(底部评论视图的引用块),第 k 个 meta 块
-    -- 对应 items[k+1]:用偏移修正定位,否则长按评论会错位到前一条。
-    local meta_base = CommentsView.first_item_has_meta(self.items) and 0 or 1
-    for _, piece in ipairs(pieces) do
-        if piece.variant == "meta" then
-            item_idx = item_idx + 1
-        end
-        if piece.y and piece.piece_h and piece.y <= y and y < piece.y + piece.piece_h then
-            if piece.variant == "quote" then
-                return self.items and self.items[1]
-            end
-            local mapped = item_idx + meta_base
-            if item_idx >= 1 and self.items and mapped >= 1 and mapped <= #self.items then
-                return self.items[mapped]
-            end
-            return nil
-        end
-    end
-    return nil
-end
-
-function ThoughtPopupWidget:_showThoughtActionMenu(item)
-    local popup = self
-    -- 评论入口可用性(实施文档 §4):需要回调注入且该想法带 review_id;
-    -- 不可用时仍显示菜单项但置灰,让用户知道是数据缺少评论 ID。
-    local viewable = type(popup.on_view_comments) == "function"
-        and type(item) == "table"
-        and type(item.review_id) == "string"
-        and item.review_id ~= ""
-    local action_dialog
-    -- 评论视图里没有"评论的评论"(用户拍板 2026-09-06):评论是最后一层,
-    -- 菜单不再提供查看评论入口(评论层仍保留复制/二维码)。
-    local button_rows = {}
-    if not self._comment_view then
-        button_rows[#button_rows + 1] = {
-            {
-                text = _("查看评论"),
-                enabled = viewable,
-                callback = function()
-                    UIManager:close(action_dialog)
-                    popup:_openItemComments(item)
-                end,
-            },
-        }
-    end
-    button_rows[#button_rows + 1] = {
-        {
-            text = _("复制"),
-            callback = function()
-                UIManager:close(action_dialog)
-                popup:_copyThoughtContent(item)
-            end,
-        },
-        {
-            text = _("生成二维码"),
-            callback = function()
-                UIManager:close(action_dialog)
-                popup:_generateQRCode(item)
-            end,
-        },
-    }
-    action_dialog = ButtonDialog:new{
-        buttons = button_rows,
-    }
-    UIManager:show(action_dialog)
-end
-
---- 打开某条想法的评论:长按菜单"查看评论"与中间点击共用的链路。
---- 同步路径返回结果形态;nil 表示已进入异步联网等待,由 plugin 侧在
---- 加载完成后回调 popup:_enterComments。真机上回调抛错会被 KOReader
---- 事件循环吞掉,表现为"点击无反应";pcall 后至少给出提示,便于定位。
-function ThoughtPopupWidget:_openItemComments(item)
-    if type(self.on_view_comments) ~= "function" then return end
-    if type(item) ~= "table" or type(item.review_id) ~= "string"
-        or item.review_id == "" then
-        self:_showCommentNotice("这条想法缺少评论 ID")
-        return
-    end
-    logger.info("[撷思][ReviewComments] menu action",
-        "review_id=", tostring(item.review_id))
-    local call_ok, result = pcall(self.on_view_comments, item, self)
-    logger.info("[撷思][ReviewComments] callback done",
-        "call_ok=", tostring(call_ok),
-        "result=", type(result) == "table" and tostring(result.ok) or tostring(result))
-    if not call_ok then
-        self:_showCommentNotice("评论加载失败:" .. tostring(result):gsub("%c+", " "))
-        return
-    end
-    if result == nil then return end
-    if type(result) == "table" and result.ok then
-        self:_enterComments(item, result)
-    elseif type(result) == "table" then
-        self:_showCommentNotice(result.message or "评论加载失败")
-    end
-end
-
 --- 中间点击打开评论(需求 2026-09-06):点击位置命中想法 → 走与菜单
 --- "查看评论"相同的链路;未命中(条目间隙/空白)不动作。
 function ThoughtPopupWidget:_openCommentsAtGes(ges)
@@ -411,13 +294,6 @@ function ThoughtPopupWidget:_openCommentsAtGes(ges)
     local content_y = (ges.pos.y - scroll.dimen.y) + (scroll.scroll_offset or 0)
     local item = self:_findItemAtContentY(content_y)
     if item then self:_openItemComments(item) end
-end
-
-function ThoughtPopupWidget:_showCommentNotice(message)
-    UIManager:show(InfoMessage:new{
-        text = tostring(message or ""),
-        timeout = 3,
-    })
 end
 
 --- 进入评论视图(实施文档 §5):压栈想法视图状态,切换渲染内容。
@@ -477,38 +353,6 @@ function ThoughtPopupWidget:_backToThoughts()
     return true
 end
 
---- 高度可能变化的重建后的重绘(进/出评论视图、补数刷新)。
---- 底部弹窗底部锚定、高度随内容变:变矮时旧帧高出新帧的部分不在
---- container.dimen 里,按新区域局部刷新会给 e-ink 留下旧弹窗框的残影
---- (真机:评论视图退回想法视图后旧弹窗残留,多轮切换后多帧重叠)。
---- 高度变化时请求整屏局部刷新,由渲染栈重画整屏,残影连背景一起清掉;
---- 未变化(等高)时维持原来的局部刷新。
-function ThoughtPopupWidget:_applyContentAndRepaint()
-    local height_before = self.height
-    self:_applyContent()
-    -- 定位日志:残影排查期间记录每次重建的前后高度与刷新方式
-    logger.info("[撷思][ThoughtPopup] rebuild repaint",
-        "height_before=", tostring(height_before),
-        "height_after=", tostring(self.height),
-        "fullscreen=", tostring(self.height ~= height_before))
-    if self.height ~= height_before then
-        -- 高度变化:旧帧可能超出新帧,只标弹窗自己脏的话,弹窗把自己画小了,
-        -- 底下阅读器不会重画旧帧区域,帧缓冲里残留旧弹窗像素——整屏 refresh
-        -- 推到 e-ink 的仍是残影(真机已证)。必须标记全部窗口脏:阅读器把
-        -- 书页重画进帧缓冲,残影才被真正覆盖。
-        UIManager:setDirty("all", "partial")
-    else
-        UIManager:setDirty(self, "partial", self.container.dimen)
-    end
-end
-
---- 用当前 items 重建分页与布局(进入/返回评论视图共用)。
-function ThoughtPopupWidget:_applyContent()
-    self._pages:setContent(self.items, self.doc_font_name, self.doc_font_size,
-        self.doc_margins, self.height_ratio, nil, self.contrast)
-    self:_buildLayout()
-end
-
 --- 后台评论数补齐后刷新想法视图(meta 行"评论 N")。
 --- 评论视图下不动作(条目是同一张表,返回时自然可见);想法视图下
 --- 保留当前滚动位置,只重排重绘。
@@ -521,29 +365,13 @@ function ThoughtPopupWidget:refresh_comment_counts()
         and self._scroll_container.scroll_offset or 0
     self._restore_scroll_offset = scroll_before
     self:_applyContentAndRepaint()
-    -- 真机定位日志:评论数补齐后若出现滚动位置跳动,对比前后偏移即可锁定
-    logger.info("[撷思][ThoughtPopup] refresh_comment_counts",
-        "scroll_before=", tostring(scroll_before),
-        "scroll_after=", tostring(self._scroll_container
-            and self._scroll_container.scroll_offset or 0))
-end
-
--- 评论数懒加载(需求 2026-09-06):只补当前视口内的想法,翻页/滚动
--- 停下来 COMMENT_VIEWPORT_DEBOUNCE 秒后才触发,连续翻页只保留最后一次。
-local COMMENT_VIEWPORT_DEBOUNCE = 0.6
-
-function ThoughtPopupWidget:_onVisibleItemsChanged()
-    if type(self.on_visible_items_settled) ~= "function" then return end
-    if self._viewport_settle_cb then
-        UIManager:unschedule(self._viewport_settle_cb)
+    if PopupDiagnostic.is_enabled() then
+        -- 调试定位日志(仅 debug_mode):评论数补齐后若出现滚动位置跳动,对比前后偏移即可锁定
+        logger.info("[撷思][ThoughtPopup] refresh_comment_counts",
+            "scroll_before=", tostring(scroll_before),
+            "scroll_after=", tostring(self._scroll_container
+                and self._scroll_container.scroll_offset or 0))
     end
-    local cb = function()
-        self._viewport_settle_cb = nil
-        if self._comment_view then return end  -- 评论视图不补
-        self.on_visible_items_settled()
-    end
-    self._viewport_settle_cb = cb
-    UIManager:scheduleIn(COMMENT_VIEWPORT_DEBOUNCE, cb)
 end
 
 --- 当前视口内的想法条目(交宿主按缓存状态决定补哪些)。
@@ -555,36 +383,6 @@ function ThoughtPopupWidget:visible_thought_items()
     local viewport_h = tonumber(scroll.viewport_h)
     if not viewport_h or viewport_h < 1 then return {} end
     return CommentsView.items_in_view(self.items, pieces, top, top + viewport_h)
-end
-
-function ThoughtPopupWidget:_copyThoughtContent(item)
-    local text = tostring(item and item.content or "")
-    if text == "" then return end
-    if Device.hasClipboard and Device:hasClipboard() then
-        Device.input.setClipboardText(text)
-    end
-end
-
-function ThoughtPopupWidget:_generateQRCode(item)
-    local text = tostring(item and item.content or "")
-    if text == "" then return end
-    if Device.hasClipboard and Device:hasClipboard() then
-        Device.input.setClipboardText(text)
-    end
-    local QRMessage = require("ui/widget/qrmessage")
-    UIManager:show(QRMessage:new{
-        text = text,
-        width = Screen:getWidth(),
-        height = Screen:getHeight(),
-    })
-end
-
-function ThoughtPopupWidget:free(full)
-    WidgetContainer.free(self, full)
-end
-
-function ThoughtPopupWidget:_freeContentCaches()
-    self._pages:freeContentCaches()
 end
 
 return ThoughtPopupWidget

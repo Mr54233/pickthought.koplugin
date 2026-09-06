@@ -11,10 +11,11 @@ class DebugModeContractTests(unittest.TestCase):
         self.assertIn("debug_mode=false", store)
 
     def test_settings_menu_exposes_persistent_toggle(self):
-        main = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
-        self.assertIn('text="调试模式(记录详细同步日志)"', main)
-        self.assertIn("p.debug_mode=not (p.debug_mode==true)", main)
-        self.assertIn("self.store:save_preferences(p)", main)
+        # R4 之后设置菜单构造器在 pickthought/ui/menus.lua。
+        menus = (ROOT / "pickthought.koplugin/pickthought/ui/menus.lua").read_text(encoding="utf-8")
+        self.assertIn('text = "调试模式(记录详细同步日志)"', menus)
+        self.assertIn("p.debug_mode = not (p.debug_mode == true)", menus)
+        self.assertIn("plugin.store:save_preferences(p)", menus)
 
     def test_diagnostic_sampling_is_gated(self):
         task = (ROOT / "pickthought.koplugin/pickthought/sync_task.lua").read_text(encoding="utf-8")

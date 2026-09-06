@@ -7,21 +7,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class MenuContractTests(unittest.TestCase):
     def test_annotation_style_is_not_duplicated_in_settings(self):
-        source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
-        settings = source.split("function Plugin:settings_menu()", 1)[1].split(
-            "function Plugin:annotation_style_label()", 1
+        menus = (ROOT / "pickthought.koplugin/pickthought/ui/menus.lua").read_text(encoding="utf-8")
+        settings = menus.split("function M.settings_menu(", 1)[1].split(
+            "--- 划线样式运行时切换(单选)", 1
         )[0]
 
         self.assertNotIn("划线样式", settings)
         self.assertNotIn("annotation_style_menu", settings)
         self.assertEqual(
-            source.count("items[#items+1]=self:annotation_style_item()"),
+            menus.count("items[#items + 1] = M.annotation_style_item(plugin)"),
             2,
             "文件管理器和已绑定书籍的阅读器菜单应各保留一个入口",
         )
+        main = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
         self.assertIn(
             'self:list("划线样式",self:annotation_style_menu())',
-            source,
+            main,
             "文件管理器的书籍更多操作应保留样式入口",
         )
 
@@ -38,18 +39,16 @@ class MenuContractTests(unittest.TestCase):
         )
 
     def test_thought_popup_settings_replace_legacy_font_menu(self):
-        source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
-        settings = source.split("function Plugin:settings_menu()", 1)[1].split(
-            "function Plugin:annotation_style_label()", 1
-        )[0]
-
-        self.assertIn('text="想法弹窗设置"', settings)
-        self.assertIn("function Plugin:thought_popup_menu()", source)
-        self.assertNotIn("function Plugin:thought_font_menu()", source)
+        menus = (ROOT / "pickthought.koplugin/pickthought/ui/menus.lua").read_text(encoding="utf-8")
+        main = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
+        self.assertIn('text = "想法弹窗设置"', menus)
+        self.assertIn("function M.thought_popup_menu(plugin)", menus)
+        self.assertNotIn("thought_font_menu", menus)
+        self.assertNotIn("function Plugin:thought_popup_menu()", main)
         for label in ("位置：", "高度：", "宽度：", "字号：", "字体对比度：", "点击左右区域翻页"):
-            self.assertIn(label, source, f"想法弹窗设置缺少：{label}")
-        self.assertNotIn('text="恢复默认尺寸"', source, "恢复默认尺寸不应占用设置菜单入口")
-        self.assertIn("default_value=popup_percent(fallback)", source, "宽高调节页应提供原生默认值按钮")
+            self.assertIn(label, menus, f"想法弹窗设置缺少：{label}")
+        self.assertNotIn('text="恢复默认尺寸"', main, "恢复默认尺寸不应占用设置菜单入口")
+        self.assertIn("default_value=Menus.popup_percent(fallback)", main, "宽高调节页应提供原生默认值按钮")
 
         config = (ROOT / "pickthought.koplugin/pickthought/config.lua").read_text(encoding="utf-8")
         self.assertIn("width_ratio = 0.90", config)
@@ -57,7 +56,7 @@ class MenuContractTests(unittest.TestCase):
         self.assertIn("min_width_ratio = 0.60", config)
         self.assertIn("min_height_ratio = 0.50", config)
         self.assertIn("ratio_step = 5", config)
-        self.assertIn("value_step=PopupConfig.LIMITS.ratio_step", source)
+        self.assertIn("value_step=PopupConfig.LIMITS.ratio_step", main)
 
     def test_thought_popup_entry_uses_shared_config_and_document_cleanup(self):
         source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
@@ -73,9 +72,11 @@ class MenuContractTests(unittest.TestCase):
     def test_thought_popup_settings_include_comment_cache(self):
         # 想法评论查看(需求文档 2026-09-05):设置菜单必须有评论缓存入口,
         # 且选择器支持关闭/5/10/30 分钟/1 小时,关闭时清空当前书缓存。
-        # (2026-09-06:原用例误写在 unittest.main() 之后从未被执行,移回类内。)
+        # (2026-09-06:原用例误写在 unittest.main() 之后从未被执行,移回类内。
+        #  R4 后「评论缓存：」入口文案在 menus.lua,选择器仍在 main.lua。)
+        menus = (ROOT / "pickthought.koplugin/pickthought/ui/menus.lua").read_text(encoding="utf-8")
+        self.assertIn("评论缓存：", menus)
         source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
-        self.assertIn("评论缓存：", source)
         self.assertIn("function Plugin:show_comment_cache_picker()", source)
         for label in ('"关闭"', '"5 分钟"', '"10 分钟"', '"30 分钟（默认）"', '"1 小时"'):
             self.assertIn(label, source)
@@ -85,24 +86,29 @@ class MenuContractTests(unittest.TestCase):
     def test_thought_popup_wires_on_view_comments(self):
         # 弹窗只持有只读回调:main.lua 构造 options 时注入 on_view_comments,
         # 闭包捕获锚点解析出的 book_id;弹窗组件不得直接持有 store。
-        # (2026-09-06:原用例误写在 unittest.main() 之后从未被执行,移回类内。)
+        # (2026-09-06:原用例误写在 unittest.main() 之后从未被执行,移回类内。
+        #  R3 后菜单项与评论入口收敛到 base_widget.lua。)
         source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
         self.assertIn("options.on_view_comments=function(item,popup)", source)
         self.assertIn("self:_show_thought_comments(item,popup_book_id,popup)", source)
         popup_entry = (ROOT / "pickthought.koplugin/pickthought/thought_popup.lua").read_text(encoding="utf-8")
         self.assertIn("on_view_comments = opts.on_view_comments", popup_entry)
+        base = (ROOT / "pickthought.koplugin/pickthought/thought_popup/base_widget.lua").read_text(encoding="utf-8")
+        self.assertIn('_("查看评论")', base, "base_widget 缺少评论菜单项")
+        self.assertIn("enabled = viewable", base, "base_widget 缺少置灰逻辑")
+        self.assertIn("_enterComments", base)
+        self.assertIn("_backToThoughts", base)
         for widget in ("center_widget", "widget"):
             text = (ROOT / f"pickthought.koplugin/pickthought/thought_popup/{widget}.lua").read_text(encoding="utf-8")
-            self.assertIn('_("查看评论")', text, f"{widget} 缺少评论菜单项")
-            self.assertIn("enabled = viewable", text, f"{widget} 缺少置灰逻辑")
-            self.assertIn("_enterComments", text)
-            self.assertIn("_backToThoughts", text)
+            self.assertIn("_enterComments", text, f"{widget} 缺少进入评论视图")
+            self.assertIn("_backToThoughts", text, f"{widget} 缺少返回想法视图")
 
     def test_comment_counts_lazy_prefetch_wiring(self):
         # 评论数懒加载(需求 2026-09-06):视口稳定(翻页/滚动停下防抖)后
         # 只补当前可见条目。组件暴露 visible_thought_items/refresh_comment_counts
         # 和防抖回调;scroll_container 提供 on_offset_changed;布局缓存 key
         # 必须包含 comment_count,否则补数后不重排。
+        # (R3 后视口防抖 _onVisibleItemsChanged 收敛到 base_widget.lua。)
         source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
         self.assertIn("options.on_visible_items_settled=function()", source)
         self.assertIn(
@@ -113,11 +119,12 @@ class MenuContractTests(unittest.TestCase):
         )
         popup_entry = (ROOT / "pickthought.koplugin/pickthought/thought_popup.lua").read_text(encoding="utf-8")
         self.assertIn("on_visible_items_settled = opts.on_visible_items_settled", popup_entry)
+        base = (ROOT / "pickthought.koplugin/pickthought/thought_popup/base_widget.lua").read_text(encoding="utf-8")
+        self.assertIn("_onVisibleItemsChanged", base, "base_widget 缺少视口防抖")
+        self.assertIn("COMMENT_VIEWPORT_DEBOUNCE", base, "base_widget 缺少防抖节奏常量")
         for widget in ("center_widget", "widget"):
             text = (ROOT / f"pickthought.koplugin/pickthought/thought_popup/{widget}.lua").read_text(encoding="utf-8")
-            self.assertIn("function", text)
             self.assertIn("visible_thought_items", text, f"{widget} 缺少可见条目查询")
-            self.assertIn("_onVisibleItemsChanged", text, f"{widget} 缺少视口防抖")
             self.assertIn("refresh_comment_counts", text, f"{widget} 缺少刷新")
         scroll = (ROOT / "pickthought.koplugin/pickthought/thought_popup/scroll_container.lua").read_text(encoding="utf-8")
         self.assertIn("on_offset_changed", scroll)
@@ -127,10 +134,12 @@ class MenuContractTests(unittest.TestCase):
     def test_comment_fetch_notice_setting(self):
         # 用户拍板(2026-09-06):批量拉取的几秒里默认弹"正在获取评论数…"
         # 提示;想法弹窗设置提供开关,默认开(nil 视为开,向后兼容)。
-        source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
-        self.assertIn('text="评论数获取提示"', source)
-        self.assertIn("comment_fetch_notice~=false", source)
-        self.assertIn('"正在获取评论数…"', source)
+        # (R4 后设置项文案在 menus.lua,拉取流程与提示在 main.lua。)
+        menus = (ROOT / "pickthought.koplugin/pickthought/ui/menus.lua").read_text(encoding="utf-8")
+        self.assertIn('text = "评论数获取提示"', menus)
+        self.assertIn("comment_fetch_notice ~= false", menus)
+        main = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
+        self.assertIn('"正在获取评论数…"', main)
 
     def test_comment_prefetch_constants_declared_before_use(self):
         # 回归(2026-09-06 真机"想法弹窗打开失败 time.lua arithmetic on nil"):

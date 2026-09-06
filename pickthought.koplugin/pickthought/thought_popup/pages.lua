@@ -219,9 +219,11 @@ function PageRenderer:paginate()
 
     local content_h = math.max(1, y)
     local t2 = os.clock()
-    logger.info(string.format(
-        "[撷思][ThoughtPopup] paginated in %.1fms (blocks %.1fms) items=%d content_h=%d",
-        (t2 - t0) * 1000, (t1 - t0) * 1000, #self.items, content_h))
+    if PopupDiagnostic.is_enabled() then
+        logger.info(string.format(
+            "[撷思][ThoughtPopup] paginated in %.1fms (blocks %.1fms) items=%d content_h=%d",
+            (t2 - t0) * 1000, (t1 - t0) * 1000, #self.items, content_h))
+    end
     PopupDiagnostic.log("popup_paginate", {elapsed_ms=math.floor((t2-t0)*1000+0.5),
         blocks_ms=math.floor((t1-t0)*1000+0.5), items=#self.items, content_h=content_h})
     return {
