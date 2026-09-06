@@ -24,6 +24,10 @@ KOReader ≥ v2026.03(需要 `ffi/archiver` + `lua-ljsqlite3`)。
 2. 重启 KOReader
 3. 账户扫码登录 → 选书绑定 → 同步 → 点虚线看想法
 
+## 贡献
+
+欢迎 Issue 与 PR：提交规范、模块命名空间与本地检查清单见 [CONTRIBUTING.md](CONTRIBUTING.md)，发布流程见 [RELEASING.md](RELEASING.md)。
+
 ## 致谢
 
 衍生自 [miuread-koreader](https://github.com/miumiupy98-art/miuread-koreader)(同步框架/HTTP) 与 [weread.koplugin](https://github.com/finlater/weread.koplugin)(SQLite/弹窗)。基于 [AGPL-3.0](LICENSE)。

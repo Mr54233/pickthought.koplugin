@@ -47,6 +47,9 @@ jobs:
       - name: 敏感信息扫描
         run: python3 tools/check_secrets.py
 
+      - name: 语法检查工具脚本
+        run: python3 -m py_compile tools/*.py
+
       - name: 检查补丁格式
         shell: bash
         run: git diff --check

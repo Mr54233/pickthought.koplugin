@@ -39,6 +39,8 @@ luajit tests/run.lua   # 全绿才能提交
 - 不要使用没有前缀的裸标题,否则 `tools/release_notes.py` 无法分类,发版摘要会漏掉该提交。
 - 提交前检查 `git diff`、测试结果和 `git log`,不要改写已推送的提交历史;需要修正时追加规范提交。
 
+面向贡献者的完整规范(Issue/PR 要求、隐私、发版红线)见 `CONTRIBUTING.md`。提交前建议本地跑一遍强制检查:`luajit tests/run.lua`、`python3 tools/check_namespace.py`、`python3 tools/check_secrets.py`(三者均已接入 CI)。
+
 ## 真机调试(Kindle)
 
 - SSH:`ssh -p 2222 root@<kindle-ip>`(空密码)。设备锁屏会断网,亮屏才连得上。
