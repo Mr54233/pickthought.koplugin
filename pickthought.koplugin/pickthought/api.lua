@@ -93,20 +93,28 @@ end
 -- 网关的 Bearer key 短时效且已对大部分端点 403;数据面全部走 web 端
 -- (Cookie 鉴权)。登录态失效时用 wr_rt 续期一次(原 reader:renew 同款请求,
 -- set-cookie 由 http 层自动写回 jar),再重试原请求。
+-- 续期成败不看响应 body:真机实测(2026-09-06,长时间休眠后首次请求)
+-- 续期响应 body 携带 errCode=-2013/-12013 的运营提示("微信登录授权已过期,
+-- 继续购买需跳转…"),但 Set-Cookie 已正常轮换出新会话;post_json 对
+-- errCode≠0 会抛错,若据此判定失败就会跳过重试——用户拿着刚换好的新
+-- 会话仍看到一次"登录已过期"误报,第二次点击才恢复。因此只要 HTTP 交换
+-- 完成(无论 body)就放行重试,由重试给出真实结论:网络仍不通→如实报
+-- 网络错误;会话确实被吊销→如实报登录过期;轮换成功→重试直接成功。
 function Api:renew_session()
     if self._renewing then return false, "登录状态正在续期" end
     self._renewing = true
-    local ok, err = pcall(function()
-        local data = self.http:post_json(WEB .. "/web/login/renewal", {rq="%2Fweb%2Fbook%2Fread", ql=false},
+    local exchanged, exchange_err = pcall(function()
+        self.http:post_json(WEB .. "/web/login/renewal", {rq="%2Fweb%2Fbook%2Fread", ql=false},
             {headers={Origin=WEB, Referer=WEB .. "/", Accept="application/json, text/plain, */*"}, retries=2})
-        if type(data) ~= "table" then error("续期接口返回无效数据") end
     end)
     self._renewing = false
-    if ok then
+    if exchanged then
         logger.info("[撷思][Api] web session renewed")
-        return true
+    else
+        logger.warn("[撷思][Api] web renewal exchange error (retry will verify):",
+            U.first_line(tostring(exchange_err), 160))
     end
-    return false, tostring(err)
+    return true
 end
 
 function Api:_web_call(fn)
@@ -192,6 +200,38 @@ function Api:web_chapter_reviews(id, uid)
             .. "&chapterUid=" .. Protocol.escape(uid)
             .. "&listType=8&maxIdx=0&count=100&listMode=3&synckey=0",
             {retries=2, headers={Referer=Protocol.reader_url(id)}})
+    end)
+end
+
+-- 单条想法的评论列表(Web 端 /web/review/single,参数与上游 weread PR #106
+-- 的 Client:get_review_comments 对齐,需求见 docs/requirement-thought-comments)。
+-- 返回原始响应 table,归一化在 pickthought.review_comments 完成;
+-- review_id 为空时按实施文档契约直接返回结果形态的失败值,不发请求。
+-- 评论是用户点按触发的低频请求:独立限速作用域,冷却期 fail-fast 避免阻塞 UI。
+function Api:review_comments(review_id, options)
+    review_id = tostring(review_id or "")
+    if review_id == "" then
+        return { ok = false, error = "invalid_review_id" }
+    end
+    options = options or {}
+    return self:_web_call(function()
+        return self.http:get_json(WEB .. "/web/review/single?reviewId=" .. Protocol.escape(review_id)
+            .. "&commentsCount=" .. tostring(math.floor(tonumber(options.comments_count) or 50))
+            .. "&commentsDirection=0&likesCount=0&synckey=0", {
+            retries = 1,
+            timeout = {8, 15},
+            headers = {
+                Accept = "application/json, text/plain, */*",
+                Referer = WEB .. "/",
+            },
+            pacing_scope = "review-comments",
+            -- 评论数懒加载的预取批量会传 pacing_min_interval=0.2 压总时长;
+            -- 点击路径不传,维持 0.45。
+            min_interval = math.max(0.15, tonumber(options.pacing_min_interval) or 0.45),
+            pacing_jitter = 0.10,
+            rate_limit_scope = "review-comments",
+            rate_limit_fail_fast = true,
+        })
     end)
 end
 function Api:book(id) return self:call("/book/info", {bookId=tostring(id)}) end

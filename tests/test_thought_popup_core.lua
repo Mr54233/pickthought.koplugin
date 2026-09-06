@@ -148,6 +148,27 @@ T.case("想法弹窗内容构建保留引用作者点赞并支持 Unicode 清理
     T.eq(centered[1].fg, 9, "对比度零保留基础灰阶")
 end)
 
+T.case("meta 行条件渲染:全空不渲染,有评论数追加 评论 N", function()
+    local empty = ContentBuilder.build({{
+        abstract = "想法原文", author = "", content = "", likes_count = 0,
+    }}, {})
+    T.eq(#empty, 1, "作者/赞/评论数全空 → 只剩引用块,无孤行 meta")
+    T.eq(empty[1].variant, "quote")
+
+    local with_all = ContentBuilder.build({{
+        abstract = "", author = "甲", content = "正文",
+        likes_count = 2, comment_count = 5,
+    }}, {skip_quote = true})
+    T.eq(#with_all, 2, "meta + 正文两个块")
+    T.eq(with_all[1].text, "▸ 甲 · ♥ 2 · ❝ 5", "评论数按格式追加在赞后")
+
+    local anonymous = ContentBuilder.build({{
+        abstract = "", author = "", content = "正文", comment_count = 1,
+    }}, {skip_quote = true})
+    T.eq(anonymous[1].text, "▸ 微信读书用户 · ❝ 1",
+        "有评论数但无作者时仍渲染 meta 行并兜底作者名")
+end)
+
 T.case("想法弹窗 xtext 缓存可被显式释放", function()
     hard_newline = false
     local page = Paginator.paginateText("hello", {size = 20}, 400)

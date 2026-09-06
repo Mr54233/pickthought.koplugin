@@ -279,6 +279,7 @@ function Sync.run(deps)
         -- 本章是否已被实际注入/保存(用于区分「失败前有无有效产出」)。
         -- 失败且未贡献任何章节 → 单书致命 / 多书软失败;失败但已有贡献 → 部分提交。
         local book_contributed = false
+        local appended_this_chapter = nil
         local book_last_contrib_resumed = false  -- 最近一次贡献章节是否断点缓存命中(决定硬失败后是否部分提交)
         local book_failed, book_failed_index, book_failed_reason
         -- 想法缓存写入失败:本章划线已注入,但该书本轮未真正完成,须禁止生成 .completed
@@ -390,7 +391,9 @@ function Sync.run(deps)
                 progress_metrics.book_fetch_thoughts = book_fetch_thoughts
                 resource_budget:account(data)
                 local compact = SyncBudget.compact(data)
+                appended_this_chapter = nil
                 if (data.underline_count or 0) > 0 then
+                    appended_this_chapter = true
                     fetched[#fetched + 1] = {
                         uid = ch.uid, title = ch.title, book_id = bid,
                         underlines = compact.underlines, review_map = compact.review_map,
@@ -412,14 +415,15 @@ function Sync.run(deps)
                         -- 统一复合键 book_id+UID,与 epub_inject 的 thoughts_linked_by_uid 对齐
                         -- (多书场景同 uid 不串键,成功/失败数量才准)。见评审二轮 P1#5。
                         thought_save_failed[ck(ch.book_id, ch.uid)] = true
-                        -- 想法缓存写入失败:本章划线已加入 fetched 照常注入(不回滚已拉划线),
-                        -- 但本书本轮未真正完成——标记未完成、停在当前章、剩余章计入 pending、禁止
-                        -- 生成 .completed(评审十轮 P1#2)。下次同步从当前章续传:重注本章划线为幂等,
-                        -- 重试想法缓存写入;失败的章节不再因 pending=0 被误判为已完成。
+                        -- 想法缓存写入失败:本章不得进入本次注入(想法缺失会导致锚点
+                        -- 打开内容不完整,评审七轮 P1#2),从本批注入数据中移除本章;
+                        -- 已注入的前章保持不变。标记未完成、停在当前章、剩余章计入
+                        -- pending、禁止生成 .completed。下次同步从当前章续传并重试。
+                        if appended_this_chapter then table.remove(fetched) end
                         book_thought_incomplete = true
                         book_failed = true
                         book_failed_index = i
-                        book_failed_reason = "想法缓存写入失败,本章想法未保存(划线已注入,保留续传位置)"
+                        book_failed_reason = "想法缓存写入失败,本章想法未保存(保留续传位置)"
                         break
                     end
                 end
@@ -904,12 +908,23 @@ function Sync.run(deps)
         -- 按书归组写回各自缓存文件(命名空间键拆回纯 uid);单书即原文件原格式。
         local by_book = {}
         for key, val in pairs(map_store) do
-            local bid, uid = key, key
-            if multi_book then bid, uid = key:match("^(.-)/(.*)$") end
+            local bid, uid
+            if multi_book then
+                bid, uid = key:match("^(.-)/(.*)$")
+            else
+                -- 单书:ck(key) 是纯 uid,必须全部归到同一本书,否则每章各写
+                -- 一次同一个文件、后者覆盖前者,缓存永远只剩最后一章。
+                bid, uid = book_ids[1], key
+            end
             bid = bid or book_ids[1]
             uid = uid or key
             by_book[bid] = by_book[bid] or {}
             by_book[bid][uid] = val
+        end
+        -- 单书:即使本批全部未匹配也要落盘(签名+空 map),
+        -- 让"未命中"状态本身可复现,测试与断点语义一致。
+        if not multi_book and not by_book[book_ids[1]] then
+            by_book[book_ids[1]] = {}
         end
         for bid, m in pairs(by_book) do
             local cp = cache_path_for(bid)
@@ -934,6 +949,28 @@ function Sync.run(deps)
     end
 
     if #mapped == 0 then
+        -- 想法缓存写入失败导致的零注入(save_failures>0):这是"本书失败"
+        -- 而非"绑定不匹配",返回失败报告让用户看到真实原因,并且不注入、
+        -- 不替换书籍(零 mapped 时注入没有意义)。
+        if save_failures > 0 then
+            return with_batch_fields{
+                save_failures = save_failures,
+                thoughts_saved = thoughts_saved,
+                chapters_total = chapters_total_all,
+                chapters_pending = chapters_pending, next_index = next_index,
+                total_underlines = total_underlines,
+                total_thought_entries = total_thought_entries,
+                chapters_with_data = #fetched, chapters_matched = 0,
+                underlines_injected = 0, thoughts_injected = 0,
+                thoughts_failed = total_thought_entries,
+                unmatched = unmatched, unmatched_underlines = unmatched_underlines,
+                fetch_errors = hard_failures + partial_errors,
+                book_failed = true,
+                book_failed_reason = "想法缓存写入失败,本章想法未保存(保留续传位置)",
+                rate_limited = rate_limited or nil,
+                rate_limit_wait = rate_limit_wait,
+            }
+        end
         if not skip_resumed then
             return nil, "没有任何章节能匹配到本地书,请确认绑定的和本地打开的是同一本书"
         end

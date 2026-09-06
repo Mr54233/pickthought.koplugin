@@ -76,7 +76,7 @@ end)
 
 -- 评审五轮 P1#1:多书报告不推导单一连续章节范围,只展示聚合数量 + 逐书明细。
 T.case("多书报告不生成跨书伪范围", function()
-    local text = render{
+    local text = render({
         multi_book = true,
         book_count = 2,
         chapters_total = 12, chapters_pending = 5, chapters_processed = 3,
@@ -105,7 +105,7 @@ end)
 -- 评审六轮 P1#2(2026-08-20):多书部分失败时,报告不得显示「全部章节已处理完成」——
 -- 必须明确列出失败书/剩余未知书,与逐书明细保持一致。
 T.case("多书报告:一书成功、一书章节列表失败 → 不显示全部完成", function()
-    local text = render{
+    local text = render({
         multi_book = true,
         book_count = 2,
         chapters_total = 8, chapters_pending = 0, chapters_processed = 3,
@@ -127,7 +127,7 @@ T.case("多书报告:一书成功、一书章节列表失败 → 不显示全部
 end)
 
 T.case("多书报告完成时明确表示绑定书目已完成", function()
-    local text = render{
+    local text = render({
         multi_book = true, book_count = 3,
         chapters_total = 30, chapters_pending = 0, chapters_processed = 30,
         chapters_fetch_succeeded = 30, total_underlines = 0,

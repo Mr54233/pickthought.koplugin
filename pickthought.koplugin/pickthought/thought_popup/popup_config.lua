@@ -25,6 +25,7 @@ local function popupSettings(plugin)
         font_size_relative = clamp(settings.font_size_relative, -10, 5, 0),
         contrast = clamp(settings.contrast, -3, 9, 9),
         tap_to_page = settings.tap_to_page == true,
+        comment_tap_open = settings.comment_tap_open == true,
     }
 end
 
@@ -80,6 +81,7 @@ function M.build(plugin, pages, extra)
         width_ratio = popup_settings.width_ratio,
         contrast = popup_settings.contrast,
         tap_to_page = popup_settings.tap_to_page == true,
+        comment_tap_open = popup_settings.comment_tap_open == true,
         dialog = plugin and plugin.ui or nil,
         doc_font_name = layout.doc_font_name,
         doc_font_size = layout.doc_font_size,

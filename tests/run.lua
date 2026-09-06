@@ -21,6 +21,11 @@ function T.eq(got, want, label)
 end
 _G.T = T
 _G.STUBS = require("tests.stubs")
+-- 根目录 tests/ 优先于插件目录的历史测试副本(pickthought.koplugin/tests/
+-- 是 rebase 前的过期快照,存在 json 桩污染等旧问题),保证 CI 测的是当前测试。
+-- 注意模块名 tests.X 经 ./?.lua 才映射到 ./tests/X.lua;
+-- "tests/?.lua" 会错误展开成 tests/tests/X.lua。
+package.path = "./?.lua;" .. package.path
 
 local files = {
     "tests.test_smoke", "tests.test_epub_reader", "tests.test_annotation_style",
@@ -44,6 +49,11 @@ local files = {
     "tests.test_thought_popup_pages",
     "tests.test_thought_popup_widgets",
     "tests.test_thought_popup_config",
+    "tests.test_review_comments",
+    "tests.test_comments_view",
+    "tests.test_review_api",
+    "tests.test_ensure_online",
+    "tests.test_thought_comments_ui",
 }
 for _, name in ipairs(files) do
     local ok, err = pcall(require, name)

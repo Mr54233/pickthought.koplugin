@@ -398,6 +398,8 @@ function Thoughts.group_abstract(group)
 end
 
 -- 适配原生想法弹窗:保留 SQLite 顺序,并按 review_id 去重。
+-- item 额外携带 review_id(想法评论入口的定位键):去重规则不变,
+-- 空 review_id 保留为空字符串,UI 据此判断评论入口不可用。
 function Thoughts.popup_items(group)
     local items, seen = {}, {}
     for _, item in ipairs((group and group.texts) or {}) do
@@ -405,7 +407,7 @@ function Thoughts.popup_items(group)
         if content ~= "" then
             local author = clean(item.author)
             if author == "" then author = "微信读书用户" end
-            local review_id = tostring(item.review_id or "")
+            local review_id = tostring(item.review_id or ""):match("^%s*(.-)%s*$")
             local key = review_id ~= "" and ("id:" .. review_id) or (author .. "\0" .. content)
             if not seen[key] then
                 seen[key] = true
@@ -414,6 +416,7 @@ function Thoughts.popup_items(group)
                     author = author,
                     content = content,
                     likes_count = tonumber(item.likes or 0) or 0,
+                    review_id = review_id,
                 }
             end
         end

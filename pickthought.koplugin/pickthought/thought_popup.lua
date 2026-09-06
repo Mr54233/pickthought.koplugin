@@ -95,6 +95,9 @@ function M.show(opts)
         tap_to_page = opts.tap_to_page,
         dialog = opts.dialog,
         close_callback = opts.close_callback,
+        on_view_comments = opts.on_view_comments,
+        on_visible_items_settled = opts.on_visible_items_settled,
+        comment_tap_open = opts.comment_tap_open,
     }
     _pool[position] = popup
     UIManager:show(popup)

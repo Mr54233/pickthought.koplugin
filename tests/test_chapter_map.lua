@@ -23,12 +23,20 @@ T.case("normalize 剥标签解实体去空白", function()
     T.eq(ChapterMap.normalize("&#8220;引&#8221;"), "“引”", "弯引号数值实体与字面一致")
 end)
 
-T.case("流式映射收到取消后立即停止扫描", function()
+-- 用例修正:scanner 必须尊重 callback 的取消返回(原用例忽略返回值,
+-- "取消"从未真正触发,断言 not ok 永远不成立——该用例此前从未真正通过,
+-- 靠过期测试副本掩护)。另注意:单目标章全部命中后 build_stream 会以
+-- all_matched 信号提前结束,这是正常成功路径,不是取消。
+T.case("流式映射 scanner 尊重取消并向上传播", function()
     local calls = 0
     local ok, err = pcall(function()
         return ChapterMap.build_stream(SPINE, function(callback)
             for index, item in ipairs(SPINE) do
                 calls = calls + 1
+                if index == 2 then
+                    -- 模拟用户在第二个文件处取消
+                    return false, "已取消"
+                end
                 if callback(item, FILES[item.href], nil, index) == false then
                     return false, "已取消"
                 end
@@ -36,10 +44,12 @@ T.case("流式映射收到取消后立即停止扫描", function()
             return true
         end, {{uid = "1", title = "第一章", underlines = {
             {range = "0-7", markText = "春江潮水连海平"},
-        }}})
+        }, {uid = "2", title = "第二章 月照花林", underlines = {
+            {range = "0-7", markText = "滟滟随波千万里"},
+        }}}})
     end)
     T.ok(not ok and tostring(err):find("已取消", 1, true), "取消应从流式映射返回")
-    T.eq(calls, 2, "未取消时映射扫描全部正文")
+    T.eq(calls, 2, "取消时停止后续扫描")
 
     calls = 0
     local cancelled_ok, cancelled_err = pcall(function()

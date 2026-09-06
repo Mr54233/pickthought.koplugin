@@ -300,3 +300,63 @@ T.case("merge 查询失败时不写入或删除数据", function()
     T.eq(deletes, 0, "查询失败时不删除来源 range")
     Thoughts.clear_memory_cache()
 end)
+
+-- 想法评论查看(需求文档 2026-09-05):popup_items 必须携带 review_id。
+T.case("popup_items 保留 review_id,空值保留为空字符串", function()
+    SQ3._reset()
+    local store = store_with("/t/rvpreserve")
+    Thoughts.save(store, "b1", "5", {
+        { range = "0-7", texts = {
+            { content = "第一条", author = "甲", likes = 1, review_id = "r1", abstract = "" },
+            { content = "第二条", author = "乙", likes = 0, review_id = "", abstract = "" },
+        } },
+    })
+    local g = Thoughts.find(store, "b1", "5", "0-7")
+    local items = Thoughts.popup_items(g)
+    T.eq(#items, 2)
+    T.eq(items[1].review_id, "r1", "非空 review_id 原样保留")
+    T.eq(items[2].review_id, "", "缺失/空 review_id 归一化为空字符串")
+end)
+
+T.case("popup_items 相同 review_id 去重,不同 review_id 不合并", function()
+    SQ3._reset()
+    local store = store_with("/t/rvdup")
+    Thoughts.save(store, "b1", "5", {
+        { range = "0-7", texts = {
+            { content = "甲的观点", author = "甲", likes = 1, review_id = "same", abstract = "" },
+            { content = "甲的观点(转发)", author = "甲", likes = 1, review_id = "same", abstract = "" },
+            { content = "甲的观点(另一条)", author = "甲", likes = 1, review_id = "other", abstract = "" },
+        } },
+    })
+    local g = Thoughts.find(store, "b1", "5", "0-7")
+    local items = Thoughts.popup_items(g)
+    T.eq(#items, 2, "相同 review_id 只保留第一条,不同 review_id 不因作者+内容合并")
+    T.eq(items[1].review_id, "same")
+    T.eq(items[2].review_id, "other")
+end)
+
+T.case("popup_items review_id 首尾空白被清理", function()
+    SQ3._reset()
+    local store = store_with("/t/rvtrim")
+    Thoughts.save(store, "b1", "5", {
+        { range = "0-7", texts = {
+            { content = "想法", author = "甲", likes = 0, review_id = "  r9  ", abstract = "" },
+        } },
+    })
+    local g = Thoughts.find(store, "b1", "5", "0-7")
+    local items = Thoughts.popup_items(g)
+    T.eq(items[1].review_id, "r9", "首尾空白清理")
+end)
+
+T.case("popup_items 空内容想法被过滤,无法查看评论(TC-07)", function()
+    SQ3._reset()
+    local store = store_with("/t/rvempty")
+    Thoughts.save(store, "b1", "5", {
+        { range = "0-7", texts = {
+            { content = "", author = "甲", likes = 0, review_id = "r-has-id", abstract = "" },
+        } },
+    })
+    local g = Thoughts.find(store, "b1", "5", "0-7")
+    local items = Thoughts.popup_items(g)
+    T.eq(#items, 0, "空内容想法不进入弹窗列表")
+end)

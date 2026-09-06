@@ -173,19 +173,33 @@ function ContentBuilder.build(items, opts)
     end
 
     for item_index, item in ipairs(items) do
-        local meta = "▸ " .. tostring(item.author or "微信读书用户")
+        -- meta 行只在有话可说时渲染(作者/赞/评论数至少一项非空):
+        -- 底部评论视图的父想法引用块三项全空,不再多出孤行。
+        local author = trimText(tostring(item.author or ""))
         local likes = tonumber(item.likes_count) or 0
-        if likes > 0 then
-            meta = meta .. " · ♥ " .. tostring(likes)
+        local comment_count = tonumber(item.comment_count) or 0
+        if author ~= "" or likes > 0 or comment_count > 0 then
+            if author == "" then author = "微信读书用户" end
+            local meta = "▸ " .. author
+            if likes > 0 then
+                meta = meta .. " · ♥ " .. tostring(likes)
+            end
+            if comment_count > 0 then
+                -- ❝(U+275D,实心引号饰符,Dingbats 区):与 ♥ 同为实心图标,
+                -- 语义"说过的话"。刻意不用 4 字节 emoji——meta 块 XText
+                -- shaping 走 emoji 回退字形有 SIGBUS 前科(sanitize_meta 因此存在);
+                -- ✉ 候选已实测渲染正常但是空心的,与 ♥ 观感不配。
+                meta = meta .. " · ❝ " .. tostring(comment_count)
+            end
+            blocks[#blocks + 1] = {
+                kind = "paragraph",
+                variant = "meta",
+                text = meta,
+                fg = adjustedGray(9, opts.contrast),
+                spacing_before = item_index > 1 and 0.45 or nil,
+                spacing_after = 0.18,
+            }
         end
-        blocks[#blocks + 1] = {
-            kind = "paragraph",
-            variant = "meta",
-            text = meta,
-            fg = adjustedGray(9, opts.contrast),
-            spacing_before = item_index > 1 and 0.45 or nil,
-            spacing_after = 0.18,
-        }
 
         local content = trimText(item.content or "")
         if content ~= "" then

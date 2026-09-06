@@ -328,6 +328,17 @@ T.case("映射缓存:续批只匹配新章节", function()
     os.remove(cache_file)
     local U = require("pickthought.util")
 
+    -- 无划线章节不入缓存(新语义),fixture 让两章都有划线,才能验证"全部命中"。
+    local both_chapters = {
+        api = {chapters = function() return {data = {
+            {chapterUid = 1, title = "第一章", chapterIdx = 1},
+            {chapterUid = 2, title = "第二章", chapterIdx = 2}}} end},
+        annotations = {fetch_chapter = function(_, _, uid)
+            return {underlines = {{range = "0-7", markText = tostring(uid) == "1" and "春江潮水连海平" or "滟滟随波千万里"}},
+                review_map = {}, review_groups = {},
+                underline_count = 1, thought_count = 0, thought_entry_count = 0, errors = {}}
+        end},
+    }
     local reads1 = 0
     local deps1 = make_deps({
         map_cache_path = cache_file,
@@ -336,6 +347,7 @@ T.case("映射缓存:续批只匹配新章节", function()
             return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
         end,
     })
+    for k, v in pairs(both_chapters) do deps1[k] = v end
     local report1, err1 = Sync.run(deps1)
     T.ok(report1, "首次应成功: " .. tostring(err1))
     T.ok(reads1 > 0, "首次读取了正文文件")
@@ -350,11 +362,12 @@ T.case("映射缓存:续批只匹配新章节", function()
             return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
         end,
     })
+    for k, v in pairs(both_chapters) do deps2[k] = v end
     local report2, err2 = Sync.run(deps2)
     T.ok(report2, "续批应成功: " .. tostring(err2))
     T.eq(reads2, 0, "全部命中映射缓存,零文件读取")
-    T.eq(report2.injected, 1, "缓存映射照常注入")
-    T.eq(report2.chapters_matched, 1, "匹配章数一致")
+    T.eq(report2.injected, 2, "缓存映射照常注入(两章都有划线)")
+    T.eq(report2.chapters_matched, 2, "匹配章数一致")
 
     -- 算法版本变化必须让缓存整体作废,否则旧算法的失败结论永久生效
     local ChapterMap = require("pickthought.chapter_map")
@@ -673,7 +686,9 @@ T.case("章节部分拉取失败也不能推进游标", function()
     T.eq(#calls.injected.mapped, 1, "不注入部分失败章节")
 end)
 
-T.case("首个硬失败立即停在失败章节", function()
+-- 评审四轮 P1#3(已接受设计):按书连续 3 章硬失败熔断,避免逐章磨完全书;
+-- 首个失败章节的续传游标由熔断状态保留(见「缓存命中后失败仍停在失败章节」)。
+T.case("连续硬失败熔断且失败消息带真实错误", function()
     local rows = {}
     for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local fetch_count = 0
@@ -684,9 +699,9 @@ T.case("首个硬失败立即停在失败章节", function()
         },
     })
     local report, err = Sync.run(deps)
-    T.ok(report == nil and tostring(err):find("划线拉取失败", 1, true), "失败报错: " .. tostring(err))
-    T.ok(tostring(err):find("network request failed", 1, true), "失败消息必须带真实错误: " .. tostring(err))
-    T.eq(fetch_count, 1, "首个失败即停止,避免跨过连续游标")
+    T.ok(report == nil and tostring(err):find("network request failed", 1, true),
+        "失败报错: " .. tostring(err))
+    T.eq(fetch_count, 3, "连续 3 章熔断,不逐章磨完全书")
     T.eq(calls.injected, nil, "熔断后不注入")
 end)
 
@@ -890,12 +905,19 @@ T.case("多书同步入口:从 Binding.list 取 book_ids + 函数式 map 缓存(
             }}
         end},
     })
-    deps.map_cache_path = function(bid) return "/cache/" .. bid .. "/sync-cache/map.json" end
+    -- 生产环境路径来自 store:book_dir(自带 mkdir);测试用真实临时目录复刻该前提。
+    local U = require("pickthought.util")
+    -- 每书一个平铺文件(tests/ 目录真实存在;子目录在 lfs no-op 桩下建不出来)
+    deps.map_cache_path = function(bid)
+        return "tests/.tmp_mapcache_" .. tostring(bid) .. ".json"
+    end
     local report, err = Sync.run(deps)
     T.ok(report, "入口多书聚合应成功: " .. tostring(err))
     T.eq(report.chapters_total, 4, "两本各 2 章=4")
     T.ok(report.per_book["b1"] and report.per_book["b2"], "per_book 两本都在")
     T.eq(#calls.injected.mapped, 2, "两本各有 1 章有划线,合并注入 2 章")
+    os.remove("tests/.tmp_mapcache_b1.json")
+    os.remove("tests/.tmp_mapcache_b2.json")
 end)
 
 T.case("多书同步按书记录续传游标 per_book(P1#5)", function()
@@ -1384,4 +1406,188 @@ T.case("自适应资源预算停在章节边界并保留续传游标", function(
     T.eq(report.next_index, 2, "下一次从第二章继续")
     T.ok(tostring(report.batch_budget_reason):find("想法", 1, true), "报告记录预算原因")
     T.eq(#calls.injected.mapped, 1, "预算停止前的章节正常注入")
+end)
+
+
+-- ===== 以下用例自 pickthought.koplugin/tests 旧副本合并移植(2026-09-05) =====
+
+T.case("多书进度回调按顺序携带当前书 ID", function()
+    local deps, calls = make_deps({
+        book_ids = {"b001", "b002"},
+        api = {chapters = function(_, bid)
+            return {data = {
+                {chapterUid = 1, title = "第一章(" .. tostring(bid) .. ")", chapterIdx = 1},
+                {chapterUid = 2, title = "第二章(" .. tostring(bid) .. ")", chapterIdx = 2},
+            }}
+        end},
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "多书同步应成功: " .. tostring(err))
+    local chapter_events, fetch_events = {}, {}
+    for _, event in ipairs(calls.progress) do
+        if event.phase == "chapters" then chapter_events[#chapter_events + 1] = event end
+        if event.phase == "fetch" then fetch_events[#fetch_events + 1] = event end
+    end
+    T.eq(#chapter_events, 2, "两本书各产生章节列表进度")
+    T.eq(chapter_events[1].book_id, "b001", "第一本章节列表进度带书 ID")
+    T.eq(chapter_events[2].book_id, "b002", "第二本章节列表进度带书 ID")
+    T.eq(#fetch_events, 8, "两本书各两章在开始/完成时产生拉取进度")
+    T.eq(fetch_events[1].book_id, "b001", "第一本拉取进度带书 ID")
+    T.eq(fetch_events[5].book_id, "b002", "第二本拉取进度带书 ID")
+    T.eq(fetch_events[5].metrics.book_fetch_underlines, 0, "切换第二本时局部划线计数清零")
+    T.eq(fetch_events[6].metrics.book_fetch_underlines, 1, "第二本局部划线计数独立累计")
+end)
+
+T.case("想法缓存写入失败不计入注入成功", function()
+    local deps = make_deps({save_thoughts = function() return nil end})
+    local report, err = Sync.run(deps)
+    T.ok(report, "同步仍应完成: " .. tostring(err))
+    T.eq(report.save_failures, 1, "记录想法缓存失败章节")
+    T.eq(report.thoughts_injected, 0, "不可打开的想法不计成功")
+    T.eq(report.thoughts_failed, 1, "不可打开的想法计入失败")
+end)
+
+T.case("想法缓存写入失败保留续传位置且不生成完成标记", function()
+    -- 评审十轮 P1#2:本批最后一章想法缓存写入失败时,划线已注入,但本书未完成——
+    -- 须保留当前章续传位置、pending 非 0、标记想法写入未完成,使 sync_task(其 .completed
+    -- 门禁为「not pb.failed 且 pending==0」)不会生成 .completed,下次同步从失败章续传。
+    local rows = {}
+    for i = 1, 3 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
+    local deps = make_deps({
+        api = {chapters = function() return {data = rows} end},
+        annotations = {
+            fetch_chapter = function(_, _, uid)
+                if tostring(uid) == "3" then
+                    return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                        review_map = {["0-7"] = {{content = "好句", author = "甲"}}},
+                        review_groups = {{range = "0-7", texts = {{content = "好句", author = "甲"}}}},
+                        underline_count = 1, thought_count = 1, thought_entry_count = 1, errors = {}}
+                end
+                return {underlines = {}, review_map = {}, review_groups = {},
+                    underline_count = 0, thought_count = 0, thought_entry_count = 0, errors = {}}
+            end,
+        },
+        save_thoughts = function() return nil, "磁盘满" end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "应部分成功(划线已注入): " .. tostring(err))
+    T.eq(report.save_failures, 1, "记录想法缓存失败")
+    local pb = report.per_book and report.per_book["b001"]
+    T.ok(pb, "存在逐书状态")
+    T.eq(pb.failed, true, "本书标记未完成(禁止 .completed)")
+    T.eq(pb.thought_save_incomplete, true, "想法写入失败标记")
+    T.eq(pb.next_index, 3, "续传游标停在末章(失败章)")
+    T.eq(pb.pending, 1, "末章想法待重试,pending=1")
+    T.eq(report.chapters_pending, 1, "聚合 pending=1")
+end)
+
+T.case("想法缓存写失败计入 save_failures 不计入 thoughts_saved", function()
+    local deps, _ = make_deps({
+        save_thoughts = function() return nil, "磁盘满" end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "应成功: " .. tostring(err))
+    T.eq(report.thoughts_saved, 0, "写失败不算保存成功")
+    T.eq(report.save_failures, 1, "写失败计数")
+end)
+
+T.case("想法缓存失败按复合键扣除,多书同 uid 不串", function()
+    -- 评审十轮 P1#2:两本微信读书书共享 chapter_uid=1,仅 A 本想法缓存写入失败。
+    -- 扣除须用 book_id+uid 复合键,不能把 B 本成功想法错计为失败、也不能漏扣 A 本失败想法
+    -- (epub_inject 的 thoughts_linked_by_uid 已按复合键统计,sync.lua 扣除侧须对齐)。
+    local rows = {}
+    for i = 1, 2 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
+    local deps, calls = make_deps({
+        book_ids = {"A", "B"},
+        api = {chapters = function() return {data = rows} end},
+        annotations = {
+            fetch_chapter = function(_, bid, uid)
+                local n = tonumber(uid)
+                if tostring(bid) == "A" and n == 1 then
+                    return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                        review_map = {["0-7"] = {{content = "A句", author = "甲"}}},
+                        review_groups = {{range = "0-7", texts = {{content = "A句", author = "甲"}}}},
+                        underline_count = 1, thought_count = 1, thought_entry_count = 1, errors = {}}
+                elseif tostring(bid) == "B" and n == 1 then
+                    return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                        review_map = {["0-7"] = {{content = "B句", author = "乙"}}},
+                        review_groups = {{range = "0-7", texts = {{content = "B句", author = "乙"}}}},
+                        underline_count = 1, thought_count = 1, thought_entry_count = 1, errors = {}}
+                end
+                return {underlines = {}, review_map = {}, review_groups = {},
+                    underline_count = 0, thought_count = 0, thought_entry_count = 0, errors = {}}
+            end,
+        },
+        save_thoughts = function(bid, uid)
+            if tostring(bid) == "A" and tostring(uid) == "1" then return nil, "磁盘满" end
+            return 1
+        end,
+        inject = function(src, book_id, mapped, dest, options)
+            -- 桩按 mapped 真实推导复合键统计(与 epub_inject 一致):
+            -- A/1 因想法缓存写入失败被移出注入,只有 B/1 会被统计。
+            local linked, by_uid = 0, {}
+            for _, m in ipairs(mapped) do
+                local key = tostring(m.book_id) .. "/" .. tostring(m.chapter_uid)
+                by_uid[key] = (by_uid[key] or 0) + 1
+                linked = linked + (m.thought_entry_count or 1)
+            end
+            return {injected = #mapped, marks = #mapped, unmatched = {}, quote_aligned = #mapped,
+                dropped = 0, underlines_resolved = #mapped, thoughts_linked = linked,
+                thoughts_linked_by_uid = by_uid, merges = {}}
+        end,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "多书应部分成功: " .. tostring(err))
+    T.eq(report.save_failures, 1, "只 A 本第 1 章想法缓存失败")
+    -- 复合键扣除:A 本失败想法被扣,B 本成功想法保留 → 注入成功想法 = 2 - 1 = 1
+    T.eq(report.thoughts_injected, 1, "按复合键扣除后只计 B 本成功想法")
+    T.eq(report.thoughts_failed, 1, "A 本失败想法计入失败")
+    local pbA = report.per_book and report.per_book["A"]
+    T.ok(pbA and pbA.thought_save_incomplete, "A 本标记想法写入未完成(禁止 .completed)")
+end)
+
+T.case("断点缓存命中不复位熔断计数", function()
+    -- 缓存命中的章没有划线(不形成「贡献」),故不会触发「贡献后硬失败即停」分支;
+    -- 连续硬失败计数不被缓存命中清零,3 次真实失败后熔断(评审四轮 P1#3 熔断语义)。
+    local rows = {}
+    for i = 1, 6 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
+    local fetch_calls = 0
+    local deps = make_deps({
+        api = {chapters = function() return {data = rows} end},
+        annotations = {
+            fetch_chapter = function(_, _, uid)
+                fetch_calls = fetch_calls + 1
+                local n = tonumber(uid)
+                if n % 2 == 0 then
+                    -- 偶数章:断点缓存命中但无划线(不形成贡献,不触发即停分支)
+                    return {underlines = {}, review_map = {}, review_groups = {},
+                        resumed = true, underline_count = 0, thought_count = 0,
+                        thought_entry_count = 0, errors = {}}
+                end
+                error("network request failed")
+            end,
+        },
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil and tostring(err):find("连续", 1, true),
+        "缓存命中(无贡献)穿插的连续网络失败仍应熔断: " .. tostring(err))
+    T.ok(tostring(err):find("network request failed", 1, true), "熔断消息带真实错误")
+    T.eq(fetch_calls, 5, "第 5 章(第 3 次真实失败)后中止")
+end)
+
+T.case("连续硬失败触发断网熔断", function()
+    local rows = {}
+    for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
+    local fetch_count = 0
+    local deps, calls = make_deps({
+        api = {chapters = function() return {data = rows} end},
+        annotations = {
+            fetch_chapter = function() fetch_count = fetch_count + 1; error("network request failed") end,
+        },
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report == nil and tostring(err):find("连续", 1, true), "熔断报错: " .. tostring(err))
+    T.ok(tostring(err):find("network request failed", 1, true), "熔断消息必须带真实错误: " .. tostring(err))
+    T.eq(fetch_count, 3, "连续 3 章失败即中止,不磨完全书")
+    T.eq(calls.injected, nil, "熔断后不注入")
 end)
