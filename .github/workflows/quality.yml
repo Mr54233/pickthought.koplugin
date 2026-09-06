@@ -41,6 +41,12 @@ jobs:
       - name: 运行 Python 工具测试
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
+      - name: 检查模块命名空间
+        run: python3 tools/check_namespace.py
+
+      - name: 敏感信息扫描
+        run: python3 tools/check_secrets.py
+
       - name: 检查补丁格式
         shell: bash
         run: git diff --check
