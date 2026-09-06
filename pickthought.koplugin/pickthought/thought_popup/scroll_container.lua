@@ -45,6 +45,12 @@ local ScrollContainer = InputContainer:extend{
     -- Page steps land only on boundaries so a line is never split across pages.
     boundaries = nil,
     pages = nil,            -- page start list (computed from boundaries + viewport_h)
+    -- 可选:滚动位置变化(拖动 scrollBy/翻页 _setOffset)后通知宿主,
+    -- 供评论数懒加载做"视口稳定后补当前可见条目"的触发点(宿主侧防抖)。
+    on_offset_changed = nil,
+    -- 可选:三分区模式下中间 tap 回调宿主(中间点击打开评论,评论数懒加载
+    -- 需求)。nil = 保持左右二分(评论视图/未开启时宿主不传)。
+    on_tap_center = nil,
 }
 
 function ScrollContainer:init()
@@ -156,6 +162,7 @@ function ScrollContainer:scrollBy(delta)
     if new_offset ~= self.scroll_offset then
         self.scroll_offset = new_offset
         self:_updateScrollBar()
+        if self.on_offset_changed then pcall(self.on_offset_changed) end
         if self.dialog then
             UIManager:setDirty(self.dialog, function()
                 return "partial", self.dimen
@@ -173,6 +180,7 @@ function ScrollContainer:_setOffset(new_offset)
     if new_offset ~= self.scroll_offset then
         self.scroll_offset = new_offset
         self:_updateScrollBar()
+        if self.on_offset_changed then pcall(self.on_offset_changed) end
         if self.dialog then
             UIManager:setDirty(self.dialog, function()
                 return "partial", self.dimen
@@ -204,6 +212,19 @@ end
 
 --- Tap left half to page up, right half to page down (mirrored UI flips).
 function ScrollContainer:onTapScrollText(arg, ges)
+    -- 三分区(评论数懒加载需求):左 1/3 上一页,中 1/3 回调宿主打开
+    -- 命中想法的评论,右 1/3 下一页;未启用(on_tap_center 为 nil,
+    -- 评论视图/未开启)时保持左右二分。
+    if self.on_tap_center then
+        local rel = ges.pos.x / Screen:getWidth()
+        if rel < 1 / 3 then
+            self:scrollToPage(-1)
+            return true
+        elseif rel < 2 / 3 then
+            self.on_tap_center(ges)
+            return true
+        end
+    end
     if BD.flipIfMirroredUILayout(ges.pos.x < Screen:getWidth() / 2) then
         self:scrollToPage(-1)
     else

@@ -63,11 +63,14 @@ end
 local function itemsKey(items)
     local parts = {}
     for _, item in ipairs(items or {}) do
-        parts[#parts + 1] = string.format("%s|%s|%s|%d",
+        parts[#parts + 1] = string.format("%s|%s|%s|%d|%d",
             tostring(item.abstract or ""),
             tostring(item.author or ""),
             tostring(item.content or ""),
-            tonumber(item.likes_count) or 0)
+            tonumber(item.likes_count) or 0,
+            -- comment_count 参与 key:后台补齐评论数后 meta 行文本变化,
+            -- 必须让 setContent 判定 key 变化并重排,否则刷了也看不到。
+            tonumber(item.comment_count) or 0)
     end
     return table.concat(parts, "\n")
 end

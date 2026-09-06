@@ -49,6 +49,11 @@ local files = {
     "tests.test_thought_popup_pages",
     "tests.test_thought_popup_widgets",
     "tests.test_thought_popup_config",
+    "tests.test_review_comments",
+    "tests.test_comments_view",
+    "tests.test_review_api",
+    "tests.test_ensure_online",
+    "tests.test_thought_comments_ui",
 }
 for _, name in ipairs(files) do
     local ok, err = pcall(require, name)

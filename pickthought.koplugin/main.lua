@@ -30,10 +30,20 @@ local AnnotationStyle=require("pickthought.annotation_style")
 local Event=require("ui/event")
 local PopupDiagnostic=require("pickthought.diagnostic")
 local PopupConfig=require("pickthought.thought_popup.popup_config")
+local ReviewComments=require("pickthought.review_comments")
+local EnsureOnline=require("pickthought.ensure_online")
 local _=Text.tr
 local unpack_args=unpack or table.unpack
 local source=debug.getinfo(1,"S").source:gsub("^@",""); local ROOT=source:match("^(.*)/main%.lua$") or "."
 local Plugin=WidgetContainer:extend{name="pickthought",is_doc_only=false,version=Config.VERSION}
+
+-- 评论数懒加载节奏(评论数懒加载需求 2026-09-06)。必须声明在文件头部:
+-- _show_thought_href 在这些 local 声明之前就会用到(教训同 check_exists=nil,
+-- 2026-09-06 真机"想法弹窗打开失败 time.lua arithmetic on nil"即此)。
+-- STEP_DELAY 只是步骤间让出输入的小间隙,请求节奏由 HTTP 层限速
+-- (min_interval 0.45s)兜底,不在此叠加等待。
+local COMMENT_PREFETCH_STEP_DELAY=0.05
+local COMMENT_PREFETCH_FIRST_DELAY=0.6
 
 local ANNOTATION_STYLE_LABELS={
     default="默认样式",
@@ -499,6 +509,15 @@ function Plugin:_save_thought_popup_preferences(update)
     return preferences.thoughts
 end
 
+-- 评论缓存有效期文案(需求文档:关闭/5/10/30 分钟/1 小时)。
+-- 注意:必须定义在 thought_popup_menu 之前(local 作用域,后置定义不可见)。
+local function comment_cache_label(value)
+    local ttl=ReviewComments.normalize_ttl(value)
+    if ttl==0 then return "关闭" end
+    if ttl<3600 then return tostring(math.floor(ttl/60)).." 分钟" end
+    return "1 小时"
+end
+
 function Plugin:thought_popup_menu()
     local thoughts=self:_thought_popup_preferences()
     local position=thoughts.position=="bottom" and "底部" or "居中"
@@ -522,7 +541,49 @@ function Plugin:thought_popup_menu()
             self:_save_thought_popup_preferences({tap_to_page=enabled})
             self:toast(enabled and "想法弹窗左右点击翻页已开启" or "想法弹窗左右点击翻页已关闭")
         end)},
+        {text="点击中间区域打开评论",enabled_func=function() return self:_thought_popup_preferences().tap_to_page==true end,checked_func=function() return self:_thought_popup_preferences().comment_tap_open==true end,callback=self:safe("thought_popup_center_tap",function()
+            local enabled=not (self:_thought_popup_preferences().comment_tap_open==true)
+            self:_save_thought_popup_preferences({comment_tap_open=enabled})
+            self:toast(enabled and "点击中间区域打开评论已开启" or "点击中间区域打开评论已关闭")
+        end)},
+        {text="评论缓存："..comment_cache_label(thoughts.comment_cache_seconds),callback=self:safe("thought_popup_comment_cache",function() self:show_comment_cache_picker() end)},
+        {text="评论数获取提示",checked_func=function() return self:_thought_popup_preferences().comment_fetch_notice~=false end,callback=self:safe("thought_popup_fetch_notice",function()
+            local enabled=not (self:_thought_popup_preferences().comment_fetch_notice~=false)
+            self:_save_thought_popup_preferences({comment_fetch_notice=enabled})
+            self:toast(enabled and "评论数获取提示已开启" or "评论数获取提示已关闭")
+        end)},
     }
+end
+
+function Plugin:show_comment_cache_picker()
+    local ButtonDialog=require("ui/widget/buttondialog")
+    local dialog
+    local function choose(seconds,label)
+        UIManager:close(dialog)
+        self:_save_thought_popup_preferences({comment_cache_seconds=seconds})
+        -- 关闭时清空当前书缓存表(实施文档 §8 #6);文件管理器中无当前书
+        -- 时跳过,残留条目会按各自过期时间自然失效。
+        if seconds==0 then
+            local path=self:current_doc_path()
+            local bound=path and Binding.get(self.store,path)
+            if bound and bound.book_id then
+                pcall(function()
+                    ReviewComments.Cache.new{
+                        path=self.store:book_dir(bound.book_id).."/review_comments.db",
+                    }:clear()
+                end)
+            end
+        end
+        self:toast("评论缓存已设为"..label)
+    end
+    dialog=ButtonDialog:new{title="想法评论缓存",buttons={
+        {{text="关闭",callback=function() choose(0,"关闭") end}},
+        {{text="5 分钟",callback=function() choose(300,"5 分钟") end}},
+        {{text="10 分钟",callback=function() choose(600,"10 分钟") end}},
+        {{text="30 分钟（默认）",callback=function() choose(1800,"30 分钟") end}},
+        {{text="1 小时",callback=function() choose(3600,"1 小时") end}},
+    }}
+    UIManager:show(dialog)
 end
 
 function Plugin:show_thought_popup_position_picker()
@@ -1974,6 +2035,17 @@ function Plugin:_show_thought_href(href)
         local items_started=PopupDiagnostic.now()
         local items=Thoughts.popup_items(group)
         PopupDiagnostic.log("popup_items", {elapsed_ms=PopupDiagnostic.elapsed(items_started), count=#items})
+        -- 想法列表 meta 行显示已知评论数:仅读缓存库不发请求(列表接口没有
+        -- 评论数字段,数据来自点开过的想法,见 ReviewComments.cached_total_counts)。
+        local review_ids={}
+        for _,it in ipairs(items) do
+            if tostring(it.review_id or "")~="" then review_ids[#review_ids+1]=it.review_id end
+        end
+        local comment_counts=ReviewComments.cached_total_counts(
+            self.store:book_dir(info.book_id).."/review_comments.db",review_ids)
+        for _,it in ipairs(items) do
+            it.comment_count=tonumber(comment_counts[it.review_id] or 0) or 0
+        end
         if #items==0 then self:info("没有想法内容"); return end
         local require_started=PopupDiagnostic.now()
         local ThoughtPopup=require("pickthought.thought_popup")
@@ -1981,9 +2053,28 @@ function Plugin:_show_thought_href(href)
         local config_started=PopupDiagnostic.now()
         local PopupConfig=require("pickthought.thought_popup.popup_config")
         local options=PopupConfig.build(self,items)
+        -- 想法评论入口(需求文档"想法评论查看"):闭包捕获当前锚点解析出的
+        -- book_id,弹窗组件只持有只读回调,不直接接触 store/网络栈。
+        local popup_book_id=info.book_id
+        -- 先声明再构造闭包:选项回调要捕获 show 返回的弹窗实例
+        -- (教训来自 check_exists=nil)。
+        local popup
+        options.on_view_comments=function(item,popup)
+            return self:_show_thought_comments(item,popup_book_id,popup)
+        end
+        -- 评论数懒加载:视口稳定(翻页/滚动停下防抖)后只补当前可见条目。
+        options.on_visible_items_settled=function()
+            self:_prefetch_visible_comment_counts(popup,popup_book_id)
+        end
         PopupDiagnostic.log("popup_config_build", {elapsed_ms=PopupDiagnostic.elapsed(config_started)})
         local popup_started=PopupDiagnostic.now()
-        ThoughtPopup.show(options)
+        popup=ThoughtPopup.show(options)
+        -- 首屏第一轮评论数补齐:等首帧刷完,与视口防抖同节奏触发。
+        UIManager:scheduleIn(COMMENT_PREFETCH_FIRST_DELAY,function()
+            pcall(function()
+                self:_prefetch_visible_comment_counts(popup,popup_book_id)
+            end)
+        end)
         PopupDiagnostic.log("popup_show_return", {elapsed_ms=PopupDiagnostic.elapsed(popup_started), total_ms=PopupDiagnostic.elapsed(started)})
         logger.info("[撷思][ThoughtPopup] opened",
             "book=",tostring(info.book_id),"chapter=",tostring(info.chapter_uid),
@@ -1998,6 +2089,237 @@ function Plugin:_show_thought_href(href)
     PopupDiagnostic.log("show_end", {elapsed_ms=PopupDiagnostic.elapsed(started), ok=ok})
     if owns_request then PopupDiagnostic.finish() end
     return true
+end
+
+-- 评论加载错误分类:网络/鉴权/限流/响应,复用 Http 层的判定函数。
+function Plugin:_classify_comment_error(text)
+    text=tostring(text or "")
+    if Http.is_auth_error(text) then return "not_logged_in" end
+    if Http.is_rate_limit_error(text) then return "rate_limited" end
+    if Http.is_network_error(text) then return "network" end
+    return "invalid_response"
+end
+
+-- 在线加载一条想法的评论:请求 → 归一化,失败返回结构化错误。
+-- 缓存读写由 ReviewComments.cache_get 包裹,本方法只负责"未命中时的加载"。
+function Plugin:_request_review_comments(review_id,options)
+    local ok,data=pcall(function() return self.api:review_comments(review_id,options) end)
+    if not ok then
+        local kind=self:_classify_comment_error(data)
+        return {ok=false,error=kind,message=ReviewComments.message_for(kind)}
+    end
+    if type(data) ~= "table" then
+        return {ok=false,error="invalid_response",
+            message=ReviewComments.message_for("invalid_response")}
+    end
+    return ReviewComments.normalize_response(data,review_id)
+end
+
+-- 评论数懒加载(需求 2026-09-06):视口稳定(翻页/滚动停下防抖)后,
+-- 只补"当前可见"的想法。触发点:弹窗打开后的首轮 + 组件的防抖回调
+-- on_visible_items_settled。列表接口没有评论数字段(2026-09-06 真机
+-- 155KB 响应全字段核验),逐条详情是唯一来源;缓存命中的就地补显示,
+-- 未缓存的按评论限速逐条请求(HTTP 层限速 0.45s/条),整批完成后
+-- 一次性刷新(用户拍板:逐条刷"一下一下"观感差;KOReader 插件网络
+-- 为同步调用、无线程,真并发做不到,串行整批+单次刷新观感等同并发)。
+-- 离线不为此自动开 Wi-Fi——点"查看评论"时才走 ensure_online。
+-- (节奏常量声明在文件头部,_show_thought_href 先于本函数使用。)
+
+function Plugin:_prefetch_visible_comment_counts(popup,book_id)
+    local ttl=ReviewComments.normalize_ttl(
+        self:_thought_popup_preferences().comment_cache_seconds)
+    if ttl<=0 then return end
+    if not (popup and type(popup.visible_thought_items)=="function"
+        and type(popup.refresh_comment_counts)=="function") then return end
+    local shown=true
+    pcall(function() shown=UIManager:isWidgetShown(popup)~=false end)
+    if not shown then return end
+    local connected=false
+    pcall(function()
+        local NetworkMgr=require("ui/network/manager")
+        connected=NetworkMgr:isConnected()==true
+    end)
+    if not connected then return end
+    local visible=popup:visible_thought_items()
+    local cache=ReviewComments.Cache.new{
+        path=self.store:book_dir(book_id).."/review_comments.db",
+    }
+    local now=os.time()
+    local changed=false
+    local pending={}
+    for _,it in ipairs(visible) do
+        local rid=tostring(it and it.review_id or "")
+        if rid~="" and (tonumber(it.comment_count) or 0)<=0 then
+            local record=cache:get(rid,now)
+            if record then
+                local count=tonumber(record.total_count) or 0
+                -- 数值真变了才置脏:缓存命中的条目每次视口稳定都会走到这里,
+                -- 无差别置脏会让翻页停稳后反复重排重绘(真机:页面闪烁)。
+                if (tonumber(it.comment_count) or 0)~=count then
+                    it.comment_count=count
+                    changed=true
+                end
+            else
+                pending[#pending+1]=it
+            end
+        end
+    end
+    -- 缓存里就有的立即补上(条目与弹窗共享同一张表)
+    if changed then popup:refresh_comment_counts() end
+    if #pending==0 then return end
+    -- 新一轮作废旧循环(防抖重触发/弹窗池复用,防止两代循环叠加)
+    local gen=(self._comment_prefetch_gen or 0)+1
+    self._comment_prefetch_gen=gen
+    -- 获取提示(用户拍板 2026-09-06):整批要几秒,默认弹提示告诉用户
+    -- "在干活";设置里可关。notice 生命周期绑定本轮循环,所有退出路径
+    -- 都要关闭(close_notice 幂等)。
+    local notice
+    if self:_thought_popup_preferences().comment_fetch_notice~=false then
+        notice=InfoMessage:new{text="正在获取评论数…"}
+        UIManager:show(notice)
+        pcall(function() UIManager:forceRePaint() end)
+    end
+    local function close_notice()
+        if notice then
+            pcall(function() UIManager:close(notice) end)
+            notice=nil
+        end
+    end
+    logger.info("[撷思][ReviewComments] prefetch visible","book=",tostring(book_id),
+        "pending=",tostring(#pending))
+    local done=0
+    local function step(idx)
+        if self._comment_prefetch_gen~=gen then close_notice() return end
+        local ok,err=pcall(function()
+            local it=pending[idx]
+            if not it then close_notice() return end
+            local still_shown=true
+            pcall(function() still_shown=UIManager:isWidgetShown(popup)~=false end)
+            if not still_shown then close_notice() return end  -- 弹窗已关:停止剩余请求
+            local result=ReviewComments.cache_get(cache,it.review_id,
+                function() return self:_request_review_comments(it.review_id,
+                    {pacing_min_interval=0.2}) end,
+                book_id,os.time(),ttl)
+            if self._comment_prefetch_gen~=gen then close_notice() return end
+            if type(result)=="table" and result.ok then
+                it.comment_count=tonumber(result.total_count) or 0
+                done=done+1
+            end
+            UIManager:scheduleIn(COMMENT_PREFETCH_STEP_DELAY,function() step(idx+1) end)
+        end)
+        if not ok then
+            close_notice()
+            logger.warn("[撷思][ReviewComments] prefetch step error:",
+                U.first_line(tostring(err),160))
+            return
+        end
+        -- 整批完成后一次性刷新(条目与弹窗共享同一张表):
+        -- 逐条刷"一下一下",攒一批一起上屏观感等同并发。
+        if idx==#pending then
+            close_notice()
+            if done>0 then
+                popup:refresh_comment_counts()
+            end
+        end
+    end
+    UIManager:scheduleIn(0,function() step(1) end)
+end
+
+-- 查看想法评论(长按菜单入口,实施文档 §6「加载与错误处理」):
+--   缓存命中 → 直接返回结果(弹窗立即切换视图);
+--   未命中且在线 → 阻塞式短超时请求(InfoMessage+forceRePaint 提示);
+--   未命中且离线 → 自动打开 Wi-Fi 异步等待,就绪后补发请求并把结果
+--   迟到投递给仍在显示的弹窗;此时返回 nil,弹窗菜单不做同步切换。
+function Plugin:_show_thought_comments(item,book_id,popup)
+    logger.info("[撷思][ReviewComments] enter", "book=", tostring(book_id),
+        "review_id=", tostring(item and item.review_id or ""),
+        "popup=", tostring(popup ~= nil))
+    local review_id=tostring(item and item.review_id or "")
+    if review_id=="" then
+        logger.warn("[撷思][ReviewComments] 缺少 review_id")
+        return {ok=false,error="invalid_review_id",
+            message=ReviewComments.message_for("invalid_review_id")}
+    end
+    local ttl=ReviewComments.normalize_ttl(
+        self:_thought_popup_preferences().comment_cache_seconds)
+    local cache=nil
+    if ttl>0 then
+        cache=ReviewComments.Cache.new{
+            path=self.store:book_dir(book_id).."/review_comments.db",
+        }
+    end
+    local function popup_shown()
+        local ok,shown=pcall(function() return popup and UIManager:isWidgetShown(popup) end)
+        return ok and shown==true
+    end
+    local function deliver(result)
+        if not popup_shown() then
+            logger.info("[撷思][ReviewComments] 弹窗已关闭,丢弃迟到结果")
+            return
+        end
+        if type(result)=="table" and result.ok then
+            popup:_enterComments(item,result)
+        else
+            popup:_showCommentNotice(type(result)=="table" and result.message
+                or ReviewComments.message_for("network"))
+        end
+    end
+    local function blocking_load()
+        -- 短超时阻塞请求:先刷出提示,避免墨水屏在请求期间毫无反馈。
+        local notice=InfoMessage:new{text="正在加载评论…"}
+        UIManager:show(notice)
+        pcall(function() UIManager:forceRePaint() end)
+        local result=ReviewComments.cache_get(cache,review_id,
+            function() return self:_request_review_comments(review_id) end,
+            book_id,os.time(),ttl)
+        pcall(function() UIManager:close(notice) end)
+        return result
+    end
+
+    -- 1) 缓存命中(离线可用):直接返回。
+    if cache and ttl>0 then
+        local record=cache:get(review_id,os.time())
+        if record then
+            record.ok=true
+            record.from_cache=true
+            record.review_id=review_id
+            return record
+        end
+    end
+
+    -- 2) 已联网:同步加载并返回。
+    local connected=false
+    pcall(function()
+        local NetworkMgr=require("ui/network/manager")
+        connected=NetworkMgr:isConnected()==true
+    end)
+    logger.info("[撷思][ReviewComments] cache miss, connected=", tostring(connected))
+    if connected then
+        local result=blocking_load()
+        logger.info("[撷思][ReviewComments] blocking_load done ok=",
+            tostring(type(result)=="table" and result.ok or result))
+        return result
+    end
+
+    -- 3) 离线:异步开 Wi-Fi,就绪后补发请求(实施文档 §7)。
+    logger.info("[撷思][ReviewComments] offline, starting ensure_online")
+    popup:_showCommentNotice("正在打开 Wi-Fi…")
+    EnsureOnline.ensure_online{
+        on_status=function(text)
+            if popup_shown() then popup:_showCommentNotice(text) end
+        end,
+        on_ready=function()
+            if not popup_shown() then
+                logger.info("[撷思][ReviewComments] 联网就绪但弹窗已关闭,跳过加载")
+                return
+            end
+            deliver(blocking_load())
+        end,
+        on_error=function(message)
+            if popup_shown() then popup:_showCommentNotice(message) end
+        end,
+    }
+    return nil
 end
 
 function Plugin:_on_thought_tap(ges)
