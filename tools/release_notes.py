@@ -56,6 +56,7 @@ CATEGORIES = {
     "perf": "性能优化：",
     "feat": "新功能：",
     "fix": "问题修复：",
+    "refactor": "结构调整：",
     "style": "样式优化：",
 }
 
@@ -83,7 +84,7 @@ def dedupe_key(text: str) -> str:
 
 def parse_subject(subject: str) -> Tuple[str | None, str | None]:
     subject = clean(subject)
-    match = re.match(r"^(perf|feat|fix|style)(?:\([^)]*\))?:\s*(.*)$", subject, re.I)
+    match = re.match(r"^(perf|feat|fix|refactor|style)(?:\([^)]*\))?:\s*(.*)$", subject, re.I)
     if match:
         kind = match.group(1).lower()
         description = NORMALIZED_TRANSLATIONS.get(subject, clean(match.group(2)))
