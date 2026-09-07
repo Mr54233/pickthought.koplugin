@@ -64,7 +64,7 @@ function M.annotation_style_item(plugin)
 end
 
 --- 文件管理器态菜单(无"当前书"上下文,选书类入口用文件选择器)。
---- 三段式:选书操作 / 通用 / 危险区(separator 分隔,2026-09-06 用户确认)。
+--- 三段式排序:选书操作 / 通用 / 危险区(KOReader Menu 无分隔线,仅靠排序)。
 function M.home_menu(plugin)
     local items = {}
     items[#items + 1] = M.sync_status_item(plugin)
@@ -77,12 +77,12 @@ function M.home_menu(plugin)
     items[#items + 1] = {text = "更多操作(重注/续拉/还原)", callback = plugin:safe("fm_actions", function()
         plugin:pick_book("选择 EPUB(长按文件名选中)", function(path) plugin:book_actions(path) end)
     end)}
-    items[#items + 1] = {text = "", separator = true}
+    -- 注意:KOReader Menu 不支持 item_table 分隔线(separator 会渲染成
+    -- 整行空白项,真机 2026-09-07),三段分组只靠排序表达,勿加分隔项。
     items[#items + 1] = M.annotation_style_item(plugin)
     items[#items + 1] = {text = "账户", sub_item_table_func = function() return M.account_menu(plugin) end}
     items[#items + 1] = {text = "设置", sub_item_table_func = function() return M.settings_menu(plugin) end}
     items[#items + 1] = {text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end}
-    items[#items + 1] = {text = "", separator = true}
     items[#items + 1] = {text = "重置全部书籍", callback = plugin:safe("clear_all", function() plugin:clear_all_data() end)}
     items[#items + 1] = {text = "关于", callback = plugin:safe("about", function() plugin:show_about() end)}
     return items
@@ -115,18 +115,15 @@ function M.reader_menu(plugin)
         items[#items + 1] = {text = "重置本书(清数据+还原原版)", callback = plugin:safe("reset", function() plugin:reset_book_data(doc_path) end)}
     end
     -- 界面
-    items[#items + 1] = {text = "", separator = true}
     if doc_bound then
         items[#items + 1] = M.annotation_style_item(plugin)
     end
     items[#items + 1] = {text = "想法弹窗设置", sub_item_table_func = function() return M.thought_popup_menu(plugin) end}
     -- 全局
-    items[#items + 1] = {text = "", separator = true}
     items[#items + 1] = {text = "账户", sub_item_table_func = function() return M.account_menu(plugin) end}
     items[#items + 1] = {text = "设置", sub_item_table_func = function() return M.settings_menu(plugin) end}
     items[#items + 1] = {text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end}
     -- 危险区
-    items[#items + 1] = {text = "", separator = true}
     items[#items + 1] = {text = "重置全部书籍", callback = plugin:safe("clear_all", function() plugin:clear_all_data() end)}
     items[#items + 1] = {text = "关于", callback = plugin:safe("about", function() plugin:show_about() end)}
     return items
