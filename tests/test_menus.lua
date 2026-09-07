@@ -68,22 +68,39 @@ local function texts(items)
     return out
 end
 
-T.case("文件管理器菜单:项构成与尾项顺序", function()
-    local items = texts(Menus.home_menu(plugin))
-    T.eq(items[#items - 1], "重置全部书籍", "危险项固定在倒数第二位")
-    T.eq(items[#items], "关于", "关于固定在最后一位")
-    T.eq(#items, 9, "文件管理器菜单共 9 项(无进行中同步状态项)")
+local function separator_count(items)
+    local count = 0
+    for _, item in ipairs(items) do
+        if item.separator then count = count + 1 end
+    end
+    return count
+end
+
+T.case("文件管理器菜单:三段式,项构成与尾项顺序", function()
+    local items = Menus.home_menu(plugin)
+    T.eq(separator_count(items), 2, "选书操作/通用/危险区之间各一条分隔线")
+    local names = texts(items)
+    T.eq(names[1], "同步划线与想法(选书)", "选书操作段第一项")
+    T.eq(names[2], "绑定微信读书(选书)", "选书操作段第二项")
+    T.eq(names[3], "更多操作(重注/续拉/还原)", "选书操作段第三项")
+    T.eq(names[#names - 1], "重置全部书籍", "危险项固定在倒数第二位")
+    T.eq(names[#names], "关于", "关于固定在最后一位")
+    T.eq(#items, 11, "文件管理器菜单共 11 个条目(含 2 条分隔线)")
+    T.eq(#names - separator_count(items), 9, "有效菜单项 9 项(无进行中同步状态项)")
 end)
 
-T.case("阅读器菜单(未绑定书):无划线样式项,尾项顺序一致", function()
-    local items = texts(Menus.reader_menu(plugin))
-    T.eq(items[1], "绑定微信读书", "阅读态首项是绑定入口")
-    T.eq(items[2], "同步划线与想法", "阅读态第二项是同步入口")
-    for _, text in ipairs(items) do
+T.case("阅读器菜单(未绑定书):无划线样式项,想法弹窗设置提级,尾项顺序一致", function()
+    local items = Menus.reader_menu(plugin)
+    T.eq(separator_count(items), 3, "当前书/界面/全局/危险区之间共三条分隔线")
+    local names = texts(items)
+    T.eq(names[1], "绑定微信读书", "阅读态首项是绑定入口(未绑定不带重新前缀)")
+    T.eq(names[2], "同步划线与想法", "阅读态第二项是同步入口")
+    T.ok(table.concat(names, "|"):find("想法弹窗设置", 1, true), "想法弹窗设置提级到阅读态")
+    for _, text in ipairs(names) do
         T.ok(not text:find("划线样式", 1, true), "未绑定书不显示划线样式入口")
     end
-    T.eq(items[#items - 1], "重置全部书籍", "危险项固定在倒数第二位")
-    T.eq(items[#items], "关于", "关于固定在最后一位")
+    T.eq(names[#names - 1], "重置全部书籍", "危险项固定在倒数第二位")
+    T.eq(names[#names], "关于", "关于固定在最后一位")
 end)
 
 T.case("划线样式菜单:四个单选项,选择后保存并提示", function()
@@ -97,11 +114,11 @@ T.case("划线样式菜单:四个单选项,选择后保存并提示", function()
     T.eq(toasts[#toasts], "划线样式已切换为：细虚线", "切换有提示")
 end)
 
-T.case("设置菜单:四项构成与调试模式开关", function()
+T.case("设置菜单:三项构成与调试模式开关", function()
     local items = texts(Menus.settings_menu(plugin))
-    T.eq(items[1], "想法弹窗设置", "第一项是想法弹窗设置")
-    T.eq(items[4], "调试模式(记录详细同步日志)", "末项是调试模式")
-    local debug_item = Menus.settings_menu(plugin)[4]
+    T.eq(items[1], "阅读时自动分批拉取后续章节", "第一项是自动分批拉取")
+    T.eq(items[3], "调试模式(记录详细同步日志)", "末项是调试模式")
+    local debug_item = Menus.settings_menu(plugin)[3]
     T.ok(not debug_item.checked_func(), "调试模式默认关闭")
     debug_item.callback()
     T.eq(prefs.debug_mode, true, "调试模式开关写入偏好")

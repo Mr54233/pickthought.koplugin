@@ -175,7 +175,7 @@ function Plugin:book_actions(path)
             rows[#rows+1]={{text=self:_continue_sync_label(agg),
                 callback=act(function() self:sync_entry(path,"sync") end)}}
         end
-        rows[#rows+1]={{text="清理本书数据",callback=act(function() self:reset_book_data(path) end)}}
+        rows[#rows+1]={{text="重置本书(清数据+还原原版)",callback=act(function() self:reset_book_data(path) end)}}
     end
     if self:_has_reinject_cache(path) then
         rows[#rows+1]={{text="重新注入(用上次数据,离线)",callback=act(function() self:reinject_with_clean(path) end)}}

@@ -64,37 +64,42 @@ function M.annotation_style_item(plugin)
 end
 
 --- 文件管理器态菜单(无"当前书"上下文,选书类入口用文件选择器)。
+--- 三段式:选书操作 / 通用 / 危险区(separator 分隔,2026-09-06 用户确认)。
 function M.home_menu(plugin)
     local items = {}
     items[#items + 1] = M.sync_status_item(plugin)
-    items[#items + 1] = {text = "选择书籍同步想法", callback = plugin:safe("fm_sync", function()
+    items[#items + 1] = {text = "同步划线与想法(选书)", callback = plugin:safe("fm_sync", function()
         plugin:pick_book("选择要同步的 EPUB(长按文件名选中)", function(path) plugin:sync_entry(path) end)
     end)}
-    items[#items + 1] = {text = "选择书籍绑定微信读书", callback = plugin:safe("fm_bind", function()
+    items[#items + 1] = {text = "绑定微信读书(选书)", callback = plugin:safe("fm_bind", function()
         plugin:pick_book("选择要绑定的 EPUB(长按文件名选中)", function(path) plugin:bind_book(path) end)
     end)}
-    items[#items + 1] = {text = "选择书籍更多操作(重注 / 续拉 / 还原)", callback = plugin:safe("fm_actions", function()
+    items[#items + 1] = {text = "更多操作(重注/续拉/还原)", callback = plugin:safe("fm_actions", function()
         plugin:pick_book("选择 EPUB(长按文件名选中)", function(path) plugin:book_actions(path) end)
     end)}
+    items[#items + 1] = {text = "", separator = true}
     items[#items + 1] = M.annotation_style_item(plugin)
     items[#items + 1] = {text = "账户", sub_item_table_func = function() return M.account_menu(plugin) end}
     items[#items + 1] = {text = "设置", sub_item_table_func = function() return M.settings_menu(plugin) end}
     items[#items + 1] = {text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end}
+    items[#items + 1] = {text = "", separator = true}
     items[#items + 1] = {text = "重置全部书籍", callback = plugin:safe("clear_all", function() plugin:clear_all_data() end)}
     items[#items + 1] = {text = "关于", callback = plugin:safe("about", function() plugin:show_about() end)}
     return items
 end
 
---- 阅读态菜单:围绕当前文档的绑定/同步/重置上下文项。
+--- 阅读态菜单:三段式 当前书 / 界面 / 全局+危险区(2026-09-06 用户确认的重组)。
+--- 动态项集中在"当前书"段;想法弹窗设置从设置菜单提级为界面直达项。
 function M.reader_menu(plugin)
     local items = {}
     items[#items + 1] = M.sync_status_item(plugin)
-    items[#items + 1] = {text = "绑定微信读书", callback = plugin:safe("bind", function() plugin:bind_book() end)}
-    items[#items + 1] = {text = "同步划线与想法", callback = plugin:safe("sync_thoughts", function() plugin:sync_thoughts() end)}
+    -- 当前书
     local doc_path = plugin:current_doc_path()
     local doc_bound = doc_path and Binding.get(plugin.store, doc_path)
+    items[#items + 1] = {text = doc_bound and "重新绑定微信读书" or "绑定微信读书",
+        callback = plugin:safe("bind", function() plugin:bind_book() end)}
+    items[#items + 1] = {text = "同步划线与想法", callback = plugin:safe("sync_thoughts", function() plugin:sync_thoughts() end)}
     if doc_bound then
-        items[#items + 1] = M.annotation_style_item(plugin)
         -- 多书聚合:任何一本有待同步章节都提供「继续拉取」,不只看第一本(P1#4);
         -- 失败书/剩余未知书同样保留入口,不让聚合 0 吞掉失败态(评审五轮 P1#2)。
         local agg = plugin:_aggregate_sync_state(doc_path)
@@ -109,9 +114,19 @@ function M.reader_menu(plugin)
     if doc_bound or (doc_path and require("pickthought.util").file_exists(doc_path .. ".orig")) then
         items[#items + 1] = {text = "重置本书(清数据+还原原版)", callback = plugin:safe("reset", function() plugin:reset_book_data(doc_path) end)}
     end
+    -- 界面
+    items[#items + 1] = {text = "", separator = true}
+    if doc_bound then
+        items[#items + 1] = M.annotation_style_item(plugin)
+    end
+    items[#items + 1] = {text = "想法弹窗设置", sub_item_table_func = function() return M.thought_popup_menu(plugin) end}
+    -- 全局
+    items[#items + 1] = {text = "", separator = true}
     items[#items + 1] = {text = "账户", sub_item_table_func = function() return M.account_menu(plugin) end}
     items[#items + 1] = {text = "设置", sub_item_table_func = function() return M.settings_menu(plugin) end}
     items[#items + 1] = {text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end}
+    -- 危险区
+    items[#items + 1] = {text = "", separator = true}
     items[#items + 1] = {text = "重置全部书籍", callback = plugin:safe("clear_all", function() plugin:clear_all_data() end)}
     items[#items + 1] = {text = "关于", callback = plugin:safe("about", function() plugin:show_about() end)}
     return items
@@ -128,8 +143,8 @@ function M.account_menu(plugin)
 end
 
 function M.settings_menu(plugin)
+    -- 想法弹窗设置已提级到阅读态菜单"界面"段,此处只剩功能型设置。
     return {
-        {text = "想法弹窗设置", sub_item_table_func = function() return M.thought_popup_menu(plugin) end},
         {text = "阅读时自动分批拉取后续章节", checked_func = function()
             return BatchSync.auto_enabled(plugin.store:preferences())
         end, callback = function()
