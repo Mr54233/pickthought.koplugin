@@ -1,15 +1,15 @@
 {
-  "version": "0.5.0",
-  "name": "撷思 PickThought 0.5.0",
+  "version": "0.5.1",
+  "name": "撷思 PickThought 0.5.1",
   "package_type": "full",
-  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.0/pickthought.koplugin.zip",
+  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.1/pickthought.koplugin.zip",
   "package_urls": [
-    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.0/pickthought.koplugin.zip",
-    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.0/pickthought.koplugin.zip",
-    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.0/pickthought.koplugin.zip",
-    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.0/pickthought.koplugin.zip"
+    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.1/pickthought.koplugin.zip",
+    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.1/pickthought.koplugin.zip",
+    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.1/pickthought.koplugin.zip",
+    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.1/pickthought.koplugin.zip"
   ],
-  "size": 830804,
-  "sha256": "eaf1bae40fec5c534ba3e0affced0ae15aef9ab526f5e33414a22eace5e0d8c9",
-  "notes": "新功能：\n想法评论查看与评论数懒加载（Issue #104 / PR #22/#106）\n\n问题修复：\n发布摘要识别 PR 合并提交"
+  "size": 832584,
+  "sha256": "87f80607e3bec85d1cd0c45281d8023aaa59673f049f1ce3d1b88e3ed2e05a72",
+  "notes": "新功能：\n发布摘要支持 refactor 前缀\n关于弹窗内容更新\n\n问题修复：\n登录行点按弹账户动作面板,想法弹窗设置放回划线样式下\n移除菜单分隔线占位项\n敏感信息扫描放行自身测试夹具并覆盖未跟踪文件\n\n结构调整：\n上游式收纳——登录行合并账户,低频入设置抽屉\n菜单三段式重组,想法弹窗设置提级,命名统一\n日志收敛、弹窗基类收敛与菜单抽离"
 }
