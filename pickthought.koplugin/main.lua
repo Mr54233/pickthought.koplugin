@@ -680,7 +680,13 @@ function Plugin:_update_fail(text,silent)
 end
 
 function Plugin:show_about()
-    self:info(Config.NAME.." "..self.version.."\n\n撷思 撷思\n只同步微信读书划线与想法到本地 EPUB 副本\n\n".._("Unofficial client").."\n\n".._("This build has not been verified with every Kindle model or every WeRead book."))
+    self:info(Config.NAME.." "..self.version.."\n\n"
+        .."书是你的,想法是社区的——撷思把后者塞进前者。\n\n"
+        .."拉取微信读书的划线与公开想法,引文对齐后注入本地 EPUB;\n"
+        .."想法下的评论也能在弹窗里直接查看。\n\n"
+        .."只读社区数据:不上传任何内容,不改动原书(.orig 备份可还原)。\n\n"
+        .._("Unofficial client").."\n"
+        .._("This build has not been verified with every Kindle model or every WeRead book."))
 end
 
 function Plugin:_sync_mutation_blocked(message)
