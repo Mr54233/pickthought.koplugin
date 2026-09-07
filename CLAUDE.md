@@ -28,8 +28,9 @@ luajit tests/run.lua   # 全绿才能提交
 ## 想法弹窗
 
 - 公共入口为 `pickthought.thought_popup`，支持 `items` 和上游兼容的 `pages` 参数；同一位置复用一个 widget，切换位置或关书时必须释放页面、文本和字体缓存。
-- 实现位于 `pickthought/thought_popup/`：`pages.lua` 负责布局和位图缓存，`paginator.lua` 保证行边界分页，`center_widget.lua` 和 `widget.lua` 分别负责居中/底部样式。
-- 设置仍存于 `preferences.thoughts`，新字段为 `position`、`height_ratio`、`width_ratio`、`font_size_relative`、`font_size`、`contrast` 和 `tap_to_page`。不要改用新顶层 key，旧安装的 `font=standard/large/xlarge` 由 Store 启动期归一化迁移。
+- 实现位于 `pickthought/thought_popup/`：`base_widget.lua` 收敛两弹窗与布局无关的公共方法（R3），`pages.lua` 负责布局和位图缓存，`paginator.lua` 保证行边界分页，`center_widget.lua` 和 `widget.lua` 分别负责居中/底部样式（几何与交互差异留在各自文件）。
+- 菜单构造器在 `pickthought/ui/menus.lua`（R4 抽离，函数签名 `(plugin)`）：阅读态/文件管理器态/设置/想法弹窗/划线样式/更新/登录行/书籍管理全部在此；改菜单必须同步 `tests/test_menus.lua`。
+- 设置仍存于 `preferences.thoughts`，字段为 `position`、`height_ratio`、`width_ratio`、`font_size_relative`、`font_size`、`contrast`、`tap_to_page`、`comment_tap_open`、`comment_fetch_notice`、`comment_cache_seconds`。不要改用新顶层 key，旧安装的 `font=standard/large/xlarge` 由 Store 启动期归一化迁移。
 - `face_factory.lua` 必须只构建局部字体回退链，不能修改 KOReader 全局 `Font.fallbacks`。插件内的 `fonts/NotoEmoji-Regular.ttf` 与 `fonts/LICENSE` 必须一起保留。
 
 ## 提交规范
