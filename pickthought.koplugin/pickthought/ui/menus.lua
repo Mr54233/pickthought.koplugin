@@ -63,11 +63,52 @@ function M.annotation_style_item(plugin)
         sub_item_table_func = function() return M.annotation_style_menu(plugin) end}
 end
 
+--- 登录行(上游手法):一行顶两用——已登录显示「微信读书 · 昵称」,点按看
+--- 账户状态;未登录显示「扫码登录」,点按直接扫码。账户菜单因此消失。
+function M.login_item(plugin)
+    return {
+        text_func = function()
+            if plugin:logged_in() then
+                local auth = plugin.store:auth()
+                local name = tostring(auth.account and auth.account.name or "")
+                if name == "" then name = "微信读书" end
+                return "微信读书 · " .. name
+            end
+            return "扫码登录"
+        end,
+        keep_menu_open = true,
+        callback = plugin:safe("login", function()
+            if plugin:logged_in() then
+                local auth = plugin.store:auth()
+                plugin:info("已登录\n账号:" .. tostring(auth.account and auth.account.name or "")
+                    .. "\nVID: " .. tostring(auth.account and auth.account.vid or ""))
+            else
+                plugin.auth_flow:start()
+            end
+        end),
+    }
+end
+
+--- 当前书相关操作的收纳抽屉(阅读态,已绑定书)。
+function M.book_management_menu(plugin)
+    local doc_path = plugin:current_doc_path()
+    local items = {}
+    items[#items + 1] = {text = "重新绑定微信读书", callback = plugin:safe("rebind", function() plugin:bind_book() end)}
+    if doc_path and plugin:_has_reinject_cache(doc_path) then
+        items[#items + 1] = {text = "重新注入(用上次数据,离线)", callback = plugin:safe("reinject", function() plugin:reinject_with_clean(doc_path) end)}
+    end
+    if doc_path or (doc_path and require("pickthought.util").file_exists(doc_path .. ".orig")) then
+        items[#items + 1] = {text = "重置本书(清数据+还原原版)", callback = plugin:safe("reset", function() plugin:reset_book_data(doc_path) end)}
+    end
+    return items
+end
+
 --- 文件管理器态菜单(无"当前书"上下文,选书类入口用文件选择器)。
---- 三段式排序:选书操作 / 通用 / 危险区(KOReader Menu 无分隔线,仅靠排序)。
+--- 上游式收纳:顶级只留高频,低频进设置抽屉。
 function M.home_menu(plugin)
     local items = {}
     items[#items + 1] = M.sync_status_item(plugin)
+    items[#items + 1] = M.login_item(plugin)
     items[#items + 1] = {text = "同步划线与想法(选书)", callback = plugin:safe("fm_sync", function()
         plugin:pick_book("选择要同步的 EPUB(长按文件名选中)", function(path) plugin:sync_entry(path) end)
     end)}
@@ -77,71 +118,55 @@ function M.home_menu(plugin)
     items[#items + 1] = {text = "更多操作(重注/续拉/还原)", callback = plugin:safe("fm_actions", function()
         plugin:pick_book("选择 EPUB(长按文件名选中)", function(path) plugin:book_actions(path) end)
     end)}
-    -- 注意:KOReader Menu 不支持 item_table 分隔线(separator 会渲染成
-    -- 整行空白项,真机 2026-09-07),三段分组只靠排序表达,勿加分隔项。
     items[#items + 1] = M.annotation_style_item(plugin)
-    items[#items + 1] = {text = "账户", sub_item_table_func = function() return M.account_menu(plugin) end}
     items[#items + 1] = {text = "设置", sub_item_table_func = function() return M.settings_menu(plugin) end}
-    items[#items + 1] = {text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end}
-    items[#items + 1] = {text = "重置全部书籍", callback = plugin:safe("clear_all", function() plugin:clear_all_data() end)}
-    items[#items + 1] = {text = "关于", callback = plugin:safe("about", function() plugin:show_about() end)}
     return items
 end
 
---- 阅读态菜单:三段式 当前书 / 界面 / 全局+危险区(2026-09-06 用户确认的重组)。
---- 动态项集中在"当前书"段;想法弹窗设置从设置菜单提级为界面直达项。
+--- 阅读态菜单(上游式收纳):高频直达,低频进设置抽屉。
+--- 已绑定:登录行/同步/继续拉取[条件]/划线样式/书籍管理›/设置› = 5-6 项。
+--- 未绑定:登录行/绑定微信读书/设置› = 3 项。
 function M.reader_menu(plugin)
     local items = {}
     items[#items + 1] = M.sync_status_item(plugin)
-    -- 当前书
+    items[#items + 1] = M.login_item(plugin)
     local doc_path = plugin:current_doc_path()
     local doc_bound = doc_path and Binding.get(plugin.store, doc_path)
-    items[#items + 1] = {text = doc_bound and "重新绑定微信读书" or "绑定微信读书",
-        callback = plugin:safe("bind", function() plugin:bind_book() end)}
+    if not doc_bound then
+        items[#items + 1] = {text = "绑定微信读书", callback = plugin:safe("bind", function() plugin:bind_book() end)}
+        items[#items + 1] = {text = "设置", sub_item_table_func = function() return M.settings_menu(plugin) end}
+        return items
+    end
     items[#items + 1] = {text = "同步划线与想法", callback = plugin:safe("sync_thoughts", function() plugin:sync_thoughts() end)}
-    if doc_bound then
-        -- 多书聚合:任何一本有待同步章节都提供「继续拉取」,不只看第一本(P1#4);
-        -- 失败书/剩余未知书同样保留入口,不让聚合 0 吞掉失败态(评审五轮 P1#2)。
-        local agg = plugin:_aggregate_sync_state(doc_path)
-        if agg.pending > 0 or agg.books_failed > 0 or agg.books_unknown > 0 then
-            items[#items + 1] = {text = plugin:_continue_sync_label(agg),
-                callback = plugin:safe("continue_sync", function() plugin:sync_entry(doc_path, "sync") end)}
-        end
+    -- 多书聚合:任何一本有待同步章节都提供「继续拉取」,不只看第一本(P1#4);
+    -- 失败书/剩余未知书同样保留入口,不让聚合 0 吞掉失败态(评审五轮 P1#2)。
+    local agg = plugin:_aggregate_sync_state(doc_path)
+    if agg.pending > 0 or agg.books_failed > 0 or agg.books_unknown > 0 then
+        items[#items + 1] = {text = plugin:_continue_sync_label(agg),
+            callback = plugin:safe("continue_sync", function() plugin:sync_entry(doc_path, "sync") end)}
     end
-    if doc_path and plugin:_has_reinject_cache(doc_path) then
-        items[#items + 1] = {text = "重新注入(用上次数据,离线)", callback = plugin:safe("reinject", function() plugin:reinject_with_clean(doc_path) end)}
-    end
-    if doc_bound or (doc_path and require("pickthought.util").file_exists(doc_path .. ".orig")) then
-        items[#items + 1] = {text = "重置本书(清数据+还原原版)", callback = plugin:safe("reset", function() plugin:reset_book_data(doc_path) end)}
-    end
-    -- 界面
-    if doc_bound then
-        items[#items + 1] = M.annotation_style_item(plugin)
-    end
-    items[#items + 1] = {text = "想法弹窗设置", sub_item_table_func = function() return M.thought_popup_menu(plugin) end}
-    -- 全局
-    items[#items + 1] = {text = "账户", sub_item_table_func = function() return M.account_menu(plugin) end}
+    items[#items + 1] = M.annotation_style_item(plugin)
+    items[#items + 1] = {text = "书籍管理", sub_item_table_func = function()
+        return M.book_management_menu(plugin)
+    end}
     items[#items + 1] = {text = "设置", sub_item_table_func = function() return M.settings_menu(plugin) end}
-    items[#items + 1] = {text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end}
-    -- 危险区
-    items[#items + 1] = {text = "重置全部书籍", callback = plugin:safe("clear_all", function() plugin:clear_all_data() end)}
-    items[#items + 1] = {text = "关于", callback = plugin:safe("about", function() plugin:show_about() end)}
     return items
 end
 
+--- 账号子菜单(设置›账号):登录状态已并入菜单首行登录行,这里只留
+--- 低频的手动导入与清除。已登录时才出现清除入口。
 function M.account_menu(plugin)
     local out = {
-        {text = _("QR login"), callback = plugin:safe("login", function() plugin.auth_flow:start() end)},
         {text = _("Manual credentials"), callback = plugin:safe("manual", function() plugin:manual_credentials() end)},
-        {text = _("Account status"), callback = function() local a = plugin.store:auth(); plugin:info((plugin:logged_in() and _("Logged in") or _("Not logged in")) .. "\n" .. tostring(a.account.name or "") .. "\nVID: " .. tostring(a.account.vid or "")) end},
     }
     if plugin:logged_in() then out[#out + 1] = {text = _("Clear account data"), callback = function() UIManager:show(ConfirmBox:new{text = "清除当前账户信息？\n\n将退出微信读书账户。", ok_callback = function() plugin.auth_flow:cancel(); plugin.store:clear_auth(); plugin:toast(_("Logout")) end}) end} end
     return out
 end
 
+--- 设置大抽屉(上游式收纳):想法弹窗/同步行为/调试/更新/账号/危险操作全部收在这里。
 function M.settings_menu(plugin)
-    -- 想法弹窗设置已提级到阅读态菜单"界面"段,此处只剩功能型设置。
     return {
+        {text = "想法弹窗设置", sub_item_table_func = function() return M.thought_popup_menu(plugin) end},
         {text = "阅读时自动分批拉取后续章节", checked_func = function()
             return BatchSync.auto_enabled(plugin.store:preferences())
         end, callback = function()
@@ -169,6 +194,10 @@ function M.settings_menu(plugin)
             plugin:toast(p.debug_mode and "调试模式已开启,下次同步生效"
                 or "调试模式已关闭,下次同步生效")
         end},
+        {text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end},
+        {text = "账号", sub_item_table_func = function() return M.account_menu(plugin) end},
+        {text = "重置全部书籍", callback = plugin:safe("clear_all", function() plugin:clear_all_data() end)},
+        {text = "关于", callback = plugin:safe("about", function() plugin:show_about() end)},
     }
 end
 

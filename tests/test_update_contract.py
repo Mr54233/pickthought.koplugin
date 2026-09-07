@@ -10,15 +10,16 @@ class UpdateContractTests(unittest.TestCase):
         return (ROOT / relative).read_text(encoding="utf-8")
 
     def test_menu_exposes_update_controls(self):
-        # R4 之后菜单构造器在 pickthought/ui/menus.lua,main.lua 只保留委托。
+        # R4 之后菜单构造器在 pickthought/ui/menus.lua;收纳重组(2026-09-07)后
+        # 更新/关于/重置全部书籍收纳进设置抽屉,各仅一处。
         menus = self.read("pickthought.koplugin/pickthought/ui/menus.lua")
         main = self.read("pickthought.koplugin/main.lua")
         for marker in (
             'text = "查看更新日志"',
             'text = "检查更新（当前版本 · " .. tostring(plugin.version) .. "）"',
-            'items[#items + 1] = {text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end}',
-            'items[#items + 1] = {text = "关于", callback = plugin:safe("about", function() plugin:show_about() end)}',
-            'items[#items + 1] = {text = "重置全部书籍", callback = plugin:safe("clear_all", function() plugin:clear_all_data() end)}',
+            '{text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end}',
+            '{text = "关于", callback = plugin:safe("about", function() plugin:show_about() end)}',
+            '{text = "重置全部书籍", callback = plugin:safe("clear_all", function() plugin:clear_all_data() end)}',
             "p.update.auto_update",
             "p.update.notify_update",
         ):
@@ -37,16 +38,9 @@ class UpdateContractTests(unittest.TestCase):
         self.assertNotIn("更新与关于", main)
         self.assertIn("撷思发现新版本 %s，请前往「更新」查看", main)
         self.assertEqual(
-            menus.count('items[#items + 1] = {text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end}'),
-            2,
-        )
-        self.assertEqual(
-            menus.count('items[#items + 1] = {text = "关于", callback = plugin:safe("about", function() plugin:show_about() end)}'),
-            2,
-        )
-        self.assertEqual(
-            menus.count('items[#items + 1] = {text = "重置全部书籍", callback = plugin:safe("clear_all", function() plugin:clear_all_data() end)}'),
-            2,
+            menus.count('{text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end}'),
+            1,
+            "更新入口收纳在设置抽屉内,仅一处",
         )
 
     def test_install_completion_offers_restart(self):
