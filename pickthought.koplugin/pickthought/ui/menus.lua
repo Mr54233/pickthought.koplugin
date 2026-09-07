@@ -9,6 +9,7 @@ Plugin 方法变为一行委托。
 
 local ConfirmBox = require("ui/widget/confirmbox")
 local UIManager = require("ui/uimanager")
+local ButtonDialog = require("ui/widget/buttondialog")
 local AnnotationStyle = require("pickthought.annotation_style")
 local BatchSync = require("pickthought.batch_sync")
 local Binding = require("pickthought.binding")
@@ -63,8 +64,9 @@ function M.annotation_style_item(plugin)
         sub_item_table_func = function() return M.annotation_style_menu(plugin) end}
 end
 
---- 登录行(上游手法):一行顶两用——已登录显示「微信读书 · 昵称」,点按看
---- 账户状态;未登录显示「扫码登录」,点按直接扫码。账户菜单因此消失。
+--- 登录行(上游手法):一行顶两用——已登录显示「微信读书 · 昵称」,点按弹出
+--- 账户动作面板(状态/手动刷新 Cookie/手动导入凭据/清除账号);未登录显示
+--- 「扫码登录」,点按直接扫码。
 function M.login_item(plugin)
     return {
         text_func = function()
@@ -78,13 +80,44 @@ function M.login_item(plugin)
         end,
         keep_menu_open = true,
         callback = plugin:safe("login", function()
-            if plugin:logged_in() then
+            if not plugin:logged_in() then
+                plugin.auth_flow:start()
+                return
+            end
+            local dialog
+            local function act(fn) return function() UIManager:close(dialog); fn() end end
+            local function show_status()
                 local auth = plugin.store:auth()
                 plugin:info("已登录\n账号:" .. tostring(auth.account and auth.account.name or "")
                     .. "\nVID: " .. tostring(auth.account and auth.account.vid or ""))
-            else
-                plugin.auth_flow:start()
             end
+            dialog = ButtonDialog:new{
+                buttons = {
+                    {
+                        {text = "账户状态", callback = act(show_status)},
+                        {text = "手动刷新 Cookie", callback = act(function()
+                            plugin:online("刷新 Cookie", function()
+                                plugin.api:renew_session()
+                                plugin:toast("Cookie 刷新已执行")
+                            end)
+                        end)},
+                    },
+                    {
+                        {text = "手动导入凭据", callback = act(function() plugin:manual_credentials() end)},
+                        {text = "清除账号数据", callback = act(function()
+                            UIManager:show(ConfirmBox:new{
+                                text = "清除当前账户信息？\n\n将退出微信读书账户。",
+                                ok_callback = function()
+                                    plugin.auth_flow:cancel()
+                                    plugin.store:clear_auth()
+                                    plugin:toast(_("Logout"))
+                                end,
+                            })
+                        end)},
+                    },
+                },
+            }
+            UIManager:show(dialog)
         end),
     }
 end
@@ -146,6 +179,9 @@ function M.reader_menu(plugin)
             callback = plugin:safe("continue_sync", function() plugin:sync_entry(doc_path, "sync") end)}
     end
     items[#items + 1] = M.annotation_style_item(plugin)
+    items[#items + 1] = {text = "想法弹窗设置", sub_item_table_func = function()
+        return M.thought_popup_menu(plugin)
+    end}
     items[#items + 1] = {text = "书籍管理", sub_item_table_func = function()
         return M.book_management_menu(plugin)
     end}
@@ -153,20 +189,10 @@ function M.reader_menu(plugin)
     return items
 end
 
---- 账号子菜单(设置›账号):登录状态已并入菜单首行登录行,这里只留
---- 低频的手动导入与清除。已登录时才出现清除入口。
-function M.account_menu(plugin)
-    local out = {
-        {text = _("Manual credentials"), callback = plugin:safe("manual", function() plugin:manual_credentials() end)},
-    }
-    if plugin:logged_in() then out[#out + 1] = {text = _("Clear account data"), callback = function() UIManager:show(ConfirmBox:new{text = "清除当前账户信息？\n\n将退出微信读书账户。", ok_callback = function() plugin.auth_flow:cancel(); plugin.store:clear_auth(); plugin:toast(_("Logout")) end}) end} end
-    return out
-end
-
---- 设置大抽屉(上游式收纳):想法弹窗/同步行为/调试/更新/账号/危险操作全部收在这里。
+--- 设置大抽屉(上游式收纳):同步行为/调试/更新/危险操作收在这里。
+--- 想法弹窗设置在阅读态菜单"划线样式"之下(2026-09-07 用户指定)。
 function M.settings_menu(plugin)
     return {
-        {text = "想法弹窗设置", sub_item_table_func = function() return M.thought_popup_menu(plugin) end},
         {text = "阅读时自动分批拉取后续章节", checked_func = function()
             return BatchSync.auto_enabled(plugin.store:preferences())
         end, callback = function()
@@ -195,7 +221,6 @@ function M.settings_menu(plugin)
                 or "调试模式已关闭,下次同步生效")
         end},
         {text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end},
-        {text = "账号", sub_item_table_func = function() return M.account_menu(plugin) end},
         {text = "重置全部书籍", callback = plugin:safe("clear_all", function() plugin:clear_all_data() end)},
         {text = "关于", callback = plugin:safe("about", function() plugin:show_about() end)},
     }

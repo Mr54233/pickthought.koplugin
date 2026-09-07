@@ -1,8 +1,17 @@
--- menus.lua 菜单结构与开关语义测试(需求 R4 + 上游式收纳重组)。
--- 关注:登录行两用语义、顶级收纳后的项构成、设置抽屉层级、
+-- menus.lua 菜单结构与开关语义测试(需求 R4 + 上游式收纳 + 登录行动作面板)。
+-- 关注:登录行两用语义与动作面板、顶级收纳后的项构成、设置抽屉层级、
 -- 想法弹窗设置的开关语义、划线样式保存链路。
 package.path = "./?.lua;" .. package.path
 
+local captured_dialog
+package.preload["ui/widget/buttondialog"] = function()
+    return {
+        new = function(_, fields)
+            captured_dialog = fields
+            return setmetatable(fields, {})
+        end,
+    }
+end
 package.preload["ui/widget/confirmbox"] = function()
     return { new = function(_, fields) return setmetatable(fields, {}) end }
 end
@@ -15,6 +24,12 @@ package.preload["ui/uimanager"] = function()
     }
 end
 
+-- 前面测试文件可能缓存过同名模块:清缓存保证本文件的桩生效。
+for _, name in ipairs({
+    "ui/widget/buttondialog", "ui/widget/confirmbox", "ui/uimanager",
+    "pickthought.ui.menus",
+}) do package.loaded[name] = nil end
+
 local function make_env()
     local env = {
         prefs = { thoughts = {}, update = {}, sync_keep_awake = true },
@@ -22,6 +37,9 @@ local function make_env()
         infos = {},
         saved_prefs = {},
         auth_flow_starts = 0,
+        auth_flow_cancels = 0,
+        renew_sessions = 0,
+        manual_credentials = 0,
         logged_in = true,
     }
     local plugin = { version = "test" }
@@ -31,13 +49,21 @@ local function make_env()
     function plugin.store:auth()
         return { api_key = "k", cookies = { wr_skey = "x" }, account = { name = "小明", vid = "1" } }
     end
-    function plugin.store:clear_auth() end
-    plugin.auth_flow = { start = function() env.auth_flow_starts = env.auth_flow_starts + 1 end }
+    function plugin.store:clear_auth() env.logged_in = false end
+    plugin.auth_flow = {
+        start = function() env.auth_flow_starts = env.auth_flow_starts + 1 end,
+        cancel = function() env.auth_flow_cancels = env.auth_flow_cancels + 1 end,
+    }
+    plugin.api = {
+        renew_session = function(self) env.renew_sessions = env.renew_sessions + 1; return true end,
+    }
     function plugin:safe(_label, fn) return fn end
     function plugin:logged_in() return env.logged_in end
     function plugin:current_doc_path() return nil end
+    function plugin:online(_label, fn) fn() end
     function plugin:toast(text) env.toasts[#env.toasts + 1] = text end
     function plugin:info(text) env.infos[#env.infos + 1] = text end
+    function plugin:manual_credentials() env.manual_credentials = env.manual_credentials + 1 end
     function plugin:apply_annotation_style() return true end
     function plugin:_thought_popup_preferences() return env.prefs.thoughts or {} end
     function plugin:_save_thought_popup_preferences(update)
@@ -81,21 +107,50 @@ local function texts(items)
     return out
 end
 
-T.case("登录行:已登录显示昵称,点按看状态", function()
+T.case("登录行:已登录显示昵称,点按弹账户动作面板", function()
     local env = make_env()
     local item = Menus.login_item(env.plugin)
     T.eq(item:text_func(), "微信读书 · 小明", "已登录行显示账号昵称")
     item.callback()
-    T.eq(env.infos[1]:find("已登录", 1, true), 1, "已登录点按展示账户状态")
+    T.ok(captured_dialog ~= nil, "已登录点按弹出动作面板")
+    local rows = captured_dialog.buttons
+    T.eq(#rows, 2, "动作面板两行四钮")
+    T.eq(rows[1][1].text, "账户状态", "状态入口")
+    T.eq(rows[1][2].text, "手动刷新 Cookie", "刷新入口")
+    T.eq(rows[2][1].text, "手动导入凭据", "手动导入入口")
+    T.eq(rows[2][2].text, "清除账号数据", "清除入口")
+    rows[1][1].callback()
+    T.eq(env.infos[1]:find("已登录", 1, true), 1, "账户状态展示登录信息")
+end)
+
+T.case("登录行:手动刷新 Cookie 触发续期请求", function()
+    local env = make_env()
+    local item = Menus.login_item(env.plugin)
+    item.callback()
+    captured_dialog.buttons[1][2].callback()
+    T.eq(env.renew_sessions, 1, "刷新按钮调用 renew_session")
+    T.eq(env.toasts[#env.toasts], "Cookie 刷新已执行", "刷新有提示")
+end)
+
+T.case("登录行:手动导入与清除账号入口可达", function()
+    local env = make_env()
+    local item = Menus.login_item(env.plugin)
+    item.callback()
+    captured_dialog.buttons[2][1].callback()
+    T.eq(env.manual_credentials, 1, "手动导入凭据直达")
+    captured_dialog.buttons[2][2].callback()
+    T.ok(env.auth_flow_cancels >= 0, "清除走确认框不直接清数据")
 end)
 
 T.case("登录行:未登录显示扫码登录,点按触发扫码", function()
     local env = make_env()
     env.logged_in = false
+    captured_dialog = nil
     local item = Menus.login_item(env.plugin)
     T.eq(item:text_func(), "扫码登录", "未登录行提示扫码")
     item.callback()
     T.eq(env.auth_flow_starts, 1, "未登录点按直接进入扫码流程")
+    T.eq(captured_dialog, nil, "未登录不弹动作面板")
 end)
 
 T.case("文件管理器菜单:上游式收纳,顶级 6 项", function()
@@ -111,7 +166,7 @@ T.case("文件管理器菜单:上游式收纳,顶级 6 项", function()
     T.eq(names[6], "设置", "末项是设置抽屉")
 end)
 
-T.case("阅读器菜单(已绑定书):5 项收纳", function()
+T.case("阅读器菜单(已绑定书):6 项收纳,想法弹窗设置在划线样式下", function()
     local env = make_env()
     local plugin = env.plugin
     function plugin:current_doc_path() return "/mnt/book.epub" end
@@ -124,12 +179,13 @@ T.case("阅读器菜单(已绑定书):5 项收纳", function()
     local items = Menus.reader_menu(plugin)
     Binding.get = orig_get
     local names = texts(items)
-    T.eq(#names, 5, "已绑定阅读菜单 5 项")
+    T.eq(#names, 6, "已绑定阅读菜单 6 项")
     T.eq(names[1]:find("微信读书 · 小明", 1, true), 1, "首行是登录行")
     T.eq(names[2], "同步划线与想法", "同步直达")
     T.eq(names[3], "划线样式（默认样式）", "划线样式直达")
-    T.eq(names[4], "书籍管理", "书籍管理抽屉")
-    T.eq(names[5], "设置", "末段是设置抽屉")
+    T.eq(names[4], "想法弹窗设置", "想法弹窗设置在划线样式之下")
+    T.eq(names[5], "书籍管理", "书籍管理抽屉")
+    T.eq(names[6], "设置", "末段是设置抽屉")
 end)
 
 T.case("阅读器菜单(未绑定书):仅登录行/绑定/设置", function()
@@ -148,23 +204,16 @@ T.case("书籍管理抽屉:重新绑定直达,路径为空不崩溃", function()
     T.eq(items[1].text, "重新绑定微信读书", "重新绑定入口")
 end)
 
-T.case("设置抽屉:八项构成,想法弹窗/更新/账号/危险操作全部收纳", function()
+T.case("设置抽屉:六项构成,弹窗设置与账号已外移", function()
     local env = make_env()
     local items = texts(Menus.settings_menu(env.plugin))
-    T.eq(#items, 8, "设置抽屉共 8 项")
-    T.eq(items[1], "想法弹窗设置", "想法弹窗设置收纳在设置下")
-    T.eq(items[5], "更新", "更新菜单收纳在设置下")
-    T.eq(items[6], "账号", "账号菜单收纳在设置下")
-    T.eq(items[7], "重置全部书籍", "危险操作收纳在设置下")
-    T.eq(items[8], "关于", "关于收纳在设置下")
-end)
-
-T.case("账号子菜单:手动导入与清除(已登录)", function()
-    local env = make_env()
-    local items = texts(Menus.account_menu(env.plugin))
-    T.eq(#items, 2, "账号子菜单 2 项")
-    T.eq(items[1], "Manual credentials", "手动导入凭据入口")
-    T.eq(items[2], "Clear account data", "清除账号入口")
+    T.eq(#items, 6, "设置抽屉共 6 项")
+    T.eq(items[1], "阅读时自动分批拉取后续章节", "第一项是自动分批拉取")
+    T.eq(items[4], "更新", "更新菜单收纳在设置下")
+    T.eq(items[5], "重置全部书籍", "危险操作收纳在设置下")
+    T.eq(items[6], "关于", "关于收纳在设置下")
+    T.ok(not table.concat(items, "|"):find("想法弹窗设置", 1, true), "弹窗设置已提级,不在设置抽屉")
+    T.ok(not table.concat(items, "|"):find("账号", 1, true), "账号已并入登录行动作面板")
 end)
 
 T.case("想法弹窗设置:九项构成、三分区开关联动", function()
