@@ -44,6 +44,7 @@ M.TEXT_STYLE_CHOICES = {
     "normal",
     "bold",
     "gray",
+    "italic",
 }
 
 local TEXT_RUNTIME_CSS = {
@@ -73,6 +74,18 @@ local TEXT_RUNTIME_CSS = {
 .pickthought-link,
 .pickthought-mark {
     color: #888888 !important;
+}
+/* PICKTHOUGHT_RUNTIME_TEXT_STYLE_END */
+]],
+    -- 注意:斜体可见与否取决于当前字体是否有斜体字形——中文常用字体普遍没有,
+    -- crengine 不做伪斜体合成,无斜体字形时回退正体(视觉无变化),是字体限制。
+    italic = [[
+/* PICKTHOUGHT_RUNTIME_TEXT_STYLE_BEGIN */
+.pickthought-inline-mark,
+.pickthought-link,
+.pickthought-mark {
+    color: inherit !important;
+    font-style: italic !important;
 }
 /* PICKTHOUGHT_RUNTIME_TEXT_STYLE_END */
 ]],

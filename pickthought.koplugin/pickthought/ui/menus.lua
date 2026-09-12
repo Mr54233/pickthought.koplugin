@@ -259,6 +259,7 @@ function M.annotation_style_menu(plugin)
         {"normal", "文字：跟随正文"},
         {"bold", "文字：加粗"},
         {"gray", "文字：淡化"},
+        {"italic", "文字：斜体"},
     }
     for _, choice in ipairs(text_choices) do
         local key, label = choice[1], choice[2]
