@@ -46,6 +46,15 @@ PATTERNS = [
 
 MAX_BYTES = 2_000_000
 
+# 允许入库的二进制资产按扩展名放行;其余非 UTF-8 文件一律拦截——
+# LuaJIT 字节码(\x1bLJ)曾被 luajit -b 误覆盖源码后无声入库,设备端(ARM)
+# 加载报 "cannot load incompatible bytecode" 直接废掉插件(2026-09-12 事故)。
+BINARY_ALLOWLIST = {
+    ".png", ".jpg", ".jpeg", ".gif", ".ico",
+    ".ttf", ".otf", ".woff", ".woff2",
+    ".zip", ".epub", ".luac",
+}
+
 
 def candidate_files():
     """跟踪文件 + 未被忽略的未跟踪文件（新增文件提交前即可扫到）。"""
@@ -71,6 +80,13 @@ def main() -> int:
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
+            if data.startswith(b"\x1bLJ"):
+                failures.append(
+                    f"{name}: LuaJIT 字节码意外入库(设备端无法加载,应提交源码)")
+            elif path.suffix.lower() not in BINARY_ALLOWLIST:
+                failures.append(
+                    f"{name}: 非 UTF-8 二进制文件疑似意外入库"
+                    "(确属二进制资产请加入 BINARY_ALLOWLIST 白名单)")
             continue
         scanned += 1
         for label, pattern in PATTERNS:

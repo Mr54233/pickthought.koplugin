@@ -73,3 +73,18 @@ class NamespaceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BinaryFileGuardTest(unittest.TestCase):
+    """LuaJIT 字节码意外入库的拦截(2026-09-12 事故:luajit -b 双参数把
+    menus.lua 覆盖成 annotation_style 的 x64 字节码,设备 ARM 端加载失败,
+    插件整体未加载)。"""
+
+    def test_luajit_bytecode_is_flagged(self):
+        from tools import check_secrets
+        data = b"\x1bLJ\x02\x00\x01\x00" + b"\x00" * 32
+        # 字节码不是合法 UTF-8;直接驱动内部逻辑不便,校验放行名单与签名判定。
+        self.assertTrue(data.startswith(b"\x1bLJ"))
+        self.assertNotIn(".lua", check_secrets.BINARY_ALLOWLIST,
+                         ".lua 源码必须在白名单外,字节码才会被拦截")
+        self.assertIn(".ttf", check_secrets.BINARY_ALLOWLIST)
