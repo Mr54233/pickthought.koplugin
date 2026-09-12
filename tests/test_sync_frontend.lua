@@ -826,25 +826,43 @@ T.case("三阶段进度显示累计和当前文件明细", function()
         "拉取阶段先保留原文案再追加当前章和累计数据")
 
     dialog:set_state({stage = "map", current = 415, total = 1284,
-        chapter = "Text/0415.xhtml",
+        chapter = "Text/0415.xhtml", map_phase = "primary", map_phase_count = 415,
         current_file = "Text/0415.xhtml", current_file_underlines = 12,
         current_file_thoughts = 37, matched_files = 415,
         fetch_chapters = 200, fetch_underlines = 12081, fetch_thoughts = 30338,
-        matched_underlines = 3420, matched_thoughts = 10206})
+        located_chapters = 62, map_target_chapters = 200})
     T.ok(dialog.status_text:find("本轮已拉取：章节 200 章，划线 12,081 条，想法 30,338 条", 1, true),
         "匹配阶段显示拉取汇总")
+    T.ok(dialog.status_text:find("正文文件 415 / 1,284", 1, true),
+        "主扫描阶段显示正文文件进度")
     T.ok(dialog.status_text:find("当前文件：Text/0415.xhtml", 1, true),
         "匹配阶段显示当前正文文件")
     T.ok(dialog.status_text:find("当前文件关联：划线 12 条，想法 37 条", 1, true),
         "匹配阶段显示当前文件关联数量")
     T.ok(dialog.status_text:find("本轮累计已扫描：正文文件 415 个", 1, true),
         "匹配阶段显示累计扫描文件数")
-    T.ok(dialog.status_text:find("本轮累计已匹配：划线 3,420 条，想法 10,206 条", 1, true),
-        "匹配阶段显示累计匹配数量")
+    T.ok(dialog.status_text:find("已定位章节 62 / 200", 1, true),
+        "匹配阶段显示已定位章节数(P3 真实成果计数)")
+    T.ok(not dialog.status_text:find("本轮累计已匹配", 1, true),
+        "被两阶段扫描放大的候选关联量不再以已匹配名义展示")
     T.ok(not dialog.status_text:find("Text/0415.xhtml\nText/0415.xhtml", 1, true),
         "匹配阶段不重复显示当前文件路径")
     T.ok(dialog.status_text:find("书籍较大时，此阶段可能持续较长时间。\n具体耗时取决于书籍大小、设备性能和想法数量。\n进度会继续，请耐心等待，勿强制退出 KOReader。", 1, true),
         "匹配阶段显示分行耗时提示")
+
+    -- P1(需求 2026-09-12):回退扫描阶段独立计数,不再显示两阶段合计访问数。
+    dialog:set_state({stage = "map", current = 1747, total = 1284,
+        chapter = "Text/0999.xhtml", map_phase = "fallback", map_phase_count = 463,
+        current_file = "Text/0999.xhtml", current_file_underlines = 3,
+        current_file_thoughts = 1, matched_files = 1284,
+        fetch_chapters = 200, fetch_underlines = 13226, fetch_thoughts = 112738,
+        located_chapters = 187, map_target_chapters = 200})
+    T.ok(dialog.status_text:find("回退扫描 463 / 1,284", 1, true),
+        "回退阶段显示回退扫描独立计数")
+    T.ok(not dialog.status_text:find("正文文件 1747", 1, true),
+        "回退阶段不再显示两阶段合计访问数")
+    T.ok(dialog.status_text:find("已定位章节 187 / 200", 1, true),
+        "回退阶段显示已定位章节数")
 
     dialog:set_state({stage = "inject", current = 415, total = 1333,
         chapter = "Text/0415.xhtml",

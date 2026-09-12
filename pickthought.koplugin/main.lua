@@ -1454,7 +1454,13 @@ function Plugin:_sync_run(path,bound)
                      tostring(metrics.fetch_message or ""))
                  elseif phase=="map" then
                      if n and n>0 and i and i>0 then
-                         msg=string.format("正在匹配本地章节 %d/%d 个正文文件",i,n)
+                         -- P1/P3(需求 2026-09-12):分阶段显示+真实成果计数,
+                         -- 与 sync_progress.lua 的后台视图保持一致。
+                         if metrics.map_phase=="fallback" then
+                             msg=string.format("回退扫描 %d/%d 个正文文件",count(metrics.map_phase_count),n)
+                         else
+                             msg=string.format("正在匹配本地章节 %d/%d 个正文文件",count(metrics.map_phase_count or i),n)
+                         end
                          msg=msg.."\n本轮已拉取：章节 "..count(metrics.fetch_chapters)
                              .." 章，划线 "..count(metrics.fetch_underlines)
                              .." 条，想法 "..count(metrics.fetch_thoughts).." 条"
@@ -1463,8 +1469,10 @@ function Plugin:_sync_run(path,bound)
                                  .."\n当前文件关联：划线 "..count(metrics.current_file_underlines)
                                  .." 条，想法 "..count(metrics.current_file_thoughts).." 条"
                          end
-                         msg=msg.."\n本轮累计已匹配：划线 "..count(metrics.matched_underlines)
-                             .." 条，想法 "..count(metrics.matched_thoughts).." 条"
+                         if metrics.located_chapters~=nil and (tonumber(metrics.map_target_chapters) or 0)>0 then
+                             msg=msg.."\n已定位章节 "..count(metrics.located_chapters)
+                                 .." / "..count(metrics.map_target_chapters)
+                         end
                          msg=msg.."\n本轮累计已扫描：正文文件 "..count(metrics.matched_files).." 个"
                          if n>200 then msg=msg.."\n书籍较大时，此阶段可能持续较长时间。\n具体耗时取决于书籍大小、设备性能和想法数量。\n进度会继续，请耐心等待，勿强制退出 KOReader。" end
                      else msg="正在匹配本地章节…" end

@@ -37,7 +37,8 @@ function SyncProgress:init()
     self._title = self.title or "撷思同步"
 
     local frame_width = math.floor(Screen:getWidth() * 0.82)
-    local frame_height = math.floor(Screen:getHeight() * 0.70)
+    -- P5(需求 2026-09-12):0.70 装不下匹配阶段的 11 行状态(长行还会折行)。
+    local frame_height = math.floor(Screen:getHeight() * 0.80)
     local content_width = frame_width - Size.padding.large * 2
     local content_height = frame_height - Size.padding.large * 2
     local group = VerticalGroup:new{align="center"}
@@ -213,15 +214,24 @@ function SyncProgress:set_state(state)
                 .. " 章，划线 " .. format_count(state.fetch_underlines)
                 .. " 条，想法 " .. format_count(state.fetch_thoughts) .. " 条"
         end
-        rows[#rows + 1] = "正文文件 " .. tostring(current) .. " / " .. tostring(total)
+        if state.map_phase == "fallback" then
+            -- P1(需求 2026-09-12):回退阶段独立计数。state.current 是两阶段
+            -- 合计访问次数(可达 2n),直接显示会越过分母。
+            rows[#rows + 1] = "回退扫描 " .. format_count(state.map_phase_count or 0)
+                .. " / " .. format_count(total)
+        else
+            rows[#rows + 1] = "正文文件 " .. format_count(current) .. " / " .. format_count(total)
+        end
         if state.current_file and state.current_file ~= "" then
             rows[#rows + 1] = "当前文件：" .. clean_status(state.current_file, 120)
             rows[#rows + 1] = "当前文件关联：划线 " .. format_count(state.current_file_underlines)
                 .. " 条，想法 " .. format_count(state.current_file_thoughts) .. " 条"
         end
-        if state.matched_underlines ~= nil or state.matched_thoughts ~= nil then
-            rows[#rows + 1] = "本轮累计已匹配：划线 " .. format_count(state.matched_underlines)
-                .. " 条，想法 " .. format_count(state.matched_thoughts) .. " 条"
+        -- P3(需求 2026-09-12):真实成果计数替代被两阶段扫描放大数百倍的
+        -- "候选关联量"(旧文案"本轮累计已匹配：划线 353 万条"曾被误读为数据损坏)。
+        if state.located_chapters ~= nil and (tonumber(state.map_target_chapters) or 0) > 0 then
+            rows[#rows + 1] = "已定位章节 " .. format_count(state.located_chapters)
+                .. " / " .. format_count(state.map_target_chapters)
         end
         if state.matched_files ~= nil then
             rows[#rows + 1] = "本轮累计已扫描：正文文件 " .. format_count(state.matched_files) .. " 个"

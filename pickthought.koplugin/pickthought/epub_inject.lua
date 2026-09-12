@@ -275,6 +275,7 @@ function M.inject_copy(src, book_id, chapters, opts)
         injected = 0, marks = 0, unmatched = {},
         quote_aligned = 0, numeric = 0, dropped = 0, overlapped = 0, unlocated = 0,
         underlines_resolved = 0, thoughts_linked = 0, thoughts_linked_by_uid = {},
+        unlocated_by_uid = {},
         merges = {}, target_files = 0, batch_apply_calls = 0,
         shared_index_builds = 0, batch_fallbacks = 0,
     }
@@ -550,6 +551,7 @@ function M.inject_copy(src, book_id, chapters, opts)
 
     -- 未注入 = 唯一划线里既没落锚也没被重叠合并的(跨全部目标文件聚合)。
     for uid, track in pairs(uid_track) do
+        local uid_unlocated = 0
         for key in pairs(track.total) do
             if track.resolved[key] then
                 stats.underlines_resolved = stats.underlines_resolved + 1
@@ -559,7 +561,12 @@ function M.inject_copy(src, book_id, chapters, opts)
                     (stats.thoughts_linked_by_uid[uid] or 0) + linked
             else
                 stats.unlocated = stats.unlocated + 1
+                uid_unlocated = uid_unlocated + 1
             end
+        end
+        -- P4 取证(需求 2026-09-12):按章节聚合未定位划线,定位质量退化的分布线索。
+        if uid_unlocated > 0 then
+            stats.unlocated_by_uid[uid] = uid_unlocated
         end
     end
 

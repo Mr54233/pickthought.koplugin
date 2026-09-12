@@ -51,6 +51,8 @@ function Sync.run(deps)
         fetch_chapters = 0, fetch_underlines = 0, fetch_thoughts = 0,
         book_fetch_chapters = 0, book_fetch_underlines = 0, book_fetch_thoughts = 0,
         matched_files = 0, matched_underlines = 0, matched_thoughts = 0,
+        map_phase = "primary", map_phase_count = 0,
+        located_chapters = 0, map_target_chapters = 0,
         injected_files = 0, injected_underlines = 0, injected_thoughts = 0,
         current_fetch_underlines = 0, current_fetch_thoughts = 0,
         fetch_message = nil,
@@ -807,6 +809,7 @@ function Sync.run(deps)
 
     if #todo > 0 then
         local map_started_at = os.time()
+        local map_phase_seen = nil
         local function report_map_file(detail)
             local href = tostring(detail and detail.href or "")
             if href ~= "" and not matched_file_seen[href] then
@@ -817,6 +820,20 @@ function Sync.run(deps)
                 + (tonumber(detail and detail.underlines) or 0)
             progress_metrics.matched_thoughts = progress_metrics.matched_thoughts
                 + (tonumber(detail and detail.thoughts) or 0)
+            -- P1(需求 2026-09-12):主扫描/回退扫描分阶段计数——map_count 是
+            -- 两阶段合计访问次数(可达 2n),直接当"已匹配文件数"展示会越过分母。
+            local phase_now = tostring(detail and detail.phase or "primary")
+            if phase_now ~= map_phase_seen then
+                map_phase_seen = phase_now
+                progress_metrics.map_phase = phase_now
+                progress_metrics.map_phase_count = 0
+            end
+            progress_metrics.map_phase_count = progress_metrics.map_phase_count + 1
+            -- P3(需求 2026-09-12):真实成果计数,替代被放大的"候选关联量"。
+            progress_metrics.located_chapters = tonumber(detail and detail.matched_chapters)
+                or progress_metrics.located_chapters or 0
+            progress_metrics.map_target_chapters = tonumber(detail and detail.target_chapters)
+                or progress_metrics.map_target_chapters or 0
             progress_metrics.current_file = href
             progress_metrics.current_file_underlines = tonumber(detail and detail.underlines) or 0
             progress_metrics.current_file_thoughts = tonumber(detail and detail.thoughts) or 0
@@ -837,6 +854,16 @@ function Sync.run(deps)
             end, todo, {on_check = map_checkpoint, on_file = report_map_file})
         end
         if spine_cache then spine_cache:close() end
+        -- P4 取证(需求 2026-09-12):进入回退的章节清单——标题缺失/与本地 h2
+        -- 不一致是主扫描失效的直接线索。仅在异常路径(确有回退)输出。
+        if map_metrics and map_metrics.fallback_list and #map_metrics.fallback_list > 0 then
+            local fallback_titles = {}
+            for _, fc in ipairs(map_metrics.fallback_list) do
+                fallback_titles[#fallback_titles + 1] = tostring(fc.title or fc.uid or "?")
+            end
+            logger.info("[撷思][ChapterMap] fallback chapters(",
+                #map_metrics.fallback_list, "):", table.concat(fallback_titles, " | "))
+        end
         logger.info("[撷思][ChapterMap] completed",
             "spine=", tostring(spine_total), "chapters=", tostring(#todo),
             "streamed=", tostring(deps.read_spine ~= nil),
@@ -1030,6 +1057,18 @@ function Sync.run(deps)
     local stats, inject_err = deps.inject(src, book_ids[1], mapped, temp_dest,
         {append = append, meta = meta, book_ids = book_ids, progress = report_inject_progress})
     if not stats then return nil, inject_err end
+    -- P4 取证(需求 2026-09-12):未定位划线远超历史水位(常态个位数)时,
+    -- 输出按章节的分布,定位质量退化的具体范围。
+    if type(stats.unlocated) == "number" and stats.unlocated > 50
+        and type(stats.unlocated_by_uid) == "table" then
+        local unlocated_rows = {}
+        for uid, count in pairs(stats.unlocated_by_uid) do
+            unlocated_rows[#unlocated_rows + 1] = tostring(uid) .. "=" .. tostring(count)
+        end
+        table.sort(unlocated_rows)
+        logger.warn("[撷思][Sync] unlocated by chapter(", stats.unlocated, "):",
+            table.concat(unlocated_rows, " "))
+    end
 
     -- 重叠划线被合并的,把想法并进存活锚点的组:点一个虚线看到这一段全部想法。
     if deps.merge_thoughts then

@@ -339,6 +339,8 @@ local function build_with_scanner(spine, chapters, scan, options)
     -- 全部目标章节命中后提前结束扫描:剩余正文文件不再读取/解压,
     -- 以 "已取消" 信号停止扫描,由 build_with_scanner 按成功收尾。
     local matched_ci_seen = {}
+    -- 唯一已定位目标章节数(引文得分>0):进度面板"已定位章节 N / M"的数据源。
+    local matched_count = 0
     local all_matched_early = false
     local recent_hit_streak = 0  -- 连续"命中目标的文件"计数(提前退出保守判据)
     local title_hits = {}   -- [ci] = {href, ...}(已排除目录页)
@@ -541,7 +543,10 @@ local function build_with_scanner(spine, chapters, scan, options)
                         end
                     end
                     if score > 0 then
-                        if not matched_ci_seen[ci] then matched_ci_seen[ci] = true end
+                        if not matched_ci_seen[ci] then
+                            matched_ci_seen[ci] = true
+                            matched_count = matched_count + 1
+                        end
                         scores[ci] = scores[ci] or {}
                         scores[ci][#scores[ci] + 1] = {
                             href = item.href, score = score, spine_index = spine_index,
@@ -562,6 +567,10 @@ local function build_with_scanner(spine, chapters, scan, options)
                     chapters = associated_chapters,
                     underlines = associated_underlines,
                     thoughts = associated_thoughts,
+                    -- P3(需求 2026-09-12):真实成果计数——唯一已定位章节数与目标总数,
+                    -- 替代面板上被两阶段扫描放大的"候选关联量"。
+                    matched_chapters = matched_count,
+                    target_chapters = #chapters,
                 })
                 if reported == false then return false end
             end
@@ -592,6 +601,9 @@ local function build_with_scanner(spine, chapters, scan, options)
     -- 标题索引未覆盖的章节才启动兼容回退。正常有结构书籍不会进入这里;
     -- 标题被改写、正文没有 h 标签或 EPUB 结构异常时仍能复用旧定位语义。
     local fallback_cis, fallback_count = {}, 0
+    -- P4 取证:进入回退的章节清单(uid+标题),由调用方按需记录。
+    -- 标题缺失/与本地 h2 不一致是主扫描失效的直接线索。
+    local fallback_list = {}
     for ci, quotes in ipairs(quotes_list) do
         if #quotes > 0 then
             local strong_min = math.min(2, #quotes)
@@ -602,6 +614,9 @@ local function build_with_scanner(spine, chapters, scan, options)
             if not has_strong and not title_hits[ci] then
                 fallback_cis[ci] = true
                 fallback_count = fallback_count + 1
+                local ch = chapters[ci] or {}
+                fallback_list[#fallback_list + 1] =
+                    {uid = tostring(ch.uid or ""), title = tostring(ch.title or "")}
             end
         end
     end
@@ -617,6 +632,7 @@ local function build_with_scanner(spine, chapters, scan, options)
         "quote_checks=", tostring(metrics.quote_checks),
         "relaxed_hits=", tostring(metrics.relaxed_hits),
         "order_inversions=", tostring(metrics.order_inversions))
+    metrics.fallback_list = fallback_list
     local function by_spine(a, b)
         return (tonumber(a.spine_index) or 0) < (tonumber(b.spine_index) or 0)
     end

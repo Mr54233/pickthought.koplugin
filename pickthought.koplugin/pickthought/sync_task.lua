@@ -116,6 +116,20 @@ local function annotate_book_progress(state, book_index_by_id, book_count, book_
     return state
 end
 
+-- P2(需求 2026-09-12 方案 B):匹配阶段百分比分带。
+-- 主扫描 0.84~0.87,回退扫描 0.87~0.90;钳制保证不越过 0.90(inject 的刻度),
+-- 单调不回退。band_i 为当前阶段的文件访问序号(回退阶段独立从 1 起数)。
+function SyncTask.map_percent(map_phase, band_i, n)
+    local in_fallback = map_phase == "fallback"
+    local base = in_fallback and 0.87 or 0.84
+    local visits = tonumber(band_i) or 0
+    local total = tonumber(n) or 0
+    if total > 0 and visits > 0 then
+        return base + (math.min(visits, total) / total) * 0.03
+    end
+    return base
+end
+
 function SyncTask:new(store)
     local owner_token = tostring(os.time()) .. "-" .. tostring(math.random(100000,999999))
     local instance = setmetatable({
@@ -1260,8 +1274,14 @@ function SyncTask:start(task, on_progress, on_done)
                     elseif phase == "fetch" then
                         percent = fetch_percent()
                     elseif phase == "map" then
-                        -- 映射按正文文件推进,占 0.84~0.90 这一段
-                        percent = 0.84 + (n and n > 0 and i and i > 0 and (i / n) * 0.06 or 0)
+                        -- P2(2026-09-12 方案 B):主扫描占 0.84~0.87,回退扫描占
+                        -- 0.87~0.90。map_phase/map_phase_count 由 sync.lua 的
+                        -- report_map_file 维护;map_percent 内部钳制保证任何情况下
+                        -- 不越过 0.90(旧缺陷:map_count 为两阶段合计访问次数,可达
+                        -- 2n,百分比一度算到 96% 并在进入注入时回落)。
+                        percent = SyncTask.map_percent(
+                            metrics and metrics.map_phase,
+                            metrics and metrics.map_phase_count or i, n)
                     elseif phase == "inject" then percent = 0.90 end
                     local state = {stage = phase, current = i, total = n, chapter = text,
                         book_id = phase_book_id, percent = percent,

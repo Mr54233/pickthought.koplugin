@@ -293,3 +293,17 @@ T.case("SyncTask 当前书目进度补全书名和序号", function()
         {b1 = 1}, 1, {b1 = "剑来"})
     T.eq(unrelated.book_title, nil, "合集级进度不附带误导性的当前书名")
 end)
+
+T.case("匹配阶段百分比分带(P2):主扫描 0.84~0.87,回退 0.87~0.90,恒不越界", function()
+    T.eq(SyncTask.map_percent("primary", 0, 1284), 0.84, "主扫描起点")
+    local primary_end = SyncTask.map_percent("primary", 1284, 1284)
+    T.ok(primary_end > 0.869 and primary_end <= 0.87, "主扫描终点 0.87")
+    local fallback_start = SyncTask.map_percent("fallback", 1, 1284)
+    T.ok(fallback_start > 0.87 and fallback_start < 0.88, "回退起点 0.87")
+    T.ok(SyncTask.map_percent("fallback", 1284, 1284) <= 0.90, "回退终点不越过 0.90")
+    T.ok(SyncTask.map_percent("fallback", 99999, 1284) <= 0.90,
+        "异常访问计数同样被钳制(旧缺陷可达 0.96)")
+    T.ok(SyncTask.map_percent(nil, 99999, 1284) <= 0.87,
+        "无 phase 字段的旧载荷回落主扫描带并钳制")
+    T.eq(SyncTask.map_percent("primary", 0, 0), 0.84, "无文件时停在主扫描起点")
+end)

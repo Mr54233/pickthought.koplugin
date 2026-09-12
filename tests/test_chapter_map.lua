@@ -482,3 +482,26 @@ end)
 T.case("ALGO_VERSION 升至 9(A8)", function()
     T.eq(ChapterMap.ALGO_VERSION, 9, "标题键行为变化,旧映射缓存整体作废")
 end)
+
+T.case("on_file 上报已定位章节数,回退章节清单进入 metrics(P3/P4 取证字段)", function()
+    local details = {}
+    local mapped, unmatched, metrics = ChapterMap.build_stream(SPINE, function(callback)
+        for index, item in ipairs(SPINE) do
+            callback(item, FILES[item.href], nil, index)
+        end
+        return true
+    end, {
+        {uid = "1", title = "第一章 春江潮水", underlines = {
+            {range = "0-7", markText = "春江潮水连海平"},
+        }},
+        {uid = "2", title = "第八百章 绝不存在的标题", underlines = {
+            {range = "0-7", markText = "彻底不存在的引文内容"},
+        }},
+    }, {on_file = function(detail) details[#details + 1] = detail end})
+    T.eq(#details > 0, true, "on_file 被调用")
+    T.eq(details[#details].matched_chapters, 1, "唯一已定位章节数(真实成果计数)")
+    T.eq(details[#details].target_chapters, 2, "目标章节总数")
+    T.eq(details[#details].phase, "fallback", "末次访问处于回退阶段")
+    T.eq(metrics.fallback_list[1].uid, "2", "未命中章节进入回退清单")
+    T.eq(metrics.fallback_list[1].title, "第八百章 绝不存在的标题", "回退清单携带标题")
+end)
