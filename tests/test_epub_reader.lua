@@ -119,6 +119,37 @@ T.case("each_spine 回调取消后停止读取并关闭 Reader", function()
     T.eq(book._reader_new_count, 2, "取消后 Reader 已关闭且没有重复打开")
 end)
 
+T.case("each_spine 透传 all_matched 成功信号(不误报取消)", function()
+    -- 回归:全部章节命中后的提前退出返回 false,"all_matched"——
+    -- 第二返回值曾被丢弃并误报成「已取消」,把完美同步打成失败。
+    local book = fake_book()
+    local meta = EpubReader.load("allmatched.epub", book)
+    local calls = 0
+    local ok, err = EpubReader.each_spine(meta, function()
+        calls = calls + 1
+        return false, "all_matched"
+    end, book)
+    T.eq(ok, false, "提前退出仍返回 false")
+    T.eq(err, "all_matched", "成功信号原样透传,不得变成已取消")
+    T.eq(calls, 1, "信号触发后停止回调")
+end)
+
+T.case("each_spine 缺失 spine 条目路径同样透传 all_matched", function()
+    -- 少一个 spine 实体文件:走「EPUB 中缺少 spine 条目」补偿回调分支。
+    local book = STUBS.archiver_mock({
+        {path = "mimetype", content = "application/epub+zip"},
+        {path = "META-INF/container.xml", content = CONTAINER},
+        {path = "OEBPS/content.opf", content = OPF},
+        {path = "OEBPS/Text/ch 1.xhtml", content = "<html><body>一</body></html>"},
+    })
+    local meta = EpubReader.load("missing.epub", book)
+    local ok, err = EpubReader.each_spine(meta, function()
+        return false, "all_matched"
+    end, book)
+    T.eq(ok, false, "补偿分支同样返回 false")
+    T.eq(err, "all_matched", "all_matched 在缺失条目分支不丢")
+end)
+
 T.case("坏包报错", function()
     local no_container = STUBS.archiver_mock({{path = "mimetype", content = "application/epub+zip"}})
     local meta, err = EpubReader.load("bad.epub", no_container)

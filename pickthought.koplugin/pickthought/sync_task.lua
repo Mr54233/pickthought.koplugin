@@ -790,8 +790,17 @@ function SyncTask:start(task, on_progress, on_done)
             local ok, encoded = pcall(JsonChild.encode, state)
             if ok then UChild.atomic_write(progress_path, encoded, true) end
         end
+        local debug_cancel_seen = false
         local function cancelled()
-            return UChild.file_exists(cancel_path)
+            local hit = UChild.file_exists(cancel_path)
+            if hit and not debug_cancel_seen then
+                debug_cancel_seen = true
+                logger.warn("[撷思][SyncTask][Diag] cancel file detected",
+                    "path=", tostring(cancel_path),
+                    "size=", tostring(UChild.file_size(cancel_path) or "n/a"),
+                    "os_time=", tostring(os.time()))
+            end
+            return hit
         end
 
         local function persist_failure_state(status, reason)

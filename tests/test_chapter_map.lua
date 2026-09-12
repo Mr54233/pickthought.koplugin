@@ -334,3 +334,151 @@ T.case("章节映射检查点取消会停止扫描", function()
     T.ok(not ok and tostring(err):find("已取消", 1, true), "检查点取消向上传播")
     T.ok(calls > 0, "触发了检查点")
 end)
+
+-- ===== 以下为章节标题索引迁移(上游 PR #150 对齐)新增用例 =====
+
+T.case("更新后缀关键词扩展剥除(A1)", function()
+    -- R2:关键词集 {更,求,订,阅,票,藏,赏}。注意 title_key 本身还会剥
+    -- 「第三卷」编号(既有行为),最终键只剩章名本体。
+    T.eq(ChapterMap.title_key("第三卷 风雪夜归（求票）"), "风雪夜归", "求票括号剥除")
+    T.eq(ChapterMap.title_key("风雪夜归（订阅正文）"), "风雪夜归", "订阅括号剥除")
+    T.eq(ChapterMap.title_key("风雪夜归(收藏)"), "风雪夜归", "半角收藏括号剥除")
+    T.eq(ChapterMap.title_key("风雪夜归（求收藏打赏）"), "风雪夜归", "多关键词括号剥除")
+    T.eq(ChapterMap.title_key("风雪夜归（改）"), "风雪夜归(改)", "非关键词括号保留(全角折半角)")
+    T.eq(ChapterMap.title_key("风雪夜归（黄昏）"), "风雪夜归(黄昏)", "黄昏非关键词保留")
+end)
+
+T.case("英文 Chapter 前缀剥离(A2)", function()
+    -- R3:Chapter + 阿拉伯/罗马数字 + 分隔符
+    T.eq(ChapterMap.title_key("Chapter 12: 风雪夜归人"), "风雪夜归人", "阿拉伯数字英文前缀")
+    T.eq(ChapterMap.title_key("CHAPTER XIII - 天涯客"), "天涯客", "罗马数字大写前缀")
+    T.eq(ChapterMap.title_key("chapter 3.风起"), "风起", "小写前缀加点分隔")
+    T.eq(ChapterMap.title_key("Chapter 1 上"), "Chapter1上", "剥后过短保留原键")
+    T.eq(ChapterMap.title_key("风雪Chapters"), "风雪Chapters", "非前缀位置不动")
+end)
+
+T.case("宽松标题键提取正反例(A3)", function()
+    -- R1:序号 + 分隔符 + 本体(≥6 字节);任一不满足退回 title_key
+    T.eq(ChapterMap.relaxed_title_key("二、姑娘请自重"), "姑娘请自重", "顿号序号剥离")
+    T.eq(ChapterMap.relaxed_title_key("（二）风雪夜归"), "风雪夜归", "全角括号序号剥离")
+    T.eq(ChapterMap.relaxed_title_key("2. 风雪夜归"), "风雪夜归", "阿拉伯数字加点剥离")
+    T.eq(ChapterMap.relaxed_title_key("XII、天涯客"), "天涯客", "罗马数字序号剥离")
+    T.eq(ChapterMap.relaxed_title_key("三体"), "三体", "无分隔符不剥离")
+    T.eq(ChapterMap.relaxed_title_key("二、上"), "二、上", "本体过短保留全键")
+    T.eq(ChapterMap.relaxed_title_key("风雪夜归"), "风雪夜归", "无序号原样返回")
+end)
+
+T.case("宽松键匹配救回卷内编号章(A4)", function()
+    -- 本地标题带卷内编号「二、」,微信章名无编号,引文全失配:
+    -- 精确键对不上,宽松键唯一命中救回。
+    local files = {
+        ["c1.xhtml"] = "<html><body><h2>一、春江潮水</h2><p>本地独有正文内容。</p></body></html>",
+        ["c2.xhtml"] = "<html><body><h2>二、月照花林</h2><p>别处不会出现的月光描写段落。</p></body></html>",
+    }
+    local spine = {{href = "c1.xhtml"}, {href = "c2.xhtml"}}
+    local chapters = {{
+        uid = "1", title = "月照花林",
+        underlines = {{range = "0-1", markText = "精校版里不存在的引文甲"},
+                      {range = "1-2", markText = "精校版里不存在的引文乙"}},
+    }}
+    local mapped, unmatched, metrics = ChapterMap.build(spine, function(h) return files[h] end, chapters)
+    T.eq(#mapped, 1, "宽松键救回: unmatched=" .. tostring(#unmatched))
+    T.eq(mapped[1].href, "c2.xhtml", "映射到卷内编号对应的文件")
+    T.eq(mapped[1].quote_only, true, "标题来源强制 quote_only")
+    T.ok(metrics.relaxed_hits >= 1, "记录宽松键命中: " .. tostring(metrics.relaxed_hits))
+end)
+
+T.case("远程重复宽松键时守卫生效(A5)", function()
+    -- 两章微信标题「一、」「二、」宽松后同为「姑娘请自重」→ 远程不唯一 →
+    -- 宽松 tier 整体禁用:本地「三、姑娘请自重」剥号后不得凭宽松键配对。
+    -- (序号不同精确键也不互为子串,标题兜底救不了 → 两章 no_hit。)
+    local files = {
+        ["c1.xhtml"] = "<html><body><h2>三、姑娘请自重</h2><p>正文只有这一句月光如水照佳人。</p></body></html>",
+    }
+    local spine = {{href = "c1.xhtml"}}
+    local chapters = {
+        {uid = "1", title = "一、姑娘请自重",
+         underlines = {{range = "0-1", markText = "精校版里不存在的引文甲"},
+                       {range = "1-2", markText = "精校版里不存在的引文乙"}}},
+        {uid = "2", title = "二、姑娘请自重",
+         underlines = {{range = "0-1", markText = "另一条精校版缺失的引文丙"},
+                       {range = "1-2", markText = "另一条精校版缺失的引文丁"}}},
+    }
+    local mapped, unmatched, metrics = ChapterMap.build(spine, function(h) return files[h] end, chapters)
+    T.eq(#mapped, 0, "远程重复宽松键不产生任何配对")
+    T.eq(metrics.relaxed_hits, 0, "宽松命中计数为 0")
+    T.eq(#unmatched, 2, "两章都无法定案")
+    T.eq(unmatched[1].reason, "no_hit", "走 no_hit 而非错配")
+end)
+
+T.case("精确键优先于宽松键(A6)", function()
+    -- 精确键能命中的块不再消耗宽松命中计数。
+    local files = {
+        ["c1.xhtml"] = "<html><body><h2>一、月照花林</h2><p>滟滟随波千万里。</p></body></html>",
+    }
+    local spine = {{href = "c1.xhtml"}}
+    local chapters = {{
+        uid = "1", title = "一、月照花林",
+        underlines = {{range = "0-8", markText = "滟滟随波千万里"}},
+    }}
+    local mapped, unmatched, metrics = ChapterMap.build(spine, function(h) return files[h] end, chapters)
+    T.eq(#mapped, 1, "精确键命中")
+    T.eq(metrics.relaxed_hits, 0, "精确命中不重复计宽松")
+end)
+
+T.case("序倒挂强制 quote_only(A7)", function()
+    -- 第1章经标题兜底落在后面的文件,第2章引文命中前面的文件 → 倒挂:
+    -- 第2章强制 quote_only 并计数;第1章不受影响。
+    local files = {
+        ["c1.xhtml"] = "<html><body><h2>第二章 别处的月光</h2><p>第二章的正文引文戊己庚辛。</p></body></html>",
+        ["c2.xhtml"] = "<html><body><h2>第一章 春江潮水</h2><p>本地独有的春江正文内容。</p></body></html>",
+    }
+    local spine = {{href = "c1.xhtml"}, {href = "c2.xhtml"}}
+    local chapters = {
+        {uid = "1", title = "第一章 春江潮水",
+         underlines = {{range = "0-1", markText = "精校后不存在的引文甲"},
+                       {range = "1-2", markText = "精校后不存在的引文乙"}}},
+        {uid = "2", title = "第二章 别处的月光",
+         underlines = {{range = "0-8", markText = "第二章的正文引文戊己庚辛"},
+                       {range = "8-9", markText = "第二章的另一句引文辛壬癸甲"}}},
+    }
+    local mapped, unmatched, metrics = ChapterMap.build(spine, function(h) return files[h] end, chapters)
+    T.eq(#unmatched, 0, "两章都有目标: unmatched=" .. tostring(#unmatched))
+    T.eq(metrics.order_inversions, 1, "记录一次序倒挂")
+    local by_uid = {}
+    for _, row in ipairs(mapped) do by_uid[row.chapter_uid] = row end
+    T.ok(by_uid["2"].quote_only, "倒挂章强制 quote_only(原本单目标可走数字兜底)")
+    T.ok(by_uid["1"].quote_only, "标题兜底目标本就 quote_only")
+end)
+
+T.case("合并章跨文件不触发序倒挂(A7 反例)", function()
+    -- 微信合并章横跨 c1/c2(合法非递减),下一章从 c2 起:锚点 max 传递,不误报。
+    -- 注意 uid2 标题「后记」本体不得出现在 c2 正文里,否则标题兜底会以
+    -- quote_only 定案,测不出「单强目标保留数字兜底」的守卫未触发路径。
+    local files = {
+        ["c1.xhtml"] = [[<html><body><p>甲文件专属引文其一。甲文件专属引文其二。</p></body></html>]],
+        ["c2.xhtml"] = [[<html><body><p>乙文件专属引文其一。乙文件专属引文其二。乙文件后半的独有内容甲。乙文件后半的独有内容乙。</p></body></html>]],
+    }
+    local spine = {{href = "c1.xhtml"}, {href = "c2.xhtml"}}
+    local chapters = {
+        {uid = "1", title = "第一章 合并",
+         underlines = {
+            {range = "0-1", markText = "甲文件专属引文其一"},
+            {range = "1-2", markText = "甲文件专属引文其二"},
+            {range = "2-3", markText = "乙文件专属引文其一"},
+            {range = "3-4", markText = "乙文件专属引文其二"}}},
+        {uid = "2", title = "第三章 后记",
+         underlines = {{range = "0-8", markText = "乙文件后半的独有内容甲"},
+                       {range = "8-9", markText = "乙文件后半的独有内容乙"}}},
+    }
+    local mapped, unmatched, metrics = ChapterMap.build(spine, function(h) return files[h] end, chapters)
+    T.eq(#unmatched, 0, "两章均命中")
+    T.eq(metrics.order_inversions, 0, "合法跨文件不记倒挂")
+    local by_uid = {}
+    for _, row in ipairs(mapped) do by_uid[row.chapter_uid] = row end
+    T.eq(by_uid["2"].quote_only, nil, "守卫未触发:单强目标保留数字兜底资格")
+end)
+
+T.case("ALGO_VERSION 升至 9(A8)", function()
+    T.eq(ChapterMap.ALGO_VERSION, 9, "标题键行为变化,旧映射缓存整体作废")
+end)
