@@ -145,6 +145,7 @@ function E.each_spine(meta, callback, archiver)
     end
     local seen = {}
     local cancelled = false
+    local all_matched = false
     local ok, scan_err = xpcall(function()
         for entry in reader:iterate() do
             local rows = not seen[entry.path] and wanted[entry.path] or nil
@@ -154,30 +155,38 @@ function E.each_spine(meta, callback, archiver)
                 local read_err = content == nil and (reader.err or
                     ("无法读取 EPUB 条目:" .. tostring(entry.path))) or nil
                 for _, row in ipairs(rows) do
-                    if callback(row.item, content, read_err, row.index) == false then
-                        cancelled = true
+                    local stop, reason = callback(row.item, content, read_err, row.index)
+                    if stop == false then
+                        -- callback 的第二个返回值是语义标记:"all_matched" 是
+                        -- 全部命中的成功信号,不是取消;丢了它,上游式提前退出
+                        -- 会被当成取消,把一次完美同步报成失败。
+                        cancelled = reason ~= "all_matched"
+                        all_matched = not cancelled
                         break
                     end
                 end
-                if cancelled then break end
+                if cancelled or all_matched then break end
             end
         end
-        if cancelled then return end
+        if cancelled or all_matched then return end
         for href, rows in pairs(wanted) do
             if not seen[href] then
                 for _, row in ipairs(rows) do
-                    if callback(row.item, nil, "EPUB 中缺少 spine 条目:" .. tostring(href), row.index) == false then
-                        cancelled = true
+                    local stop, reason = callback(row.item, nil, "EPUB 中缺少 spine 条目:" .. tostring(href), row.index)
+                    if stop == false then
+                        cancelled = reason ~= "all_matched"
+                        all_matched = not cancelled
                         break
                     end
                 end
-                if cancelled then break end
+                if cancelled or all_matched then break end
             end
         end
     end, debug.traceback)
     reader:close()
     if not ok then error(scan_err) end
     if cancelled then return false, "已取消" end
+    if all_matched then return false, "all_matched" end
     return true
 end
 

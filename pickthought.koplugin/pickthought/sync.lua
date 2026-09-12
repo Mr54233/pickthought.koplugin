@@ -768,8 +768,10 @@ function Sync.run(deps)
                 -- 暖模式:直接从缓存流式喂,完全不碰 EPUB。
                 for index, item in ipairs(m.spine or {}) do
                     local html = spine_cache:get(item.href)
-                    if callback(item, html, html == nil and "缓存缺失" or nil, index) == false then
-                        return false, "已取消"
+                    local stop, reason = callback(item, html, html == nil and "缓存缺失" or nil, index)
+                    if stop == false then
+                        -- reason 可能是 "all_matched"(全部命中的成功信号),必须透传。
+                        return false, reason or "已取消"
                     end
                 end
                 return true
@@ -783,8 +785,9 @@ function Sync.run(deps)
             end
             -- 无真实 read_spine:走 read_text 路径(仍经缓存)。
             for index, item in ipairs(m.spine or {}) do
-                if callback(item, cached_read_text(m, item.href), nil, index) == false then
-                    return false, "已取消"
+                local stop, reason = callback(item, cached_read_text(m, item.href), nil, index)
+                if stop == false then
+                    return false, reason or "已取消"
                 end
             end
             return true
@@ -794,8 +797,9 @@ function Sync.run(deps)
             return real_read_spine(m, callback)
         end
         for index, item in ipairs(m.spine or {}) do
-            if callback(item, real_read_text and real_read_text(m, item.href), nil, index) == false then
-                return false, "已取消"
+            local stop, reason = callback(item, real_read_text and real_read_text(m, item.href), nil, index)
+            if stop == false then
+                return false, reason or "已取消"
             end
         end
         return true

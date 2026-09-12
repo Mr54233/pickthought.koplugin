@@ -13,13 +13,18 @@ local ChapterMap = {}
 -- 匹配算法版本:任何影响匹配结果的改动(引文窗口、投票规则、目录页判定、
 -- 归一化规则)都必须 +1。映射缓存把它写进指纹,算法一改缓存整体作废——
 -- 否则旧算法缓存下来的「匹配失败」会永久生效,改进永远轮不到那些章节。
-ChapterMap.ALGO_VERSION = 8
+-- 9:迁移上游 weread PR #150 的标题键改进(宽松标题键/更新后缀关键词扩展/
+-- 英文 Chapter 前缀剥离/目标顺序守卫),标题匹配行为变化,旧缓存整体作废。
+ChapterMap.ALGO_VERSION = 9
 
 -- 标题钥匙:剥掉「第X章/节/回…」编号前缀。微信与本地书的章号体系
 -- 经常不一致(实测:微信「第六章 姑娘请自重」= 本地「第二百八十四章
 -- 姑娘请自重」),整标题匹配必死;章名本体才是稳定标识。
 -- 剥完不足 6 字节(如「上」「下」)退回全标题。
 local CHAPTER_ENDINGS = {"章", "节", "回", "卷", "部", "集", "篇"}
+-- 更新/求票类括号后缀关键词(对齐上游 weread PR #150):求票/订阅/收藏/打赏等
+-- 网文标题尾巴必须剥掉,精确键才能和干净章名对上。
+local UPDATE_SUFFIX_KEYWORDS = {"更", "求", "订", "阅", "票", "藏", "赏"}
 local CHAPTER_NUMBER_TOKENS = {
     "零", "〇", "一", "二", "三", "四", "五", "六", "七", "八", "九",
     "十", "百", "千", "万", "两",
@@ -27,10 +32,19 @@ local CHAPTER_NUMBER_TOKENS = {
 
 local function is_chapter_number(value)
     local number = tostring(value or ""):gsub("%d", "")
+    -- 罗马数字(对齐上游 is_outline_number):Chapter XIII / 第XII卷 都要认。
+    number = number:gsub("[IVXLCDMivxlcdm]", "")
     for _, token in ipairs(CHAPTER_NUMBER_TOKENS) do
         number = number:gsub(token, "")
     end
     return number == ""
+end
+
+local function has_update_keyword(text)
+    for _, keyword in ipairs(UPDATE_SUFFIX_KEYWORDS) do
+        if text:find(keyword, 1, true) then return true end
+    end
+    return false
 end
 
 local function strip_chapter_number(value)
@@ -64,7 +78,7 @@ local function strip_update_suffix(value)
         local close_at = #current - #closing + 1
         if last_open and close_at > last_open
             and current:sub(close_at, close_at + #closing - 1) == closing
-            and current:sub(last_open + #opening, close_at - 1):find("更", 1, true) then
+            and has_update_keyword(current:sub(last_open + #opening, close_at - 1)) then
             return current:sub(1, last_open - 1)
         end
         return current
@@ -78,11 +92,55 @@ local function strip_update_suffix(value)
     return text
 end
 
+-- 英文译作的「Chapter 12:」「CHAPTER XIII -」前缀(对齐上游 PR #150):
+-- 阿拉伯数字与罗马数字混排,后随冒号/点/横线等分隔符一并剥除。
+-- 注意 normalize 已去全部空白,%s* 只是双保险。
+local function strip_english_chapter_prefix(value)
+    return (value:gsub(
+        "^%s*[Cc][Hh][Aa][Pp][Tt][Ee][Rr]%s*[%divxlcdmIVXLCDM%d]+[%s:%.%-]*", ""))
+end
+
 function ChapterMap.title_key(title)
     local t = strip_update_suffix(ChapterMap.normalize(title))
     local stripped = strip_chapter_number(t)
+    if #stripped >= 6 then
+        t = stripped
+    end
+    -- 英文前缀剥离放在末位并套同一守卫:剥完过短(如「Chapter 1 上」)则不剥。
+    stripped = strip_english_chapter_prefix(t)
     if #stripped >= 6 then return stripped end
     return t
+end
+
+-- 宽松标题键(对齐上游 relaxed_chapter_title):剥「二、」「（二）」「二.」
+-- 这类卷内序号前缀,只留标题本体。出版体 EPUB 的标题常带本地卷内编号,而
+-- 微信章名没有,精确键永远对不上。守卫:序号必须是纯数字/中文数字/罗马数字,
+-- 序号后必须有分隔符,本体 ≥6 字节(2 个汉字,防「上/下」类高频短名错配);
+-- 任一不满足就退回 title_key 原结果。
+local function outline_split(base)
+    local number, rest = base:match("^%((.-)%)[%s,:%.%-]*(.+)$")
+    if not number then
+        number, rest = base:match("^([^,%s:%.%-%)]+)[,%s:%.%-%)]+(.+)$")
+    end
+    if not number then
+        -- 中文顿号「、」(U+3001):normalize 不折叠,不能进字节类(会误配
+        -- 其他 CJK 首字节),单独按「纯序号 + 顿号」处理;序号限 24 字节,
+        -- 防正文里迟到的顿号把整句当前缀。
+        local dot = base:find("\227\128\129", 1, true)
+        if dot and dot <= 25 then
+            number, rest = base:sub(1, dot - 1), base:sub(dot + 3)
+        end
+    end
+    if number and number ~= "" and rest and is_chapter_number(number) then
+        rest = rest:gsub("^%s+", ""):gsub("%s+$", "")
+        if #rest >= 6 then return rest end
+    end
+    return nil
+end
+
+function ChapterMap.relaxed_title_key(title)
+    local base = ChapterMap.title_key(title)
+    return outline_split(base) or base
 end
 
 local ENTITIES = {
@@ -212,6 +270,7 @@ local function heading_blocks(html, normalized)
                 blocks[#blocks + 1] = {
                     start = start, title = heading,
                     key = ChapterMap.title_key(heading),
+                    relaxed = ChapterMap.relaxed_title_key(heading),
                 }
             end
         end
@@ -253,10 +312,26 @@ local function build_with_scanner(spine, chapters, scan, options)
     local toc_threshold = math.max(2, math.ceil(#all_titles * 0.5))
 
     local title_index = {}   -- [title_key] = {chapter indexes}
+    local relaxed_keys, remote_relaxed_counts = {}, {}
     for ci, title in ipairs(titles) do
         if title then
             title_index[title] = title_index[title] or {}
             title_index[title][#title_index[title] + 1] = ci
+            -- 宽松键(上游 relaxed_chapter_title):剥卷内序号只留本体。
+            -- 远程无编号章名也注册(宽松键==精确键时的恒等身份),这样本地
+            -- 「二、标题」式编号标题剥号后才能找到它;只有远程侧唯一的宽松键
+            -- 才允许参与匹配——重复短名两侧都不唯一时,宽松配对必错。
+            local relaxed = ChapterMap.relaxed_title_key(chapters[ci].title)
+            if #relaxed >= 6 then
+                relaxed_keys[ci] = relaxed
+                remote_relaxed_counts[relaxed] = (remote_relaxed_counts[relaxed] or 0) + 1
+            end
+        end
+    end
+    local relaxed_index = {}
+    for ci, relaxed in pairs(relaxed_keys) do
+        if remote_relaxed_counts[relaxed] == 1 then
+            relaxed_index[relaxed] = ci
         end
     end
 
@@ -271,7 +346,7 @@ local function build_with_scanner(spine, chapters, scan, options)
     local metrics = {
         primary_files = 0, bounded_files = 0, bounded_chapters = 0,
         fallback_files = 0, fallback_chapters = 0, quote_checks = 0,
-        checkpoints = 0,
+        checkpoints = 0, relaxed_hits = 0, order_inversions = 0,
     }
 
     local function thought_count_of(chapter)
@@ -380,6 +455,19 @@ local function build_with_scanner(spine, chapters, scan, options)
                             start = block.start, ["end"] = block["end"],
                         }
                     end
+                elseif block.relaxed and relaxed_index[block.relaxed] then
+                    -- 宽松键 tier(两侧唯一才建索引):精确键失配但本体相同,
+                    -- 救回「本地卷内编号 / 微信无编号」的章节。
+                    local ci = relaxed_index[block.relaxed]
+                    if not distinct_titles[block.relaxed] then
+                        distinct_titles[block.relaxed] = true
+                        distinct_count = distinct_count + 1
+                    end
+                    metrics.relaxed_hits = metrics.relaxed_hits + 1
+                    block_matches[ci] = block_matches[ci] or {}
+                    block_matches[ci][#block_matches[ci] + 1] = {
+                        start = block.start, ["end"] = block["end"],
+                    }
                 else
                     -- 卷首说明可能把目标章名包在更长标题里(例如“第一卷...惊蛰...卷首”)。
                     -- 只在 h 标签块内做子串匹配,不会退化为每个正文文件扫描所有标题。
@@ -526,7 +614,9 @@ local function build_with_scanner(spine, chapters, scan, options)
         "bounded_chapters=", tostring(metrics.bounded_chapters),
         "fallback_files=", tostring(metrics.fallback_files),
         "fallback_chapters=", tostring(fallback_count),
-        "quote_checks=", tostring(metrics.quote_checks))
+        "quote_checks=", tostring(metrics.quote_checks),
+        "relaxed_hits=", tostring(metrics.relaxed_hits),
+        "order_inversions=", tostring(metrics.order_inversions))
     local function by_spine(a, b)
         return (tonumber(a.spine_index) or 0) < (tonumber(b.spine_index) or 0)
     end
@@ -539,6 +629,12 @@ local function build_with_scanner(spine, chapters, scan, options)
     -- 引文对齐的划线,禁用数字兜底,防止错位与跨文件重复。
     local MAX_TARGETS = 4
     local mapped, unmatched = {}, {}
+    -- 顺序单调守卫(上游 #150 在目录映射强制 candidate > previous 的撷思适配):
+    -- 每章定案锚点 = 其全部目标的最小 spine 序;后一章锚点小于前一章视为
+    -- 「序倒挂」(目录页/卷首重复文本把投票带偏的信号),该章强制 quote_only
+    -- 禁数字兜底并计数,不删除目标——引文确实对齐的内容不能因守卫丢失。
+    -- 锚点按 max 传递,兼容「微信合并章横跨多文件」的合法非递减场景。
+    local previous_anchor = nil
     for ci, ch in ipairs(chapters) do
         local underlines = ch.underlines or {}
         if #underlines == 0 then
@@ -573,6 +669,30 @@ local function build_with_scanner(spine, chapters, scan, options)
                 -- 只有「投票强证据 + 单目标」保留数字兜底(同版书受益);
                 -- 其余场景数字偏移不可信,一律 quote_only。
                 local quote_only = not vote_single or nil
+                -- R4 顺序守卫:锚点 = 本章全部目标的最小 spine 序。
+                local anchor
+                local target_seen = {}
+                for _, href in ipairs(targets) do target_seen[href] = true end
+                for _, entry in ipairs(scores[ci] or {}) do
+                    if target_seen[entry.href] then
+                        local idx = tonumber(entry.spine_index) or 0
+                        if not anchor or idx < anchor then anchor = idx end
+                    end
+                end
+                for _, hit in ipairs(title_hits[ci] or {}) do
+                    if target_seen[hit.href] then
+                        local idx = tonumber(hit.spine_index) or 0
+                        if not anchor or idx < anchor then anchor = idx end
+                    end
+                end
+                if anchor and previous_anchor and anchor < previous_anchor then
+                    quote_only = true
+                    metrics.order_inversions = metrics.order_inversions + 1
+                end
+                if anchor then
+                    previous_anchor = previous_anchor and
+                        math.max(previous_anchor, anchor) or anchor
+                end
                 for _, href in ipairs(targets) do
                     mapped[#mapped + 1] = {
                         chapter_uid = tostring(ch.uid or ""), href = href,
