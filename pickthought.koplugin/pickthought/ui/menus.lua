@@ -227,6 +227,7 @@ function M.settings_menu(plugin)
 end
 
 --- 划线样式运行时切换(单选)。文案与样式键对应 M.ANNOTATION_STYLE_LABELS。
+--- Issue #23:文字样式(跟随正文/加粗/淡化)为第二组单选,与线条样式正交。
 function M.annotation_style_menu(plugin)
     local choices = {
         {"default", M.ANNOTATION_STYLE_LABELS.default},
@@ -251,6 +252,30 @@ function M.annotation_style_menu(plugin)
                 plugin:info("划线样式已保存,但当前页面未刷新：\n" .. tostring(err or "未知错误"))
             else
                 plugin:toast("划线样式已保存,下次打开书籍时生效")
+            end
+        end}
+    end
+    local text_choices = {
+        {"normal", "文字：跟随正文"},
+        {"bold", "文字：加粗"},
+        {"gray", "文字：淡化"},
+    }
+    for _, choice in ipairs(text_choices) do
+        local key, label = choice[1], choice[2]
+        rows[#rows + 1] = {text = label, radio = true, checked_func = function()
+            return AnnotationStyle.normalize_text_style(
+                plugin.store:preferences().annotation_text_style) == key
+        end, callback = function()
+            local p = plugin.store:preferences()
+            p.annotation_text_style = key
+            plugin.store:save_preferences(p)
+            local ok, err = plugin:apply_annotation_style()
+            if ok then
+                plugin:toast("划线文字已切换为：" .. label:gsub("^文字：", ""))
+            elseif plugin.ui and plugin.ui.document then
+                plugin:info("划线文字样式已保存,但当前页面未刷新：\n" .. tostring(err or "未知错误"))
+            else
+                plugin:toast("划线文字样式已保存,下次打开书籍时生效")
             end
         end}
     end

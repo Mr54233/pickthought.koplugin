@@ -61,3 +61,31 @@ end)
 T.case("默认运行时样式不追加覆盖", function()
     T.eq(AnnotationStyle.runtime_css("default"), "", "默认样式使用 EPUB 内联 CSS")
 end)
+
+T.case("文字样式归一化:非法值回落跟随正文", function()
+    T.eq(AnnotationStyle.normalize_text_style(nil), "normal", "空值默认 normal")
+    T.eq(AnnotationStyle.normalize_text_style("bold"), "bold", "合法值保留")
+    T.eq(AnnotationStyle.normalize_text_style("huge"), "normal", "非法值回落")
+    T.eq(AnnotationStyle.DEFAULT_TEXT_STYLE, "normal", "默认即跟随正文")
+end)
+
+T.case("跟随正文用 !important 压过书内链接色与默认层 navy(Issue #23)", function()
+    local css = AnnotationStyle.text_runtime_css("normal")
+    T.ok(css:find("color: inherit !important", 1, true) ~= nil,
+        "颜色强制继承(书内 a 色规则与 epub.css navy 均失效)")
+    T.ok(css:find("font-weight: inherit !important", 1, true) ~= nil,
+        "字重继承")
+    T.ok(css:find(".pickthought-link", 1, true) ~= nil,
+        "覆盖想法链接(带想法的划线是 a 标签,灰色来源)")
+    T.ok(css:find(".pickthought-inline-mark", 1, true) ~= nil,
+        "覆盖普通划线")
+end)
+
+T.case("加粗与淡化文字样式", function()
+    local bold = AnnotationStyle.text_runtime_css("bold")
+    T.ok(bold:find("font-weight: bold !important", 1, true) ~= nil, "加粗")
+    T.ok(bold:find("color: inherit !important", 1, true) ~= nil, "加粗时颜色仍继承")
+    local gray = AnnotationStyle.text_runtime_css("gray")
+    T.ok(gray:find("color: #888888 !important", 1, true) ~= nil, "淡化灰")
+    T.ok(gray:find("font%-weight", 1, true) == nil, "淡化不改字重")
+end)

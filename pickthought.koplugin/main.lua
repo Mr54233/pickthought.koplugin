@@ -338,7 +338,12 @@ function Plugin:_annotation_stylesheet()
     end
     local style=AnnotationStyle.normalize_runtime_style(
         self.store:preferences().annotation_style)
-    return typeset.css,tweaks.."\n"..AnnotationStyle.runtime_css(style),style
+    -- Issue #23:划线文字样式(跟随正文/加粗/淡化)与线条样式同通道应用,
+    -- 走 runtime setStyleSheet 才不受内嵌样式开关影响。
+    local text_style=AnnotationStyle.normalize_text_style(
+        self.store:preferences().annotation_text_style)
+    return typeset.css,tweaks.."\n"..AnnotationStyle.runtime_css(style)
+        .."\n"..AnnotationStyle.text_runtime_css(text_style),style
 end
 
 -- Reapply a saved style to the currently open bound EPUB. This follows the

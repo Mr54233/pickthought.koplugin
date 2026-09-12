@@ -35,6 +35,49 @@ M.RUNTIME_STYLE_CHOICES = {
     "hidden",
 }
 
+-- P5/Issue #23:划线文字样式(与线条样式正交)。默认"跟随正文"用 !important
+-- 强制继承——书自带内嵌 CSS 的链接色规则(特异性可高于 (0,1,0))与 KOReader
+-- 默认层 epub.css 的 a[href]{color:navy}(内嵌样式关闭时生效)都无法再染灰
+-- 带想法的划线文字。
+M.DEFAULT_TEXT_STYLE = "normal"
+M.TEXT_STYLE_CHOICES = {
+    "normal",
+    "bold",
+    "gray",
+}
+
+local TEXT_RUNTIME_CSS = {
+    normal = [[
+/* PICKTHOUGHT_RUNTIME_TEXT_STYLE_BEGIN */
+.pickthought-inline-mark,
+.pickthought-link,
+.pickthought-mark {
+    color: inherit !important;
+    font-weight: inherit !important;
+}
+/* PICKTHOUGHT_RUNTIME_TEXT_STYLE_END */
+]],
+    bold = [[
+/* PICKTHOUGHT_RUNTIME_TEXT_STYLE_BEGIN */
+.pickthought-inline-mark,
+.pickthought-link,
+.pickthought-mark {
+    color: inherit !important;
+    font-weight: bold !important;
+}
+/* PICKTHOUGHT_RUNTIME_TEXT_STYLE_END */
+]],
+    gray = [[
+/* PICKTHOUGHT_RUNTIME_TEXT_STYLE_BEGIN */
+.pickthought-inline-mark,
+.pickthought-link,
+.pickthought-mark {
+    color: #888888 !important;
+}
+/* PICKTHOUGHT_RUNTIME_TEXT_STYLE_END */
+]],
+}
+
 local RUNTIME_CSS = {
     thin_solid = [[
 /* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_BEGIN */
@@ -86,9 +129,22 @@ function M.normalize_runtime_style(value)
     return M.DEFAULT_RUNTIME_STYLE
 end
 
+function M.normalize_text_style(value)
+    value = tostring(value or M.DEFAULT_TEXT_STYLE)
+    for _, key in ipairs(M.TEXT_STYLE_CHOICES) do
+        if value == key then return key end
+    end
+    return M.DEFAULT_TEXT_STYLE
+end
+
 function M.runtime_css(value)
     local key = M.normalize_runtime_style(value)
     return RUNTIME_CSS[key] or ""
+end
+
+function M.text_runtime_css(value)
+    local key = M.normalize_text_style(value)
+    return TEXT_RUNTIME_CSS[key] or ""
 end
 
 function M.inline_style_tag()
