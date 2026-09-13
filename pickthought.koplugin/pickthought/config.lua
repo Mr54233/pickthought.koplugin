@@ -1,6 +1,6 @@
 local C = {
     NAME = "撷思",
-    VERSION = "0.5.1",
+    VERSION = "0.5.2",
     SCHEMA = 1,
     PLUGIN_DIR = "pickthought.koplugin",
     DATA_DIR = "pickthought",
