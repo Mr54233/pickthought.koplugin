@@ -40,6 +40,8 @@ function SyncProgress:init()
     -- P5(需求 2026-09-12):0.70 装不下匹配阶段的 11 行状态(长行还会折行)。
     local frame_height = math.floor(Screen:getHeight() * 0.80)
     local content_width = frame_width - Size.padding.large * 2
+    -- F14(真机反馈 2026-09-13):自适应换行规避需要可用宽度,存供 set_state 用。
+    self.content_width = content_width
     local content_height = frame_height - Size.padding.large * 2
     local group = VerticalGroup:new{align="center"}
 
@@ -206,14 +208,17 @@ function SyncProgress:set_state(state)
     }
     local rows = {}
     rows[#rows + 1] = labels[state.stage] or tostring(state.stage or "处理中")
+    -- F14(真机反馈 2026-09-13):自适应换行规避——可用宽度=对话框内容宽,
+    -- 字号取 cfont 18 的实际缩放值;成对数值行放不下自动在"，"处拆行。
+    local pair_avail = tonumber(self.content_width) or nil
+    local pair_fpx = 18
+    pcall(function()
+        local face = Font:getFace("cfont", 18)
+        if face and face.size then pair_fpx = face.size end
+    end)
     if total > 0 and state.stage == "fetch" then
         rows[#rows + 1] = "章节 " .. tostring(current) .. " / " .. tostring(total)
     elseif total > 0 and state.stage == "map" then
-        if state.fetch_chapters ~= nil or state.fetch_underlines ~= nil or state.fetch_thoughts ~= nil then
-            rows[#rows + 1] = "本轮已拉取：章节 " .. format_count(state.fetch_chapters)
-                .. " 章，划线 " .. format_count(state.fetch_underlines)
-                .. " 条，想法 " .. format_count(state.fetch_thoughts) .. " 条"
-        end
         if state.map_phase == "fallback" then
             -- P1(需求 2026-09-12):回退阶段独立计数。state.current 是两阶段
             -- 合计访问次数(可达 2n),直接显示会越过分母。
@@ -222,14 +227,16 @@ function SyncProgress:set_state(state)
         else
             rows[#rows + 1] = "正文文件 " .. format_count(current) .. " / " .. format_count(total)
         end
-        if state.current_file and state.current_file ~= "" then
-            rows[#rows + 1] = "当前文件：" .. clean_status(state.current_file, 120)
-            rows[#rows + 1] = "当前文件关联：划线 " .. format_count(state.current_file_underlines)
-                .. " 条，想法 " .. format_count(state.current_file_thoughts) .. " 条"
+        -- F13(真机反馈 2026-09-13):拉取汇总置顶;其下为已匹配量、章节占比、
+        -- 扫描累计。F15:拉取汇总单行为主(去"章节"留余量),超宽才退回两行。
+        if state.fetch_chapters ~= nil or state.fetch_underlines ~= nil or state.fetch_thoughts ~= nil then
+            rows[#rows + 1] = U.pair_line("本轮已拉取：" .. format_count(state.fetch_chapters) .. " 章",
+                "划线 " .. format_count(state.fetch_underlines) .. " 条，想法 " .. format_count(state.fetch_thoughts) .. " 条",
+                pair_avail, pair_fpx)
         end
-        -- P3(需求 2026-09-12):真实成果计数替代被两阶段扫描放大数百倍的
-        -- "候选关联量"(旧文案"本轮累计已匹配：划线 353 万条"曾被误读为数据损坏)。
         if state.located_chapters ~= nil and (tonumber(state.map_target_chapters) or 0) > 0 then
+            rows[#rows + 1] = U.pair_line("本轮已匹配：划线 " .. format_count(state.located_underlines) .. " 条",
+                "想法 " .. format_count(state.located_thoughts) .. " 条", pair_avail, pair_fpx)
             rows[#rows + 1] = "已定位章节 " .. format_count(state.located_chapters)
                 .. " / " .. format_count(state.map_target_chapters)
         end
@@ -242,20 +249,23 @@ function SyncProgress:set_state(state)
             rows[#rows + 1] = "进度会继续，请耐心等待，勿强制退出 KOReader。"
         end
     elseif total > 0 and current > 0 and state.stage == "inject" then
+        -- F13:拉取汇总置顶,已匹配量、章节占比随之;写入进度与注入量在后。
+        -- F15:拉取汇总单行为主,超宽才退回两行。
         if state.fetch_chapters ~= nil or state.fetch_underlines ~= nil or state.fetch_thoughts ~= nil then
-            rows[#rows + 1] = "本轮已拉取：章节 " .. format_count(state.fetch_chapters)
-                .. " 章，划线 " .. format_count(state.fetch_underlines)
-                .. " 条，想法 " .. format_count(state.fetch_thoughts) .. " 条"
+            rows[#rows + 1] = U.pair_line("本轮已拉取：" .. format_count(state.fetch_chapters) .. " 章",
+                "划线 " .. format_count(state.fetch_underlines) .. " 条，想法 " .. format_count(state.fetch_thoughts) .. " 条",
+                pair_avail, pair_fpx)
+        end
+        if state.located_chapters ~= nil and (tonumber(state.map_target_chapters) or 0) > 0 then
+            rows[#rows + 1] = U.pair_line("本轮已匹配：划线 " .. format_count(state.located_underlines) .. " 条",
+                "想法 " .. format_count(state.located_thoughts) .. " 条", pair_avail, pair_fpx)
+            rows[#rows + 1] = "已定位章节 " .. format_count(state.located_chapters)
+                .. " / " .. format_count(state.map_target_chapters)
         end
         rows[#rows + 1] = "写入文件 " .. tostring(current) .. " / " .. tostring(total)
-        if state.current_file_target and state.current_file and state.current_file ~= "" then
-            rows[#rows + 1] = "当前文件：" .. clean_status(state.current_file, 120)
-            rows[#rows + 1] = "当前文件注入：划线 " .. format_count(state.current_file_underlines)
-                .. " 条，想法 " .. format_count(state.current_file_thoughts) .. " 条"
-        end
         if state.injected_underlines ~= nil or state.injected_thoughts ~= nil then
-            rows[#rows + 1] = "本轮累计注入：划线 " .. format_count(state.injected_underlines)
-                .. " 条，想法 " .. format_count(state.injected_thoughts) .. " 条"
+            rows[#rows + 1] = U.pair_line("本轮累计注入：划线 " .. format_count(state.injected_underlines) .. " 条",
+                "想法 " .. format_count(state.injected_thoughts) .. " 条", pair_avail, pair_fpx)
         end
         if total > 200 then
             rows[#rows + 1] = "书籍较大时，此阶段可能持续较长时间。"
@@ -263,18 +273,20 @@ function SyncProgress:set_state(state)
             rows[#rows + 1] = "进度会继续，请耐心等待，勿强制退出 KOReader。"
         end
     end
-    if state.chapter and state.chapter ~= "" and not ((state.stage == "map" or state.stage == "inject")
-        and state.current_file and state.current_file == state.chapter) then
+    -- F11(真机反馈 2026-09-13):map/inject 阶段的 chapter 字段是正文文件路径,
+    -- 与已移除的"当前文件"同类噪声,不再展示;fetch 阶段的章节标题保留。
+    if state.chapter and state.chapter ~= ""
+        and state.stage ~= "map" and state.stage ~= "inject" then
         rows[#rows + 1] = clean_status(state.chapter, 120)
     end
     if state.message and state.message ~= "" then rows[#rows + 1] = clean_status(state.message, 180) end
     if state.stage == "fetch" and (state.current_fetch_underlines ~= nil
         or state.current_fetch_thoughts ~= nil or state.fetch_underlines ~= nil
         or state.fetch_thoughts ~= nil) then
-        rows[#rows + 1] = "当前章节已拉取：划线 " .. format_count(state.current_fetch_underlines)
-            .. " 条，想法 " .. format_count(state.current_fetch_thoughts) .. " 条"
-        rows[#rows + 1] = "本轮累计已拉取：划线 " .. format_count(state.fetch_underlines)
-            .. " 条，想法 " .. format_count(state.fetch_thoughts) .. " 条"
+        rows[#rows + 1] = U.pair_line("当前章节已拉取：划线 " .. format_count(state.current_fetch_underlines) .. " 条",
+            "想法 " .. format_count(state.current_fetch_thoughts) .. " 条", pair_avail, pair_fpx)
+        rows[#rows + 1] = U.pair_line("本轮累计已拉取：划线 " .. format_count(state.fetch_underlines) .. " 条",
+            "想法 " .. format_count(state.fetch_thoughts) .. " 条", pair_avail, pair_fpx)
     end
     local percent_text = tostring(math.floor(percent * 100 + 0.5)) .. "%"
     local status_text = table.concat(rows, "\n")

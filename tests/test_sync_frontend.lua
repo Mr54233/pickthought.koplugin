@@ -13,8 +13,13 @@ local usleep_spy = { calls = 0 }
 package.preload["ui/widget/container/widgetcontainer"] = function()
     return { extend = function(_, t) return t end }
 end
+-- F3(真机反馈 2026-09-13):info 捕获文案,供前台 progress 回调的消息断言使用。
+local trapper_texts = {}
 package.preload["ui/trapper"] = function()
-    return { info = function() return true end, clear = function() end }
+    return { info = function(_, text)
+        trapper_texts[#trapper_texts + 1] = tostring(text or "")
+        return true
+    end, clear = function() end }
 end
 -- 模拟真实设备存在 ffi/util.usleep:默认 rest 会真正 sleep 阻塞前台协程。
 -- max_us 记录单次最大 sleep 时长(评审七轮:用于断言多书限速冷却不做全局大等待)。
@@ -295,6 +300,53 @@ T.case("前台 _sync_run 适配器透传 no-op rest,绝不调用 usleep(作者 #
     T.ok(usleep_spy.calls > 0, "对照:默认 rest(ffi/util.usleep 存在)应触发 usleep(前台必须避免此路径)")
 end)
 
+T.case("前台 progress 文案:总匹配紧跟阶段行,注入阶段显示匹配成果(F3 真机反馈 2026-09-13)", function()
+    -- 走真实 _sync_run(fetch→map→inject 全链,web_fetch/epub_inject 为桩,
+    -- ChapterMap 真实运行),捕获 Trapper:info 文案断言前台对话框内容。
+    trapper_texts = {}
+    captured.inject_called = false
+
+    local self = {}
+    function self:_sync_fail(msg) self.fail_msg = msg end
+    function self:_sync_report(r) self.report = r end
+    self._book_ids = function() return { "b001" } end
+    self.api = { chapters = function()
+        return { data = { { chapterUid = 1, title = "第一章", chapterIdx = 1 } } }
+    end }
+    self.store = {
+        book_dir = function() return "/tmp/pt_fake_bookdir" end,
+        preferences = function() return {} end,
+    }
+    local U = require("pickthought.util")
+    local original_atomic_write = U.atomic_write
+    U.atomic_write = function(cache_path, data, binary)
+        if tostring(cache_path):find("/sync%-cache/map%.json$") then return true end
+        return original_atomic_write(cache_path, data, binary)
+    end
+    Plugin._sync_run(self, "/tmp/书.epub", { book_id = "b001" })
+    U.atomic_write = original_atomic_write
+    T.ok(captured.inject_called, "前置:同步链路走完(与 no-op rest 用例同环境)")
+
+    -- 匹配阶段(F13):拉取汇总置顶,其下为已匹配量与章节占比。
+    local map_text
+    for _, text in ipairs(trapper_texts) do
+        if text:find("正在匹配本地章节", 1, true) then map_text = text end
+    end
+    T.ok(map_text ~= nil, "捕获到匹配阶段文案")
+    T.ok(map_text:find("正在匹配本地章节 1/1 个正文文件\n本轮已拉取：1 章，划线 1 条，想法 1 条\n本轮已匹配：划线 1 条，想法 1 条\n已定位章节 1 / 1", 1, true),
+        "匹配阶段:阶段行→拉取汇总→已匹配量→章节占比")
+
+    -- 注入阶段(F13):拉取汇总同样置顶,其下为已匹配量与章节占比。
+    local inject_text
+    for _, text in ipairs(trapper_texts) do
+        if text:find("正在生成划线版并替换", 1, true) then inject_text = text end
+    end
+    T.ok(inject_text ~= nil, "捕获到注入阶段文案")
+    T.ok(inject_text:find("正在生成划线版并替换…\n本轮已拉取：1 章，划线 1 条，想法 1 条\n本轮已匹配：划线 1 条，想法 1 条\n已定位章节 1 / 1", 1, true),
+        "注入阶段:阶段行→拉取汇总→已匹配量→章节占比")
+    trapper_texts = {}
+end)
+
 
 T.case("离线重注入口只接受有效的章节与映射缓存", function()
     local U = require("pickthought.util")
@@ -333,6 +385,16 @@ T.case("离线重注入口只接受有效的章节与映射缓存", function()
         T.ok(not Plugin._has_reinject_cache(self, path), "映射目标为空时隐藏入口")
         files[map_path] = "not-json"
         T.ok(not Plugin._has_reinject_cache(self, path), "映射 JSON 损坏时隐藏入口")
+        -- F10 回归(2026-09-13 晚):no_hit 条目是有效缓存内容,不得让重注入口
+        -- 消失;指纹字段残缺的 no_hit 仍视为损坏。
+        files[map_path] = '{"signature":"sig","map":{'
+            .. '"1":{"hrefs":["OEBPS/c1.xhtml"]},'
+            .. '"2":{"no_hit":true,"n":1,"len":21}}}'
+        T.ok(Plugin._has_reinject_cache(self, path), "含 no_hit 条目的映射缓存应显示重注入口")
+        files[map_path] = '{"signature":"sig","map":{'
+            .. '"1":{"hrefs":["OEBPS/c1.xhtml"]},'
+            .. '"2":{"no_hit":true}}}'
+        T.ok(not Plugin._has_reinject_cache(self, path), "指纹残缺的 no_hit 条目视为损坏")
     end, debug.traceback)
 
     U.read_file, U.file_exists = saved_read_file, saved_file_exists
@@ -809,7 +871,7 @@ end)
 -- ===== 以下用例自 pickthought.koplugin/tests 旧副本合并移植(2026-09-05) =====
 local SyncProgress = require("pickthought.sync_progress")
 
-T.case("三阶段进度显示累计和当前文件明细", function()
+T.case("三阶段进度显示累计明细,逐文件行已移除(F11)", function()
     local dialog = {_title = "正在同步《剑来》"}
     dialog.title_widget = {setText = function() end}
     dialog.progress = {setPercentage = function() end}
@@ -830,23 +892,29 @@ T.case("三阶段进度显示累计和当前文件明细", function()
         current_file = "Text/0415.xhtml", current_file_underlines = 12,
         current_file_thoughts = 37, matched_files = 415,
         fetch_chapters = 200, fetch_underlines = 12081, fetch_thoughts = 30338,
-        located_chapters = 62, map_target_chapters = 200})
-    T.ok(dialog.status_text:find("本轮已拉取：章节 200 章，划线 12,081 条，想法 30,338 条", 1, true),
-        "匹配阶段显示拉取汇总")
+        located_chapters = 62, map_target_chapters = 200,
+        located_underlines = 1850, located_thoughts = 4930})
+    -- F15(真机反馈 2026-09-13):拉取汇总单行为主(去"章节"留余量),估算超宽才退回两行。
+    T.ok(dialog.status_text:find("本轮已拉取：200 章，划线 12,081 条，想法 30,338 条", 1, true),
+        "匹配阶段拉取汇总单行显示(宽面板)")
+    T.ok(not dialog.status_text:find("本轮已拉取：章节 200 章", 1, true),
+        "旧的三数字两行格式不再出现")
     T.ok(dialog.status_text:find("正文文件 415 / 1,284", 1, true),
         "主扫描阶段显示正文文件进度")
-    T.ok(dialog.status_text:find("当前文件：Text/0415.xhtml", 1, true),
-        "匹配阶段显示当前正文文件")
-    T.ok(dialog.status_text:find("当前文件关联：划线 12 条，想法 37 条", 1, true),
-        "匹配阶段显示当前文件关联数量")
+    -- F15:拉取汇总单行;其下为已匹配量与章节占比。
+    T.ok(dialog.status_text:find("正文文件 415 / 1,284\n本轮已拉取：200 章，划线 12,081 条，想法 30,338 条\n本轮已匹配：划线 1,850 条，想法 4,930 条\n已定位章节 62 / 200", 1, true),
+        "主扫描阶段:阶段行→拉取汇总→已匹配量→章节占比")
+    -- F11(真机反馈 2026-09-13):当前文件/当前文件关联逐文件明细移除。
+    T.ok(not dialog.status_text:find("当前文件", 1, true),
+        "匹配阶段不再显示当前文件与关联数量")
     T.ok(dialog.status_text:find("本轮累计已扫描：正文文件 415 个", 1, true),
         "匹配阶段显示累计扫描文件数")
     T.ok(dialog.status_text:find("已定位章节 62 / 200", 1, true),
         "匹配阶段显示已定位章节数(P3 真实成果计数)")
     T.ok(not dialog.status_text:find("本轮累计已匹配", 1, true),
         "被两阶段扫描放大的候选关联量不再以已匹配名义展示")
-    T.ok(not dialog.status_text:find("Text/0415.xhtml\nText/0415.xhtml", 1, true),
-        "匹配阶段不重复显示当前文件路径")
+    T.ok(not dialog.status_text:find("Text/0415.xhtml", 1, true),
+        "匹配阶段不再展示正文文件路径(F11:当前文件行与尾随路径行均已移除)")
     T.ok(dialog.status_text:find("书籍较大时，此阶段可能持续较长时间。\n具体耗时取决于书籍大小、设备性能和想法数量。\n进度会继续，请耐心等待，勿强制退出 KOReader。", 1, true),
         "匹配阶段显示分行耗时提示")
 
@@ -856,11 +924,15 @@ T.case("三阶段进度显示累计和当前文件明细", function()
         current_file = "Text/0999.xhtml", current_file_underlines = 3,
         current_file_thoughts = 1, matched_files = 1284,
         fetch_chapters = 200, fetch_underlines = 13226, fetch_thoughts = 112738,
-        located_chapters = 187, map_target_chapters = 200})
+        located_chapters = 187, map_target_chapters = 200,
+        located_underlines = 11150, located_thoughts = 29860})
     T.ok(dialog.status_text:find("回退扫描 463 / 1,284", 1, true),
         "回退阶段显示回退扫描独立计数")
     T.ok(not dialog.status_text:find("正文文件 1747", 1, true),
         "回退阶段不再显示两阶段合计访问数")
+    -- F15:回退阶段拉取汇总同样单行,已匹配量与章节占比继续累计。
+    T.ok(dialog.status_text:find("回退扫描 463 / 1,284\n本轮已拉取：200 章，划线 13,226 条，想法 112,738 条\n本轮已匹配：划线 11,150 条，想法 29,860 条\n已定位章节 187 / 200", 1, true),
+        "回退阶段:阶段行→拉取汇总→已匹配量→章节占比,均继续累计")
     T.ok(dialog.status_text:find("已定位章节 187 / 200", 1, true),
         "回退阶段显示已定位章节数")
 
@@ -870,17 +942,56 @@ T.case("三阶段进度显示累计和当前文件明细", function()
         current_file_underlines = 9, current_file_thoughts = 28,
         injected_underlines = 3420, injected_thoughts = 10206,
         fetch_chapters = 200, fetch_underlines = 12081, fetch_thoughts = 30338})
-    T.ok(dialog.status_text:find("本轮已拉取：章节 200 章，划线 12,081 条，想法 30,338 条", 1, true),
-        "注入阶段显示拉取汇总")
-    T.ok(dialog.status_text:find("当前文件：Text/0415.xhtml", 1, true),
-        "注入阶段显示当前正文文件")
-    T.ok(dialog.status_text:find("当前文件注入：划线 9 条，想法 28 条", 1, true),
-        "注入阶段显示当前文件实际数量")
+    -- F15:注入阶段拉取汇总单行;匹配数据缺失时(理论上不发生,防御)
+    -- 不显示已匹配量/章节占比,拉取汇总仍显示。
+    T.ok(dialog.status_text:find("本轮已拉取：200 章，划线 12,081 条，想法 30,338 条", 1, true),
+        "注入阶段显示拉取汇总(F15 单行)")
+    T.ok(not dialog.status_text:find("已定位章节", 1, true),
+        "匹配数据缺失时不显示已定位章节(防御分支)")
+
+    dialog:set_state({stage = "inject", current = 415, total = 1333,
+        chapter = "Text/0415.xhtml",
+        current_file = "Text/0415.xhtml", current_file_target = true,
+        current_file_underlines = 9, current_file_thoughts = 28,
+        injected_underlines = 3420, injected_thoughts = 10206,
+        fetch_chapters = 200, fetch_underlines = 12081, fetch_thoughts = 30338,
+        located_chapters = 200, map_target_chapters = 200,
+        located_underlines = 11995, located_thoughts = 30100})
+    -- F15:注入阶段行序=拉取汇总(单行)→已匹配量→章节占比→写入进度→注入量。
+    T.ok(dialog.status_text:find("本轮已拉取：200 章，划线 12,081 条，想法 30,338 条\n本轮已匹配：划线 11,995 条，想法 30,100 条\n已定位章节 200 / 200\n写入文件 415 / 1333", 1, true),
+        "注入阶段:拉取汇总→已匹配量→章节占比→写入进度(写入文件行用 tostring 无千位分隔)")
+    T.ok(not dialog.status_text:find("当前文件注入", 1, true),
+        "注入阶段不再显示当前文件注入数量")
     T.ok(dialog.status_text:find("本轮累计注入：划线 3,420 条，想法 10,206 条", 1, true),
         "注入阶段显示累计实际数量")
     T.ok(dialog.status_text:find("书籍较大时，此阶段可能持续较长时间。\n具体耗时取决于书籍大小、设备性能和想法数量。\n进度会继续，请耐心等待，勿强制退出 KOReader。", 1, true),
         "注入阶段显示分行耗时提示")
     T.eq(SyncProgress.format_count(1234567), "1,234,567", "大数字千位分隔")
+end)
+
+T.case("窄面板自适应:成对数值行自动拆行(F14)", function()
+    local dialog = {_title = "正在同步《剑来》"}
+    dialog.title_widget = {setText = function() end}
+    dialog.progress = {setPercentage = function() end}
+    dialog.percent_widget = {setText = function() end}
+    dialog.status_widget = {setText = function(_, text) dialog.status_text = text end}
+    function dialog:_redraw() end
+    dialog.content_width = 260  -- 模拟极窄内容区:估算宽超出即拆行
+    setmetatable(dialog, {__index = SyncProgress})
+
+    dialog:set_state({stage = "map", current = 415, total = 1284,
+        chapter = "Text/0415.xhtml", map_phase = "primary", map_phase_count = 415,
+        current_file = "Text/0415.xhtml", current_file_underlines = 12,
+        current_file_thoughts = 37, matched_files = 415,
+        fetch_chapters = 200, fetch_underlines = 12081, fetch_thoughts = 30338,
+        located_chapters = 62, map_target_chapters = 200,
+        located_underlines = 1850, located_thoughts = 4930})
+    T.ok(dialog.status_text:find("本轮已拉取：200 章\n划线 12,081 条，想法 30,338 条", 1, true),
+        "拉取汇总超宽时退回两行(首行含前缀)")
+    T.ok(dialog.status_text:find("本轮已匹配：划线 1,850 条\n想法 4,930 条", 1, true),
+        "已匹配行超宽自动拆行")
+    T.ok(not dialog.status_text:find("本轮已拉取：200 章，划线 12,081 条", 1, true),
+        "窄面板不再保留单行形式")
 end)
 
 T.case("多书同步任务保留启动时的书名快照", function()

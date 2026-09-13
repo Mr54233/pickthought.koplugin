@@ -36,14 +36,6 @@ end
 
 M.popup_percent = popup_percent
 
-local function annotation_style_label(plugin)
-    local key = AnnotationStyle.normalize_runtime_style(
-        plugin.store:preferences().annotation_style)
-    return M.ANNOTATION_STYLE_LABELS[key] or M.ANNOTATION_STYLE_LABELS.default
-end
-
-M.annotation_style_label = annotation_style_label
-
 local function comment_cache_label(value)
     local ttl = ReviewComments.normalize_ttl(value)
     if ttl == 0 then return "关闭" end
@@ -60,7 +52,9 @@ function M.sync_status_item(plugin)
 end
 
 function M.annotation_style_item(plugin)
-    return {text = "划线样式（" .. annotation_style_label(plugin) .. "）",
+    -- 真机反馈 2026-09-13(F2):菜单名带上"文字样式";当前样式不再拼在标题里,
+    -- 用户点进子菜单直接看勾选态。
+    return {text = "划线样式及文字样式",
         sub_item_table_func = function() return M.annotation_style_menu(plugin) end}
 end
 
@@ -157,7 +151,7 @@ function M.home_menu(plugin)
 end
 
 --- 阅读态菜单(上游式收纳):高频直达,低频进设置抽屉。
---- 已绑定:登录行/同步/继续拉取[条件]/划线样式/书籍管理›/设置› = 5-6 项。
+--- 已绑定:登录行/同步/继续拉取[条件]/划线样式及文字样式/书籍管理›/设置› = 5-6 项。
 --- 未绑定:登录行/绑定微信读书/设置› = 3 项。
 function M.reader_menu(plugin)
     local items = {}
@@ -190,7 +184,7 @@ function M.reader_menu(plugin)
 end
 
 --- 设置大抽屉(上游式收纳):同步行为/调试/更新/危险操作收在这里。
---- 想法弹窗设置在阅读态菜单"划线样式"之下(2026-09-07 用户指定)。
+--- 想法弹窗设置在阅读态菜单"划线样式及文字样式"之下(2026-09-07 用户指定)。
 function M.settings_menu(plugin)
     return {
         {text = "阅读时自动分批拉取后续章节", checked_func = function()
@@ -270,13 +264,19 @@ function M.annotation_style_menu(plugin)
             local p = plugin.store:preferences()
             p.annotation_text_style = key
             plugin.store:save_preferences(p)
+            -- F2 二轮(真机反馈 2026-09-13):斜体能否显示取决于当前字体是否有
+            -- 斜体字形(crengine 不做伪斜体合成),选择时明确告知,避免"没效果"困惑。
+            local italic_hint = key == "italic"
+                and "（需字体支持，无斜体字形时显示不变）" or ""
             local ok, err = plugin:apply_annotation_style()
             if ok then
-                plugin:toast("划线文字已切换为：" .. label:gsub("^文字：", ""))
+                plugin:toast("划线文字已切换为：" .. label:gsub("^文字：", "") .. italic_hint,
+                    key == "italic" and 6 or nil)
             elseif plugin.ui and plugin.ui.document then
                 plugin:info("划线文字样式已保存,但当前页面未刷新：\n" .. tostring(err or "未知错误"))
             else
-                plugin:toast("划线文字样式已保存,下次打开书籍时生效")
+                plugin:toast("划线文字样式已保存,下次打开书籍时生效" .. italic_hint,
+                    key == "italic" and 6 or nil)
             end
         end}
     end

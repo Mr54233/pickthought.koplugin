@@ -162,7 +162,7 @@ T.case("文件管理器菜单:上游式收纳,顶级 6 项", function()
     T.eq(names[2], "同步划线与想法(选书)", "同步入口")
     T.eq(names[3], "绑定微信读书(选书)", "绑定入口")
     T.eq(names[4], "更多操作(重注/续拉/还原)", "更多操作入口")
-    T.eq(names[5], "划线样式（默认样式）", "划线样式入口")
+    T.eq(names[5], "划线样式及文字样式", "划线样式入口(F2 真机反馈:菜单名带文字样式,不带当前值)")
     T.eq(names[6], "设置", "末项是设置抽屉")
 end)
 
@@ -182,7 +182,7 @@ T.case("阅读器菜单(已绑定书):6 项收纳,想法弹窗设置在划线样
     T.eq(#names, 6, "已绑定阅读菜单 6 项")
     T.eq(names[1]:find("微信读书 · 小明", 1, true), 1, "首行是登录行")
     T.eq(names[2], "同步划线与想法", "同步直达")
-    T.eq(names[3], "划线样式（默认样式）", "划线样式直达")
+    T.eq(names[3], "划线样式及文字样式", "划线样式直达")
     T.eq(names[4], "想法弹窗设置", "想法弹窗设置在划线样式之下")
     T.eq(names[5], "书籍管理", "书籍管理抽屉")
     T.eq(names[6], "设置", "末段是设置抽屉")
@@ -250,8 +250,12 @@ T.case("划线样式菜单:线条四项+文字四项,两组单选互不干扰", 
     T.eq(env.prefs.annotation_text_style, "gray", "选择淡化后写入文字偏好")
     T.eq(env.toasts[#env.toasts], "划线文字已切换为：淡化", "文字切换有提示")
     rows[8].callback()
-    T.eq(env.prefs.annotation_text_style, "italic", "选择斜体后写入文字偏好")
+    T.eq(env.prefs.annotation_text_style, "italic", "选择斜体后写入偏好")
     T.eq(rows[8].checked_func(), true, "文字勾选状态跟随偏好")
+    -- F2 二轮(真机反馈 2026-09-13):斜体选择提示需字体支持(crengine 无伪斜体)。
+    T.eq(env.toasts[#env.toasts],
+        "划线文字已切换为：斜体（需字体支持，无斜体字形时显示不变）",
+        "斜体切换提示字体支持")
 end)
 
 T.case("更新菜单:四项构成与自动更新开关", function()

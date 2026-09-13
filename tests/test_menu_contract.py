@@ -21,9 +21,9 @@ class MenuContractTests(unittest.TestCase):
         )
         main = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
         self.assertIn(
-            'self:list("划线样式",self:annotation_style_menu())',
+            'self:list("划线样式及文字样式",self:annotation_style_menu())',
             main,
-            "文件管理器的书籍更多操作应保留样式入口",
+            "文件管理器的书籍更多操作应保留样式入口(F2:菜单名带文字样式)",
         )
 
     def test_bind_entry_not_duplicated_in_book_actions(self):
@@ -140,6 +140,46 @@ class MenuContractTests(unittest.TestCase):
         self.assertIn("comment_fetch_notice ~= false", menus)
         main = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
         self.assertIn('"正在获取评论数…"', main)
+
+    def test_comment_prefetch_notice_does_not_block_input(self):
+        # F4/F5(真机反馈 2026-09-13):预取提示必须不挡弹窗。
+        # F5 深层根因:UIManager:sendEvent 只把顶层未消费的事件发给
+        # active_widgets/is_always_active 的下层 widget,提示层作为普通 widget
+        # 压在弹窗上必然挡死分发——必须走 toast 通道(源码:toast 从不截停
+        # 事件传播)。dismissable=false 让提示自身不吃点击、获取期间稳定显示。
+        # "查看评论"的加载提示是用户主动触发的阻塞请求,保持原语义。
+        source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
+        self.assertIn(
+            'InfoMessage:new{text="正在获取评论数…",dismissable=false,timeout=30,toast=true}',
+            source,
+            "预取提示必须走 toast 通道且 dismissable=false(获取期间弹窗可关闭)",
+        )
+        blocker = source.split('text="正在加载评论…"', 1)[1][:80]
+        self.assertNotIn(
+            "toast=true", blocker,
+            "查看评论的加载提示保持阻塞语义(用户主动请求,不属 F4/F5 范围)",
+        )
+
+    def test_book_actions_has_single_reset_and_restore_entries(self):
+        # F6(真机反馈 2026-09-13 二轮):book_actions 里「重置本书」曾字面重复
+        # 两次(if bound 内一次、if bound or .orig 又一次)。语义应为:
+        # 还原原书(保留同步数据,restore_original)×1 + 重置本书(清数据+还原原版)×1。
+        source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
+        actions = source.split("function Plugin:book_actions(", 1)[1].split(
+            "local title=self:doc_title_guess(path)", 1
+        )[0]
+        self.assertEqual(
+            actions.count('"重置本书(清数据+还原原版)"'), 1,
+            "book_actions 应只有一个重置本书入口",
+        )
+        self.assertEqual(
+            actions.count('"还原原书(保留同步数据)"'), 1,
+            "book_actions 应只有一个还原原书(不清数据)入口",
+        )
+        self.assertIn(
+            'callback=act(function() self:restore_original(path) end)', actions,
+            "还原原书入口应接线 restore_original",
+        )
 
     def test_comment_prefetch_constants_declared_before_use(self):
         # 回归(2026-09-06 真机"想法弹窗打开失败 time.lua arithmetic on nil"):

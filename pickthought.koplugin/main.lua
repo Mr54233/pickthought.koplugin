@@ -116,9 +116,6 @@ function Plugin:reader_menu() return Menus.reader_menu(self) end
 function Plugin:settings_menu() return Menus.settings_menu(self) end
 function Plugin:annotation_style_menu() return Menus.annotation_style_menu(self) end
 function Plugin:update_about_menu() return Menus.update_about_menu(self) end
-function Plugin:annotation_style_label()
-    return Menus.annotation_style_label(self)
-end
 
 -- 文件管理器里直接选一本 EPUB,不必先打开书。
 function Plugin:pick_book(title,on_pick)
@@ -165,9 +162,10 @@ function Plugin:book_actions(path)
         callback=act(function() self:bind_book(path) end)}}
     rows[#rows+1]={{text="同步划线与想法",callback=act(function() self:sync_entry(path) end)}}
     if bound then
-        -- 划线样式入口(上游 v0.3.3 契约:文件管理器书籍操作保留样式入口)。
-        rows[#rows+1]={{text="划线样式（"..self:annotation_style_label().."）",
-            callback=act(function() self:list("划线样式",self:annotation_style_menu()) end)}}
+        -- 划线样式入口(上游 v0.3.3 契约:文件管理器书籍操作保留样式入口;
+        -- F2 真机反馈 2026-09-13:菜单名带上文字样式)。
+        rows[#rows+1]={{text="划线样式及文字样式",
+            callback=act(function() self:list("划线样式及文字样式",self:annotation_style_menu()) end)}}
         -- 多书聚合:任何一本有待同步章节都提供「继续拉取」(P1#4);失败书/未知书
         -- 保留入口(评审五轮 P1#2)。
         local agg=self:_aggregate_sync_state(path)
@@ -175,10 +173,14 @@ function Plugin:book_actions(path)
             rows[#rows+1]={{text=self:_continue_sync_label(agg),
                 callback=act(function() self:sync_entry(path,"sync") end)}}
         end
-        rows[#rows+1]={{text="重置本书(清数据+还原原版)",callback=act(function() self:reset_book_data(path) end)}}
     end
     if self:_has_reinject_cache(path) then
         rows[#rows+1]={{text="重新注入(用上次数据,离线)",callback=act(function() self:reinject_with_clean(path) end)}}
+    end
+    if U.file_exists(path..".orig") then
+        -- F6(真机反馈 2026-09-13 二轮):与重置本书成对的"不清数据"档——
+        -- 只还原原书,同步缓存/想法保留(离线重注即可恢复注入)。
+        rows[#rows+1]={{text="还原原书(保留同步数据)",callback=act(function() self:restore_original(path) end)}}
     end
     if bound or U.file_exists(path..".orig") then
         rows[#rows+1]={{text="重置本书(清数据+还原原版)",callback=act(function() self:reset_book_data(path) end)}}
@@ -316,10 +318,6 @@ end
 
 function Plugin:manual_cookie(key)
     local d; d=InputDialog:new{title=_("Enter Cookie header"),input="",buttons={{{text=_("Cancel"),id="close",callback=function() UIManager:close(d) end},{text=_("Confirm"),is_enter_default=true,callback=function() local jar=Cookies.parse_header(d:getInputText()); self.store:save_auth({api_key=key,cookies=jar,account={name="Manual",vid=jar.wr_vid or "",logged_at=os.time()}}); UIManager:close(d); self:toast(_("Logged in")) end}}}}; UIManager:show(d); d:onShowKeyboard()
-end
-
-function Plugin:annotation_style_label()
-    return Menus.annotation_style_label(self)
 end
 
 function Plugin:annotation_style_menu()
@@ -854,12 +852,23 @@ function Plugin:_has_reinject_cache(path)
         end
         local entries = 0
         for _, value in pairs(decoded.map) do
-            if type(value) ~= "table" or type(value.hrefs) ~= "table"
-                or #value.hrefs == 0 then
+            if type(value) ~= "table" then
                 return false
             end
-            for _, href in ipairs(value.hrefs) do
-                if type(href) ~= "string" or href == "" then return false end
+            if value.no_hit then
+                -- F10:no_hit 条目(确认无命中,携引文指纹)是有效缓存内容,
+                -- 不得让离线重注入口消失(真机回归 2026-09-13 晚)。
+                if type(value.n) ~= "number" or type(value.len) ~= "number" then
+                    return false
+                end
+            else
+                if type(value.hrefs) ~= "table"
+                    or #value.hrefs == 0 then
+                    return false
+                end
+                for _, href in ipairs(value.hrefs) do
+                    if type(href) ~= "string" or href == "" then return false end
+                end
             end
             entries = entries + 1
         end
@@ -1401,6 +1410,25 @@ function Plugin:_sync_fail(text)
     UIManager:show(InfoMessage:new{text=tostring(text or ""),flush_events_on_show=true})
 end
 
+-- F14(真机反馈 2026-09-13):前台进度文案的自适应度量。Trapper:info 的
+-- InfoMessage 文本宽=屏宽×2/3,图标与内框边距按保守值扣除;字号取 infofont
+-- 的实际缩放值(随设备 DPI 变化),不按机型硬编码。文件局部函数:测试环境的
+-- 最小 self 没有 Plugin 方法,progress 回调必须无 self 依赖可调。
+local function progress_text_metrics()
+    local fpx = 20
+    pcall(function()
+        local Font = require("ui/font")
+        local face = Font:getFace("infofont")
+        if face and face.size then fpx = face.size end
+    end)
+    local avail = 0
+    pcall(function()
+        local Screen = require("device").screen
+        avail = math.floor(Screen:getWidth() * 2 / 3) - math.floor(fpx * 3)
+    end)
+    return avail, fpx
+end
+
 function Plugin:_sync_run(path,bound)
     local Trapper=require("ui/trapper")
     local Sync=require("pickthought.sync")
@@ -1452,11 +1480,16 @@ function Plugin:_sync_run(path,bound)
                      and string.format("当前书目 %d/%d：《%s》\n",book_index,#sync_book_ids,book_title or "绑定书目") or ""
                  metrics=type(metrics)=="table" and metrics or {}
                  local count=SyncProgress.format_count
+                 -- F14:自适应度量(可用宽度+实际字号),成对数值行放不下自动拆行。
+                 local avail_px,fpx=progress_text_metrics()
                  if phase=="chapters" then msg=book_prefix.."正在获取章节列表…"
-                 elseif phase=="fetch" then msg=book_prefix..string.format("正在拉取划线与想法 %d/%d\n%s\n当前章节已拉取：划线 %s 条，想法 %s 条\n本轮累计已拉取：划线 %s 条，想法 %s 条\n%s\n(点按屏幕可取消)",
-                     i,n,tostring(text or ""),count(metrics.current_fetch_underlines),
-                     count(metrics.current_fetch_thoughts),count(metrics.fetch_underlines),count(metrics.fetch_thoughts),
-                     tostring(metrics.fetch_message or ""))
+                 elseif phase=="fetch" then msg=book_prefix..string.format("正在拉取划线与想法 %d/%d\n%s\n",i,n,tostring(text or ""))
+                     ..U.pair_line("当前章节已拉取：划线 "..count(metrics.current_fetch_underlines).." 条",
+                         "想法 "..count(metrics.current_fetch_thoughts).." 条",avail_px,fpx)
+                     .."\n"..U.pair_line("本轮累计已拉取：划线 "..count(metrics.fetch_underlines).." 条",
+                         "想法 "..count(metrics.fetch_thoughts).." 条",avail_px,fpx)
+                     .."\n"..tostring(metrics.fetch_message or "")
+                     .."\n(点按屏幕可取消)"
                  elseif phase=="map" then
                      if n and n>0 and i and i>0 then
                          -- P1/P3(需求 2026-09-12):分阶段显示+真实成果计数,
@@ -1466,15 +1499,13 @@ function Plugin:_sync_run(path,bound)
                          else
                              msg=string.format("正在匹配本地章节 %d/%d 个正文文件",count(metrics.map_phase_count or i),n)
                          end
-                         msg=msg.."\n本轮已拉取：章节 "..count(metrics.fetch_chapters)
-                             .." 章，划线 "..count(metrics.fetch_underlines)
-                             .." 条，想法 "..count(metrics.fetch_thoughts).." 条"
-                         if metrics.current_file and metrics.current_file~="" then
-                             msg=msg.."\n当前文件："..tostring(metrics.current_file)
-                                 .."\n当前文件关联：划线 "..count(metrics.current_file_underlines)
-                                 .." 条，想法 "..count(metrics.current_file_thoughts).." 条"
-                         end
+                         -- F15(真机反馈 2026-09-13):拉取汇总单行为主(去掉"章节"
+                         -- 二字留出宽度余量),估算超宽时才退回两行。
+                         msg=msg.."\n"..U.pair_line("本轮已拉取："..count(metrics.fetch_chapters).." 章",
+                             "划线 "..count(metrics.fetch_underlines).." 条，想法 "..count(metrics.fetch_thoughts).." 条",avail_px,fpx)
                          if metrics.located_chapters~=nil and (tonumber(metrics.map_target_chapters) or 0)>0 then
+                             msg=msg.."\n"..U.pair_line("本轮已匹配：划线 "..count(metrics.located_underlines).." 条",
+                                 "想法 "..count(metrics.located_thoughts).." 条",avail_px,fpx)
                              msg=msg.."\n已定位章节 "..count(metrics.located_chapters)
                                  .." / "..count(metrics.map_target_chapters)
                          end
@@ -1483,16 +1514,17 @@ function Plugin:_sync_run(path,bound)
                      else msg="正在匹配本地章节…" end
                  else
                      msg="正在生成划线版并替换…"
-                     msg=msg.."\n本轮已拉取：章节 "..count(metrics.fetch_chapters)
-                         .." 章，划线 "..count(metrics.fetch_underlines)
-                         .." 条，想法 "..count(metrics.fetch_thoughts).." 条"
-                     if metrics.current_file_target and metrics.current_file then
-                         msg=msg.."\n当前文件："..tostring(metrics.current_file)
-                             .."\n当前文件注入：划线 "..count(metrics.current_file_underlines)
-                             .." 条，想法 "..count(metrics.current_file_thoughts).." 条"
+                     -- F15:拉取汇总单行为主,估算超宽时才退回两行。
+                     msg=msg.."\n"..U.pair_line("本轮已拉取："..count(metrics.fetch_chapters).." 章",
+                         "划线 "..count(metrics.fetch_underlines).." 条，想法 "..count(metrics.fetch_thoughts).." 条",avail_px,fpx)
+                     if metrics.located_chapters~=nil and (tonumber(metrics.map_target_chapters) or 0)>0 then
+                         msg=msg.."\n"..U.pair_line("本轮已匹配：划线 "..count(metrics.located_underlines).." 条",
+                             "想法 "..count(metrics.located_thoughts).." 条",avail_px,fpx)
+                         msg=msg.."\n已定位章节 "..count(metrics.located_chapters)
+                             .." / "..count(metrics.map_target_chapters)
                      end
-                     msg=msg.."\n本轮累计注入：划线 "..count(metrics.injected_underlines)
-                         .." 条，想法 "..count(metrics.injected_thoughts).." 条"
+                     msg=msg.."\n"..U.pair_line("本轮累计注入：划线 "..count(metrics.injected_underlines).." 条",
+                         "想法 "..count(metrics.injected_thoughts).." 条",avail_px,fpx)
                          .."\n书籍较大时，此阶段可能持续较长时间。"
                          .."\n具体耗时取决于书籍大小、设备性能和想法数量。"
                          .."\n进度会继续，请耐心等待，勿强制退出 KOReader。"
@@ -1988,9 +2020,15 @@ function Plugin:_prefetch_visible_comment_counts(popup,book_id)
     -- 获取提示(用户拍板 2026-09-06):整批要几秒,默认弹提示告诉用户
     -- "在干活";设置里可关。notice 生命周期绑定本轮循环,所有退出路径
     -- 都要关闭(close_notice 幂等)。
+    -- toast=true(F5,真机反馈 2026-09-13 二轮):仅 dismissable=false 不够——
+    -- UIManager:sendEvent 只把顶层未消费的事件发给 active_widgets/is_always_active
+    -- 的下层 widget,提示层作为普通 widget 压在弹窗上必然挡死分发。toast 通道
+    -- 展示在栈顶但"从不截停事件传播"(uimanager.lua 源码注释),点击穿透到弹窗,
+    -- 获取期间翻页/关闭照常。dismissable=false 让提示自身不注册 TapClose/按键,
+    -- 稳定显示到获取结束;timeout=30 是安全网,正常路径 close_notice 几秒内收回。
     local notice
     if self:_thought_popup_preferences().comment_fetch_notice~=false then
-        notice=InfoMessage:new{text="正在获取评论数…"}
+        notice=InfoMessage:new{text="正在获取评论数…",dismissable=false,timeout=30,toast=true}
         UIManager:show(notice)
         pcall(function() UIManager:forceRePaint() end)
     end
