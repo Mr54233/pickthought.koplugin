@@ -45,6 +45,26 @@ Sync.BACKUP_SUFFIX = ".orig"
 
 function Sync.backup_path(doc_path) return tostring(doc_path) .. Sync.BACKUP_SUFFIX end
 
+-- F9(真机反馈 2026-09-13):located 指标的最终口径——与注入集合同源。
+-- 扫描期的引文得分计数看不到组装阶段的序号/标题兜底匹配,也看不到缓存复用的
+-- 章节(真机:离线重注面板全程"0 / 3、已匹配 0 条",注入却 970 条起步)。
+-- 分母 = 有划线数据的章节数(可匹配集;无数据章不算"未定位")。
+-- matched_uids 的键与 Sync.run 内 ck() 一致,由调用方传入 key_of。
+function Sync.final_located_metrics(fetched, matched_uids, key_of)
+    local chapters, underlines, thoughts, data_chapters = 0, 0, 0, 0
+    for _, ch in ipairs(fetched) do
+        local has_data = #(ch.underlines or {}) > 0
+        if has_data then data_chapters = data_chapters + 1 end
+        if matched_uids[key_of(ch)] then
+            chapters = chapters + 1
+            underlines = underlines + #(ch.underlines or {})
+            thoughts = thoughts + (tonumber(ch.thought_entry_count)
+                or tonumber(ch.thought_count) or 0)
+        end
+    end
+    return chapters, underlines, thoughts, data_chapters
+end
+
 function Sync.run(deps)
     local progress = deps.progress or function() return true end
     local progress_metrics = {
@@ -694,25 +714,11 @@ function Sync.run(deps)
         end
     end
 
-    -- 缓存值格式:{hrefs={...}, num=true|nil} = 目标文件列表(拆分章多目标),
-    -- num 表示单目标强投票、允许数字兜底。未匹配结果不落盘,后续可重新尝试。
-    local known, todo = {}, {}
-    for _, ch in ipairs(fetched) do
-        local key = ck(ch.book_id, ch.uid)
-        local cached = map_store and map_store[key]
-        if cached == nil or cached == false then
-            -- false 是旧版本写入的"永久未匹配"结果,不能继续信任;重新加入待匹配。
-            todo[#todo + 1] = ch
-        elseif type(cached) == "table" and type(cached.hrefs) == "table" and #cached.hrefs > 0 then
-            known[key] = cached
-        else
-            todo[#todo + 1] = ch
-        end
-    end
-
     -- 兜底:旧缓存的 underlines markText 为空(/book/underlines 不返回文本),
     -- chapter_map 没引文素材。用同 range 想法的 abstract(原文摘要)补填,
     -- 让旧缓存(重注/续传)也能正确映射,不用重新拉。
+    -- (F10:必须先于 todo 构建执行——no_hit 的引文指纹要在回填后的文本上
+    -- 计算,写入时(合并阶段)与读取时(下一轮 todo)才能看到同一份内容。)
     for _, ch in ipairs(fetched) do
         for _, u in ipairs(ch.underlines or {}) do
             if tostring(u.markText or ""):find("%S") == nil then
@@ -723,6 +729,55 @@ function Sync.run(deps)
             end
         end
     end
+
+    -- F10(真机反馈 2026-09-13):no_hit 的引文指纹——划线数 + markText 总长。
+    -- 引文集变化(用户新增/删除划线)即失效重匹配;书源/算法变化由签名整体失效。
+    local function quotes_fingerprint(ch)
+        local n = #(ch.underlines or {})
+        local len = 0
+        for _, u in ipairs(ch.underlines or {}) do
+            len = len + #tostring(u.markText or "")
+        end
+        return n, len
+    end
+
+    -- 缓存值格式:{hrefs={...}, num=true|nil} = 目标文件列表(拆分章多目标),
+    -- num 表示单目标强投票、允许数字兜底;{no_hit=true, n, len} = 签名内
+    -- "确认无命中"(引文指纹一致则不再全书回退重扫,变化即失效重试)。
+    -- 无划线数据的章(no_data)不落缓存,下批有数据时参与匹配。
+    -- F13(真机反馈 2026-09-13):located 指标从 map 第一帧就是最终口径——
+    -- 缓存已映射的章节立即计入(base),分母=有划线数据的章节数(#fetched),
+    -- 扫描期实时命中在 base 上累加(report_map_file)。重拉/重注时不再出现
+    -- "已定位 0/3、已匹配 0 条"的全零面板。
+    local known, todo, no_hit_known = {}, {}, {}
+    local base_chapters, base_underlines, base_thoughts = 0, 0, 0
+    for _, ch in ipairs(fetched) do
+        local key = ck(ch.book_id, ch.uid)
+        local cached = map_store and map_store[key]
+        if cached == nil or cached == false then
+            -- false 是旧版本写入的"永久未匹配"结果,不能继续信任;重新加入待匹配。
+            todo[#todo + 1] = ch
+        elseif type(cached) == "table" and cached.no_hit then
+            local n, len = quotes_fingerprint(ch)
+            if cached.n == n and cached.len == len then
+                no_hit_known[key] = true
+            else
+                todo[#todo + 1] = ch
+            end
+        elseif type(cached) == "table" and type(cached.hrefs) == "table" and #cached.hrefs > 0 then
+            known[key] = cached
+            base_chapters = base_chapters + 1
+            base_underlines = base_underlines + #(ch.underlines or {})
+            base_thoughts = base_thoughts + (tonumber(ch.thought_entry_count)
+                or tonumber(ch.thought_count) or 0)
+        else
+            todo[#todo + 1] = ch
+        end
+    end
+    progress_metrics.located_chapters = base_chapters
+    progress_metrics.map_target_chapters = #fetched
+    progress_metrics.located_underlines = base_underlines
+    progress_metrics.located_thoughts = base_thoughts
 
     -- 每读一个 spine 文件发一次心跳(只作活动信号,不在文件中途响应取消),
     -- 免得特大书的纯 CPU 匹配被看门狗当成死吊。
@@ -829,11 +884,17 @@ function Sync.run(deps)
                 progress_metrics.map_phase_count = 0
             end
             progress_metrics.map_phase_count = progress_metrics.map_phase_count + 1
-            -- P3(需求 2026-09-12):真实成果计数,替代被放大的"候选关联量"。
-            progress_metrics.located_chapters = tonumber(detail and detail.matched_chapters)
-                or progress_metrics.located_chapters or 0
-            progress_metrics.map_target_chapters = tonumber(detail and detail.target_chapters)
-                or progress_metrics.map_target_chapters or 0
+            -- P3/F13(真机反馈 2026-09-13):实时命中在缓存 base 上累加,分母
+            -- 统一为有划线数据的章节数(#fetched),与 F9 最终口径一致。
+            progress_metrics.located_chapters = base_chapters
+                + (tonumber(detail and detail.matched_chapters) or 0)
+            progress_metrics.map_target_chapters = #fetched
+            -- F8(真机反馈 2026-09-13):真实"已匹配"量(仅已定位章节的划线/想法,
+            -- 回退不重复计数),注入阶段与匹配阶段面板共用。
+            progress_metrics.located_underlines = base_underlines
+                + (tonumber(detail and detail.matched_underlines) or 0)
+            progress_metrics.located_thoughts = base_thoughts
+                + (tonumber(detail and detail.matched_thoughts) or 0)
             progress_metrics.current_file = href
             progress_metrics.current_file_underlines = tonumber(detail and detail.underlines) or 0
             progress_metrics.current_file_thoughts = tonumber(detail and detail.thoughts) or 0
@@ -907,6 +968,9 @@ function Sync.run(deps)
             end
         elseif cached == false then
             unmatched[#unmatched + 1] = {uid = tostring(ch.uid), title = ch.title, reason = "no_hit", book_id = ch.book_id}
+        elseif no_hit_known[key] then
+            -- F10:缓存命中的"确认无命中"章——与本次新失败同样进未匹配报告。
+            unmatched[#unmatched + 1] = {uid = tostring(ch.uid), title = ch.title, reason = "no_hit", book_id = ch.book_id}
         elseif new_rows_by_uid[key] then
             matched_uids[key] = true
             local hrefs = {}
@@ -929,12 +993,28 @@ function Sync.run(deps)
             end
         elseif unmatched_uid[key] then
             unmatched[#unmatched + 1] = {uid = tostring(ch.uid), title = ch.title, reason = "no_hit", book_id = ch.book_id}
-            if map_store then map_store[key] = nil end
+            -- F10:no_hit 落盘(签名+引文指纹)。签名不变且引文集不变就不再
+            -- 全书回退重扫;引文集变化(新增划线)自动失效重试。
+            local n, len = quotes_fingerprint(ch)
+            if map_store then
+                map_store[key] = {no_hit = true, n = n, len = len}
+            end
         else
             -- no_data(无划线)章节:不入缓存,下批有数据时再匹配。
             unmatched[#unmatched + 1] = {uid = tostring(ch.uid), title = ch.title, reason = "no_data", book_id = ch.book_id}
         end
     end
+    -- F9(真机反馈 2026-09-13):合并完成后用最终口径覆盖 located 指标。
+    -- 扫描期计数只覆盖引文得分命中,看不到组装阶段的序号/标题兜底,也看不到
+    -- 缓存复用的章节;注入面板必须与注入集合同口径(真机:离线重注全程
+    -- "已定位 0/3、已匹配 0 条",注入却 970 条起步)。
+    local final_chapters, final_underlines, final_thoughts, final_data_chapters =
+        Sync.final_located_metrics(fetched, matched_uids,
+            function(ch) return ck(ch.book_id, ch.uid) end)
+    progress_metrics.located_chapters = final_chapters
+    progress_metrics.map_target_chapters = final_data_chapters
+    progress_metrics.located_underlines = final_underlines
+    progress_metrics.located_thoughts = final_thoughts
     if deps.map_cache_path and map_store then
         -- 按书归组写回各自缓存文件(命名空间键拆回纯 uid);单书即原文件原格式。
         local by_book = {}

@@ -493,7 +493,7 @@ T.case("on_file 上报已定位章节数,回退章节清单进入 metrics(P3/P4 
     end, {
         {uid = "1", title = "第一章 春江潮水", underlines = {
             {range = "0-7", markText = "春江潮水连海平"},
-        }},
+        }, thought_count_by_range = {["0-7"] = 3}},
         {uid = "2", title = "第八百章 绝不存在的标题", underlines = {
             {range = "0-7", markText = "彻底不存在的引文内容"},
         }},
@@ -501,6 +501,9 @@ T.case("on_file 上报已定位章节数,回退章节清单进入 metrics(P3/P4 
     T.eq(#details > 0, true, "on_file 被调用")
     T.eq(details[#details].matched_chapters, 1, "唯一已定位章节数(真实成果计数)")
     T.eq(details[#details].target_chapters, 2, "目标章节总数")
+    -- F8(真机反馈 2026-09-13):已定位章节自带的划线/想法数,回退不重复计数。
+    T.eq(details[#details].matched_underlines, 1, "已匹配划线数(仅已定位章节)")
+    T.eq(details[#details].matched_thoughts, 3, "已匹配想法数(按 range 计数)")
     T.eq(details[#details].phase, "fallback", "末次访问处于回退阶段")
     T.eq(metrics.fallback_list[1].uid, "2", "未命中章节进入回退清单")
     T.eq(metrics.fallback_list[1].title, "第八百章 绝不存在的标题", "回退清单携带标题")

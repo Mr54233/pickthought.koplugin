@@ -341,6 +341,12 @@ local function build_with_scanner(spine, chapters, scan, options)
     local matched_ci_seen = {}
     -- 唯一已定位目标章节数(引文得分>0):进度面板"已定位章节 N / M"的数据源。
     local matched_count = 0
+    -- F8(真机反馈 2026-09-13):真实"已匹配"量——只在章节**新命中**时累计该章
+    -- 自带的划线/想法数,回退阶段只扫未命中目标,天然不重复计数。
+    -- (区别于 progress_metrics.matched_underlines:那是被两阶段扫描放大的
+    -- "候选关联量",即旧文案"累计已匹配 353 万条"的来源。)
+    local matched_underline_count = 0
+    local matched_thought_count = 0
     local all_matched_early = false
     local recent_hit_streak = 0  -- 连续"命中目标的文件"计数(提前退出保守判据)
     local title_hits = {}   -- [ci] = {href, ...}(已排除目录页)
@@ -546,6 +552,11 @@ local function build_with_scanner(spine, chapters, scan, options)
                         if not matched_ci_seen[ci] then
                             matched_ci_seen[ci] = true
                             matched_count = matched_count + 1
+                            local matched_chapter = chapters[ci]
+                            matched_underline_count = matched_underline_count
+                                + #(matched_chapter and matched_chapter.underlines or {})
+                            matched_thought_count = matched_thought_count
+                                + thought_count_of(matched_chapter)
                         end
                         scores[ci] = scores[ci] or {}
                         scores[ci][#scores[ci] + 1] = {
@@ -571,6 +582,10 @@ local function build_with_scanner(spine, chapters, scan, options)
                     -- 替代面板上被两阶段扫描放大的"候选关联量"。
                     matched_chapters = matched_count,
                     target_chapters = #chapters,
+                    -- F8(真机反馈 2026-09-13):已定位章节自带的划线/想法数,
+                    -- 进度面板"本轮已匹配"的数据源。
+                    matched_underlines = matched_underline_count,
+                    matched_thoughts = matched_thought_count,
                 })
                 if reported == false then return false end
             end

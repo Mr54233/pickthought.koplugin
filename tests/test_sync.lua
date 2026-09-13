@@ -388,7 +388,59 @@ T.case("映射缓存:续批只匹配新章节", function()
     os.remove(cache_file)
 end)
 
-T.case("映射缓存:旧的未匹配结论下一轮仍会重试", function()
+T.case("映射缓存:no_hit 落盘,引文集不变不再重扫、变化即重试(F10)", function()
+    local cache_file = "tests/.tmp_map_no_hit.json"
+    os.remove(cache_file)
+    local U = require("pickthought.util")
+    -- 单章 fixture:todo 只可能有这一章,reads==0 才能证明"完全跳过扫描"。
+    local one_chapter = {api = {chapters = function() return {data = {
+        {chapterUid = 1, title = "第一章", chapterIdx = 1}}} end}}
+    local failed, err1 = Sync.run(make_deps({
+        map_cache_path = cache_file,
+        read_text = function() return "<html><body>暂时无法命中的正文</body></html>" end,
+    }))
+    T.ok(failed == nil and tostring(err1):find("匹配", 1, true), "首次未匹配应结束并提示匹配失败: " .. tostring(err1))
+    local Json = require("pickthought.json")
+    local decoded = Json.decode(U.read_file(cache_file, true))
+    T.ok(decoded and decoded.map and type(decoded.map["1"]) == "table"
+        and decoded.map["1"].no_hit == true and decoded.map["1"].n == 1
+        and (tonumber(decoded.map["1"].len) or 0) > 0,
+        "no_hit 落盘并携带引文指纹(划线数+markText 总长)")
+
+    -- 第二轮:引文集没变 → 不再全书回退重扫(零文件读取),仍以未匹配收尾。
+    local reads2 = 0
+    local deps2 = make_deps({
+        map_cache_path = cache_file,
+        read_text = function() reads2 = reads2 + 1; return "<html><body>暂时无法命中的正文</body></html>" end,
+    })
+    for k, v in pairs(one_chapter) do deps2[k] = v end
+    local failed2, err2 = Sync.run(deps2)
+    T.ok(failed2 == nil and tostring(err2):find("匹配", 1, true), "no_hit 缓存轮仍以未匹配收尾")
+    T.eq(reads2, 0, "引文指纹一致时不再重扫全书(F10 核心收益)")
+
+    -- 第三轮:引文集变化(新增一条划线)→ 指纹失效,重新进入匹配。
+    local reads3 = 0
+    local deps3 = make_deps({
+        map_cache_path = cache_file,
+        read_text = function() reads3 = reads3 + 1; return "<html><body>暂时无法命中的正文</body></html>" end,
+    })
+    for k, v in pairs(one_chapter) do deps3[k] = v end
+    deps3.annotations = {fetch_chapter = function(_, _, uid)
+        return {underlines = {
+            {range = "0-7", markText = "春江潮水连海平"},
+            {range = "8-15", markText = "新加的一条划线"}},
+            review_map = {}, review_groups = {},
+            underline_count = 2, thought_count = 0, thought_entry_count = 0, errors = {}}
+    end}
+    local failed3 = Sync.run(deps3)
+    T.ok(failed3 == nil, "引文集变化轮仍以未匹配收尾(新引文同样无命中)")
+    T.ok(reads3 > 0, "引文集变化后重新进入匹配(指纹失效)")
+    local decoded3 = Json.decode(U.read_file(cache_file, true))
+    T.eq(decoded3.map["1"].n, 2, "no_hit 指纹随新引文集更新")
+    os.remove(cache_file)
+end)
+
+T.case("映射缓存:旧的未匹配结论(false)下一轮仍会重试", function()
     local cache_file = "tests/.tmp_map_retry.json"
     os.remove(cache_file)
     local U = require("pickthought.util")
@@ -399,7 +451,6 @@ T.case("映射缓存:旧的未匹配结论下一轮仍会重试", function()
     T.ok(failed == nil and tostring(err1):find("匹配", 1, true), "首次未匹配应结束并提示匹配失败: " .. tostring(err1))
     local Json = require("pickthought.json")
     local decoded = Json.decode(U.read_file(cache_file, true))
-    T.ok(decoded and decoded.map and decoded.map["1"] == nil, "新的未匹配结果不得永久写入 false")
     decoded.map["1"] = false -- 模拟旧版本遗留的永久失败缓存。
     T.ok(U.atomic_write(cache_file, Json.encode(decoded), true), "写入旧 false 缓存")
 
@@ -415,6 +466,22 @@ T.case("映射缓存:旧的未匹配结论下一轮仍会重试", function()
     T.ok(reads > 0, "旧 false 结果应重新读取正文")
     T.eq(retried.injected, 1, "重试后应成功注入")
     os.remove(cache_file)
+end)
+
+T.case("located 最终口径:含缓存复用与兜底匹配,分母只计有数据章(F9)", function()
+    local fetched = {
+        {uid = "1", underlines = {{range = "0-7", markText = "甲"}}, thought_entry_count = 3},
+        {uid = "2", underlines = {{range = "0-7", markText = "乙"}, {range = "1-9", markText = "丙"}}, thought_count = 5},
+        {uid = "3", underlines = {{range = "0-7", markText = "丁"}}},
+        {uid = "4", underlines = {}, thought_entry_count = 2},
+    }
+    local matched_uids = {["1"] = true, ["2"] = true}
+    local chapters, underlines, thoughts, data_chapters =
+        Sync.final_located_metrics(fetched, matched_uids, function(ch) return ch.uid end)
+    T.eq(chapters, 2, "分子=进入注入集合的唯一章节数(含缓存复用与组装兜底)")
+    T.eq(underlines, 3, "已匹配划线量=注入集合章节自带划线数")
+    T.eq(thoughts, 8, "想法量走 thought_entry_count,缺失回落 thought_count")
+    T.eq(data_chapters, 3, "分母=有划线数据的章节数(无数据章不算未定位)")
 end)
 
 T.case("映射缓存写入失败时同步不得继续注入", function()
