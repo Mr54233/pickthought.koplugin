@@ -43,6 +43,7 @@ local files = {
     "tests.test_updater",
     "tests.test_performance_mode",
     "tests.test_sync_frontend",
+    "tests.test_util",
     -- 想法弹窗重做使用大量 KOReader UI mock，放在最后避免污染其他模块。
     "tests.test_thought_popup",
     "tests.test_thought_popup_core",

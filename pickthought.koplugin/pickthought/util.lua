@@ -221,4 +221,35 @@ function U.semver_newer(a,b)
     local function parts(v) local o={}; for n in tostring(v):gmatch("%d+") do o[#o+1]=tonumber(n) end return o end
     local x,y=parts(a),parts(b); for i=1,math.max(#x,#y) do local p,q=x[i] or 0,y[i] or 0; if p~=q then return p>q end end; return false
 end
+-- F14(真机反馈 2026-09-13):自适应文本宽度估算。按 NotoSans 的经验比例:
+-- CJK/全角 ≈ 1em,数字 ≈ 0.55em,字母 ≈ 0.6em,空格 ≈ 0.3em,其余 ASCII ≈ 0.35em。
+-- 只用于"这一行放不放得下"的布局决策(调用方留余量),不追求排版级精度。
+function U.text_px(text, font_px)
+    font_px = tonumber(font_px) or 20
+    local px = 0
+    local i, n = 1, #tostring(text or "")
+    while i <= n do
+        local b = text:byte(i)
+        if b >= 0xF0 then px = px + font_px; i = i + 4
+        elseif b >= 0xE0 then px = px + font_px; i = i + 3
+        elseif b >= 0xC0 then px = px + font_px; i = i + 2
+        elseif b == 0x20 then px = px + font_px * 0.30; i = i + 1
+        elseif b >= 0x30 and b <= 0x39 then px = px + font_px * 0.55; i = i + 1
+        elseif (b >= 0x41 and b <= 0x5A) or (b >= 0x61 and b <= 0x7A) then px = px + font_px * 0.60; i = i + 1
+        else px = px + font_px * 0.35; i = i + 1
+        end
+    end
+    return px
+end
+-- 成对数值行(如"本轮已匹配：划线 X 条，想法 Y 条"):first 含前缀与第一个
+-- 数值,second 是第二个数值;可用宽度内保持单行,放不下就在"，"处拆成两行
+-- (无宽度信息时保持单行)。
+function U.pair_line(first, second, avail_px, font_px)
+    first = tostring(first or "")
+    second = tostring(second or "")
+    local one = first .. "，" .. second
+    if not (tonumber(avail_px) and tonumber(avail_px) > 0) then return one end
+    if U.text_px(one, font_px) <= avail_px * 0.95 then return one end
+    return first .. "\n" .. second
+end
 return U
