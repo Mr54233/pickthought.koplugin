@@ -25,8 +25,12 @@ M.CSS = [[
 
 M.INLINE_STYLE_ID = "pickthought-annotation-style"
 
--- Runtime choices only override the shared annotation classes in the open
--- document. The EPUB keeps M.CSS as the stable fallback for offline reading.
+-- Runtime choices override the shared annotation classes in the open document.
+-- The EPUB keeps M.CSS as the stable fallback for offline reading. default 也
+-- 必须走 runtime 通道(真机反馈 2026-09-13):「内嵌样式」开关关闭的是作者层
+-- CSS,注入的内联样式随之失效,默认虚线会回落成 KOReader 默认层 a[href] 的
+-- 实线下划线;非默认档因有 runtime 覆盖而免疫该开关。这里只覆盖线条属性,
+-- 不写 color——颜色统一由文字样式块负责(text_runtime_css 拼接在其后)。
 M.DEFAULT_RUNTIME_STYLE = "default"
 M.RUNTIME_STYLE_CHOICES = {
     "default",
@@ -92,6 +96,21 @@ local TEXT_RUNTIME_CSS = {
 }
 
 local RUNTIME_CSS = {
+    default = [[
+/* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_BEGIN */
+.pickthought-link,
+.pickthought-mark {
+    text-decoration: none !important;
+}
+.pickthought-inline-mark {
+    text-decoration: underline !important;
+}
+.pickthought-mark {
+    border-bottom: 2px dashed #ff6b35 !important;
+    padding-bottom: 2px !important;
+}
+/* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_END */
+]],
     thin_solid = [[
 /* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_BEGIN */
 .pickthought-inline-mark,

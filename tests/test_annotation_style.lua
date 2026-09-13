@@ -58,8 +58,26 @@ T.case("细虚线运行时样式使用统一 class", function()
     T.ok(dashed:find(".pickthought-mark", 1, true) ~= nil, "虚线覆盖想法划线")
 end)
 
-T.case("默认运行时样式不追加覆盖", function()
-    T.eq(AnnotationStyle.runtime_css("default"), "", "默认样式使用 EPUB 内联 CSS")
+T.case("默认样式 runtime 块:关内嵌样式也不丢默认虚线(F1 真机反馈 2026-09-13)", function()
+    local css = AnnotationStyle.runtime_css("default")
+    T.ok(css:find("/* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_BEGIN */", 1, true) ~= nil,
+        "默认档输出 runtime 块(内嵌样式开关关闭时内联 CSS 失效,runtime 免疫)")
+    T.ok(css:find("border-bottom: 2px dashed #ff6b35 !important", 1, true) ~= nil,
+        "想法划线保持默认橙色虚线")
+    T.ok(css:find("padding-bottom: 2px !important", 1, true) ~= nil, "保留默认虚线间距")
+    T.ok(css:find("text-decoration: underline !important", 1, true) ~= nil,
+        "普通划线保持下划线")
+    T.ok(css:find("text-decoration: none !important", 1, true) ~= nil,
+        "带想法的划线(a 链接)不叠默认层实线下划线")
+    T.ok(css:find("color:", 1, true) == nil,
+        "默认线条块不写 color:颜色归文字样式块,避免两块 !important 同属性打架")
+    T.ok(css:find("display", 1, true) == nil and css:find("white%-space", 1, true) == nil,
+        "不越界改布局属性")
+    -- 非默认档不受影响:仍只输出各自块
+    T.ok(AnnotationStyle.runtime_css("thin_dashed"):find("1px dashed", 1, true) ~= nil,
+        "细虚线档输出不变")
+    T.ok(AnnotationStyle.runtime_css("hidden"):find("border-bottom: 0", 1, true) ~= nil,
+        "隐藏档输出不变")
 end)
 
 T.case("文字样式归一化:非法值回落跟随正文", function()
