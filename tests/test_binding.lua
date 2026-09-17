@@ -249,3 +249,25 @@ T.case("normalize_chapters 兼容 data.data 混排 bookId 与 book_id(收尾)", 
     T.eq(#rows, 1, "按 book_id(下划线)命中目标书记录")
     T.eq(rows[1].title, "目标书", "返回目标书的章节而非别的书")
 end)
+
+T.case("normalize_chapters 保留两级目录锚点(Issue #25)", function()
+    local rows = Binding.normalize_chapters({chapters = {
+        {chapterUid = 3, title = "春天",
+         anchors = {{title = "1 城里的蘑菇", level = 2}, {title = "", level = 1}}},
+        {chapterUid = 4, title = "夏天"},
+    }}, "b1")
+    T.eq(#rows[1].anchors, 1, "空标题锚点被过滤")
+    T.eq(rows[1].anchors[1].title, "1 城里的蘑菇", "锚点标题保留")
+    T.eq(rows[1].anchors[1].level, 2, "锚点层级保留")
+    T.eq(rows[2].anchors, nil, "无锚点章保持 nil(旧格式兼容)")
+end)
+
+T.case("normalize_chapters 从缓存原始响应提取锚点(离线重注路径)", function()
+    -- chapters.json 缓存的是原始 API 响应;离线重注读取同一形状,
+    -- 锚点必须同样被提取,离线两级书才能正确绑定。
+    local cached = {chapters = {
+        {chapterUid = 3, title = "春天", anchors = {{title = "1 城里的蘑菇", level = 2}}},
+    }}
+    local rows = Binding.normalize_chapters(cached, "b1")
+    T.eq(rows[1].anchors[1].title, "1 城里的蘑菇", "缓存原始响应提取锚点")
+end)

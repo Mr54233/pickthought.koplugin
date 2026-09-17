@@ -15,7 +15,8 @@ local ChapterMap = {}
 -- 否则旧算法缓存下来的「匹配失败」会永久生效,改进永远轮不到那些章节。
 -- 9:迁移上游 weread PR #150 的标题键改进(宽松标题键/更新后缀关键词扩展/
 -- 英文 Chapter 前缀剥离/目标顺序守卫),标题匹配行为变化,旧缓存整体作废。
-ChapterMap.ALGO_VERSION = 9
+-- 10:锚点标题参与章节绑定(两级目录修复,Issue #25),映射结果变化,旧缓存整体作废。
+ChapterMap.ALGO_VERSION = 10
 
 -- 标题钥匙:剥掉「第X章/节/回…」编号前缀。微信与本地书的章号体系
 -- 经常不一致(实测:微信「第六章 姑娘请自重」= 本地「第二百八十四章
@@ -332,6 +333,25 @@ local function build_with_scanner(spine, chapters, scan, options)
     for ci, relaxed in pairs(relaxed_keys) do
         if remote_relaxed_counts[relaxed] == 1 then
             relaxed_index[relaxed] = ci
+        end
+    end
+    -- 两级目录(Issue #25 马可瓦尔多):微读一级标题"春天/夏天…"多章重复且
+    -- 不含正文,故事正文全在二级锚点标题块("1 城里的蘑菇")里。锚点标题作为
+    -- 附加绑定键进入 title_index,章节同时绑定一、二级块,引文搜索范围随之
+    -- 覆盖二级块正文。多 range 搜索与投票/quote_only 防线不变;<6 字节的
+    -- 泛化锚点不参与,无锚点章节行为与旧版完全一致。
+    for ci, ch in ipairs(chapters) do
+        for _, anchor in ipairs(type(ch) == "table" and ch.anchors or {}) do
+            local key = ChapterMap.title_key(
+                type(anchor) == "table" and anchor.title or anchor)
+            if key ~= "" and key ~= titles[ci] and #key >= 6 then
+                title_index[key] = title_index[key] or {}
+                local seen = false
+                for _, other in ipairs(title_index[key]) do
+                    if other == ci then seen = true; break end
+                end
+                if not seen then title_index[key][#title_index[key] + 1] = ci end
+            end
         end
     end
 

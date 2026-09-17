@@ -418,6 +418,9 @@ function Sync.run(deps)
                     appended_this_chapter = true
                     fetched[#fetched + 1] = {
                         uid = ch.uid, title = ch.title, book_id = bid,
+                        -- 两级目录锚点透传(Issue #25):ChapterMap 需要二级
+                        -- 锚点标题绑定正文所在的二级标题块,缺失则引文 no_hit。
+                        anchors = ch.anchors,
                         underlines = compact.underlines, review_map = compact.review_map,
                         thought_count_by_range = compact.thought_count_by_range,
                         thought_ranges = compact.thought_ranges,

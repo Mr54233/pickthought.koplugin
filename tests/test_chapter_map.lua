@@ -479,8 +479,8 @@ T.case("合并章跨文件不触发序倒挂(A7 反例)", function()
     T.eq(by_uid["2"].quote_only, nil, "守卫未触发:单强目标保留数字兜底资格")
 end)
 
-T.case("ALGO_VERSION 升至 9(A8)", function()
-    T.eq(ChapterMap.ALGO_VERSION, 9, "标题键行为变化,旧映射缓存整体作废")
+T.case("ALGO_VERSION 升至 10(A9)", function()
+    T.eq(ChapterMap.ALGO_VERSION, 10, "锚点参与绑定改变映射结果,旧映射缓存整体作废")
 end)
 
 T.case("on_file 上报已定位章节数,回退章节清单进入 metrics(P3/P4 取证字段)", function()
@@ -507,4 +507,79 @@ T.case("on_file 上报已定位章节数,回退章节清单进入 metrics(P3/P4 
     T.eq(details[#details].phase, "fallback", "末次访问处于回退阶段")
     T.eq(metrics.fallback_list[1].uid, "2", "未命中章节进入回退清单")
     T.eq(metrics.fallback_list[1].title, "第八百章 绝不存在的标题", "回退清单携带标题")
+end)
+
+T.case("两级目录:锚点标题绑定二级正文块(Issue #25)", function()
+    -- 微读一级"春天"多章重复且只含标题文字,故事正文全在二级"故事名"块内;
+    -- 4 个同名一级标题 > 标题兜底上限(3),只有锚点键的引文投票能定案。
+    local files = {
+        ["p1.xhtml"] = [[<html><body><h1>春天</h1><h2>1 城里的蘑菇</h2><p>蘑菇孢子从远方吹进城里落在这里悄然生长。</p></body></html>]],
+        ["p2.xhtml"] = [[<html><body><h1>春天</h1><h2>2 长椅上的假期</h2><p>长椅被正午的太阳晒得滚烫根本无法落座休息。</p></body></html>]],
+        ["p3.xhtml"] = [[<html><body><h1>春天</h1><h2>3 市政府的鸽子</h2><p>鸽子成群落在市政厅的屋檐下等待游客投喂面包。</p></body></html>]],
+        ["p4.xhtml"] = [[<html><body><h1>春天</h1><h2>4 消失在雪里的城市</h2><p>大雪把整座城市的轮廓和声音都一并温柔地覆盖。</p></body></html>]],
+        ["p5.xhtml"] = [[<html><body><h1>夏天</h1><h2>5 黄蜂疗法</h2><p>黄蜂蜇伤之后的肿痛需要用冷水浸湿的毛巾冷敷。</p></body></html>]],
+    }
+    local spine = {}
+    for _, h in ipairs({"p1.xhtml", "p2.xhtml", "p3.xhtml", "p4.xhtml", "p5.xhtml"}) do
+        spine[#spine + 1] = {href = h}
+    end
+    local chapters = {
+        {uid = "3", title = "春天", anchors = {{title = "1 城里的蘑菇", level = 2}},
+         underlines = {{range = "0-1", markText = "蘑菇孢子从远方吹进城里落在这里悄然生长"}}},
+        {uid = "7", title = "春天", anchors = {{title = "5 黄蜂疗法", level = 2}},
+         underlines = {{range = "0-1", markText = "黄蜂蜇伤之后的肿痛需要用冷水浸湿的毛巾冷敷"}}},
+    }
+    local mapped, unmatched = ChapterMap.build(spine, function(h) return files[h] end, chapters)
+    T.eq(#unmatched, 0, "锚点救回全部章节: unmatched=" .. tostring(#unmatched))
+    T.eq(#mapped, 2, "两章各自映射")
+    local by_uid = {}
+    for _, m in ipairs(mapped) do by_uid[m.chapter_uid] = m.href end
+    T.eq(by_uid["3"], "p1.xhtml", "城里的蘑菇落 p1")
+    T.eq(by_uid["7"], "p5.xhtml", "黄蜂疗法落 p5")
+end)
+
+T.case("两级目录:无锚点时保持修复前行为(同名标题>3 不兜底)", function()
+    -- 与上一用例同一夹具,但章节不带锚点(修复前生产数据形状):
+    -- 一级"春天"命中 4 个文件,超过标题兜底上限(3),保持未匹配。
+    local files = {
+        ["p1.xhtml"] = [[<html><body><h1>春天</h1><h2>1 城里的蘑菇</h2><p>蘑菇孢子从远方吹进城里落在这里悄然生长。</p></body></html>]],
+        ["p2.xhtml"] = [[<html><body><h1>春天</h1><h2>2 长椅上的假期</h2><p>长椅被正午的太阳晒得滚烫根本无法落座休息。</p></body></html>]],
+        ["p3.xhtml"] = [[<html><body><h1>春天</h1><h2>3 市政府的鸽子</h2><p>鸽子成群落在市政厅的屋檐下等待游客投喂面包。</p></body></html>]],
+        ["p4.xhtml"] = [[<html><body><h1>春天</h1><h2>4 消失在雪里的城市</h2><p>大雪把整座城市的轮廓和声音都一并温柔地覆盖。</p></body></html>]],
+    }
+    local spine = {}
+    for _, h in ipairs({"p1.xhtml", "p2.xhtml", "p3.xhtml", "p4.xhtml"}) do
+        spine[#spine + 1] = {href = h}
+    end
+    local chapters = {
+        {uid = "3", title = "春天",
+         underlines = {{range = "0-1", markText = "蘑菇孢子从远方吹进城里落在这里悄然生长"}}},
+    }
+    local mapped, unmatched = ChapterMap.build(spine, function(h) return files[h] end, chapters)
+    T.eq(#mapped, 0, "无锚点不误绑")
+    T.eq(#unmatched, 1, "保持未匹配")
+    T.eq(unmatched[1].reason, "no_hit", "原因 no_hit")
+end)
+
+T.case("两级目录:过短锚点不参与绑定", function()
+    -- 泛化短锚点(如"1")跳过绑定,行为必须等同无锚点:
+    -- 4 个同名一级标题 > 标题兜底上限,保持未匹配(若锚点误参与,
+    -- 锚点键"1"自身 <6 字节本应被跳过;一旦误入即会命中 p1)。
+    local files = {
+        ["p1.xhtml"] = [[<html><body><h1>春天</h1><h2>1</h2><p>蘑菇孢子从远方吹进城里落在这里悄然生长。</p></body></html>]],
+        ["p2.xhtml"] = [[<html><body><h1>春天</h1><h2>2</h2><p>长椅被正午的太阳晒得滚烫根本无法落座休息。</p></body></html>]],
+        ["p3.xhtml"] = [[<html><body><h1>春天</h1><h2>3</h2><p>鸽子成群落在市政厅的屋檐下等待游客投喂面包。</p></body></html>]],
+        ["p4.xhtml"] = [[<html><body><h1>春天</h1><h2>4</h2><p>大雪把整座城市的轮廓和声音都一并温柔地覆盖。</p></body></html>]],
+    }
+    local spine = {}
+    for _, h in ipairs({"p1.xhtml", "p2.xhtml", "p3.xhtml", "p4.xhtml"}) do
+        spine[#spine + 1] = {href = h}
+    end
+    local chapters = {
+        {uid = "3", title = "春天", anchors = {{title = "1", level = 2}},
+         underlines = {{range = "0-1", markText = "蘑菇孢子从远方吹进城里落在这里悄然生长"}}},
+    }
+    local mapped, unmatched = ChapterMap.build(spine, function(h) return files[h] end, chapters)
+    T.eq(#mapped, 0, "短锚点被护栏跳过,不参与绑定")
+    T.eq(#unmatched, 1, "保持未匹配")
 end)

@@ -191,6 +191,24 @@ end
 -- 故优先认 data.chapters;旧文档说的嵌套 {data=[{bookId,updated}]} 仅作兜底。
 -- 无 bookId 选择时 data.data / chapterInfos / updated / 直接数组 皆可用。
 -- 丢弃无 chapterUid 的条目,uid 字符串化,按 chapterIdx 升序排列。
+--- 归一化章节锚点(两级目录的二级标题):保留 title 与 level,过滤空标题;
+--- 输入非 table 或全空时返回 nil,章节数据保持与旧格式一致(无键)。
+function Binding.normalize_anchors(list)
+    if type(list) ~= "table" then return nil end
+    local out
+    for _, a in ipairs(list) do
+        local title = type(a) == "table" and tostring(a.title or "") or ""
+        if title ~= "" then
+            out = out or {}
+            out[#out + 1] = {
+                title = title,
+                level = tonumber(type(a) == "table" and a.level or nil),
+            }
+        end
+    end
+    return out
+end
+
 function Binding.normalize_chapters(data, book_id)
     local out = {}
     if type(data) ~= "table" then return out end
@@ -253,6 +271,10 @@ function Binding.normalize_chapters(data, book_id)
                 title = tostring(ch.title or ""),
                 chapterIdx = tonumber(ch.chapterIdx),
                 ord = idx,
+                -- 两级目录(Issue #25 马可瓦尔多):一级"春天"+二级"1 城里的蘑菇",
+                -- 正文全在二级标题块里。锚点必须保留到 ChapterMap,否则章节绑定
+                -- 落在只有标题文字的一级块上,引文搜索永远 no_hit。
+                anchors = Binding.normalize_anchors(ch.anchors),
             }
         end
     end
