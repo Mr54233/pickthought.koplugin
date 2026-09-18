@@ -1,0 +1,58 @@
+name: 报告问题
+description: something isn't working —— 功能异常、报错、结果不符合预期
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈!以下信息能大幅加快排查,请尽量填写。
+        涉及日志时,注意先删掉其中的 Cookie、token 等敏感内容。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么?
+      description: 描述异常表现,以及你期望的正确结果是什么
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 例如:绑定书籍 → 开始同步 → 同步到 N 章时提示……
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 出现……
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: 设备型号
+      description: 例如 Kindle Paperwhite 4 / Kindle 3 / 其他
+      placeholder: Kindle Paperwhite 4
+  - type: input
+    id: koreader-version
+    attributes:
+      label: KOReader 版本
+      description: KOReader 菜单最下方"关于"里能看到
+      placeholder: v2026.03
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 撷思插件版本
+      description: 撷思菜单 → 关于;或 OTA 页面显示的版本号
+      placeholder: 0.5.3
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: crash.log 相关片段
+      description: KOReader 安装目录下的 crash.log,只贴出现报错前后的几十行即可;文件太大可只贴含"撷思/pickthought"的行
+      render: text
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图
+      description: 如有界面异常,拖拽图片到这里

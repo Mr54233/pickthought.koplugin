@@ -1,0 +1,29 @@
+name: 功能建议
+description: 提议一个新功能或改进
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决什么问题?
+      description: 你在什么场景下遇到了什么不便——先说问题,再说方案
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望的效果
+      description: 你希望插件怎么做?最好描述操作路径和预期结果
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 相关区域
+      options:
+        - 同步(拉取/匹配/注入)
+        - 想法弹窗
+        - 想法评论
+        - 划线样式
+        - 菜单与设置
+        - 其他

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 求助问答
+    url: https://github.com/Mr54233/pickthought.koplugin/discussions
+    about: 使用问题、安装配置求助请走 Discussions,别开 issue
