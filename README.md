@@ -1,5 +1,9 @@
 # 撷思 PickThought
 
+[![CI](https://github.com/Mr54233/pickthought.koplugin/actions/workflows/ci.yml/badge.svg)](https://github.com/Mr54233/pickthought.koplugin/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Mr54233/pickthought.koplugin)](https://github.com/Mr54233/pickthought.koplugin/releases/latest)
+[![License](https://img.shields.io/github/license/Mr54233/pickthought.koplugin)](LICENSE)
+
 **书是你的,想法是社区的——撷思把后者塞进前者。**
 
 非官方 KOReader 插件:从微信读书拉取划线与公开想法,引文对齐后注入本地 EPUB。点按虚线,弹窗看想法,还能看想法下面的评论。
