@@ -1,0 +1,30 @@
+name: Stale
+
+on:
+  schedule:
+    - cron: "26 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 标记并关闭闲置议题
+        uses: actions/stale@v9
+        with:
+          days-before-issue-stale: 30
+          days-before-issue-close: 7
+          stale-issue-message: "该议题已有 30 天无活动，先标记为闲置；若仍需跟进，请回复本条或移除 stale 标签。"
+          close-issue-message: "该议题因连续 7 天无进一步活动而自动关闭。问题若仍然存在，欢迎重新打开或新建议题。"
+          exempt-issue-labels: "pinned,keep"
+          days-before-pr-stale: 45
+          days-before-pr-close: 14
+          stale-pr-message: "该 PR 已有 45 天无活动，先标记为闲置；若仍在推进，请回复本条或移除 stale 标签。"
+          close-pr-message: "该 PR 因连续 14 天无进一步活动而自动关闭。欢迎基于最新 main 重新提交。"
+          exempt-pr-labels: "pinned,keep"
+          exempt-draft-pr: true
+          operations-per-run: 100

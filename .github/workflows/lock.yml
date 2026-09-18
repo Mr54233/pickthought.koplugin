@@ -1,0 +1,30 @@
+name: Lock Threads
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+  discussions: write
+
+concurrency:
+  group: pickthought-lock
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 锁定已关闭的闲置议题
+        uses: dessant/lock-threads@v5
+        with:
+          issue-inactive-days: "30"
+          issue-comment: "议题已解决并锁定。如问题再次出现或需要继续讨论，请新建议题。"
+          exclude-any-issue-labels: "pinned,keep"
+          pr-inactive-days: "30"
+          pr-comment: "PR 已合并或关闭并锁定。如需继续推进，欢迎基于最新 main 重新提交。"
+          exclude-any-pr-labels: "pinned,keep"
+          discussion-inactive-days: "30"
+          exclude-any-discussion-labels: "pinned,keep"
