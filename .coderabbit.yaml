@@ -1,0 +1,4 @@
+# CodeRabbit 审查配置：中文回复 + 精简画像（只报真实问题，不挑细枝末节）
+language: zh
+reviews:
+  profile: chill
