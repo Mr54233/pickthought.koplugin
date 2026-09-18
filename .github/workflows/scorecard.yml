@@ -20,7 +20,7 @@ jobs:
       contents: read
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 运行 Scorecard 分析
         uses: ossf/scorecard-action@v2.4.4
@@ -30,6 +30,6 @@ jobs:
           publish_results: true
 
       - name: 上传 SARIF 到代码扫描
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: results.sarif
