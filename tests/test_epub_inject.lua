@@ -696,3 +696,101 @@ T.case("降级让出不依赖 opts.progress(预置降级)", function()
     T.ok(stats, "未传 progress 时 inject_copy 仍应成功: " .. tostring(err))
     T.ok(rest_calls > 0, "已降级时即使无 progress 也应让出")
 end)
+
+
+-- ===== 注释内联容错对齐(Issue 真机《亲密关系》443 条未定位) =====
+
+T.case("容错对齐:本地插入注释(HPV)后划线仍命中", function()
+    -- 本地转制把脚注内联进正文;微读划线原文无插入。整串失败→容错子序列。
+    local html = [[<html><body><p>最常见的病原体是人乳头状瘤病毒(HPV)，这种病毒会引起生殖器疣。</p></body></html>]]
+    local data = {
+        underline_count = 1,
+        underlines = {{range = "0-30", markText = "最常见的病原体是人乳头状瘤病毒，这种病毒会引起生殖器疣"}},
+        review_map = {}, errors = {},
+    }
+    local rendered, _, stats = Annotations:new():apply(html, data)
+    T.ok(stats.quote_aligned + stats.fuzzy >= 1, "划线着落(容错)")
+    T.ok(stats.fuzzy >= 1, "计入 fuzzy 统计")
+    T.ok(rendered:find("pickthought%-inline%-mark", 1) ~= nil
+        or rendered:find("pickthought%-mark", 1) ~= nil
+        or rendered:find("pickthought%-link", 1) ~= nil, "锚点已注入")
+    T.eq(stats.unlocated, 0, "无未定位")
+end)
+
+T.case("容错对齐:真实样本(sperm competition 插入)", function()
+    local html = [[<html><body><p>男性偶尔会碰到精子竞争(sperm competition)的情况，即两个或更多男性的精子同时出现在女性生殖道时。</p></body></html>]]
+    local data = {
+        underline_count = 1,
+        underlines = {{range = "0-30", markText = "男性偶尔会碰到精子竞争的情况，即两个或更多男性的精子同时出现在女性生殖道时"}},
+        review_map = {}, errors = {},
+    }
+    local _, _, stats = Annotations:new():apply(html, data)
+    T.ok(stats.fuzzy >= 1, "英文术语插入容错命中")
+    T.eq(stats.unlocated, 0, "无未定位")
+end)
+
+T.case("容错对齐:统计数字插入", function()
+    local html = [[<html><body><p>到20岁时，只有少数人（约20%）还未曾有过性行为。</p></body></html>]]
+    local data = {
+        underline_count = 1,
+        underlines = {{range = "0-20", markText = "到20岁时，只有少数人还未曾有过性行为"}},
+        review_map = {}, errors = {},
+    }
+    local _, _, stats = Annotations:new():apply(html, data)
+    T.ok(stats.fuzzy >= 1, "括号统计插入容错命中")
+    T.eq(stats.unlocated, 0, "无未定位")
+end)
+
+T.case("容错护栏:两段不同文本不误命中", function()
+    -- 划线原文是本地完全不同的句子(字面大改):不得把邻近文本硬凑成命中。
+    -- no_numeric_fallback 隔离数字兜底(短 range 会落入本地文本长度内走 numeric,
+    -- 那是既有行为),本用例专测容错路径的护栏。
+    local html = [[<html><body><p>今日空气质量良好适合户外运动和长时间的远足活动。</p></body></html>]]
+    local data = {
+        underline_count = 1, no_numeric_fallback = true,
+        underlines = {{range = "0-20", markText = "明天预报有大雨市民应当减少外出活动并注意安全"}},
+        review_map = {}, errors = {},
+    }
+    local _, _, stats = Annotations:new():apply(html, data)
+    T.eq(stats.fuzzy, 0, "不同文本不容错命中")
+    T.eq(stats.unlocated, 1, "保持未定位")
+end)
+
+T.case("容错护栏:跳过量超限失败(本地多出200字)", function()
+    local insert = string.rep("插入的注释内容", 20) -- 120 字
+    local html = "<html><body><p>开头一句正文。" .. insert .. "结尾一句正文。</p></body></html>"
+    local data = {
+        underline_count = 1,
+        underlines = {{range = "0-8", markText = "开头一句正文。结尾一句正文。"}},
+        review_map = {}, errors = {},
+    }
+    local _, _, stats = Annotations:new():apply(html, data)
+    T.eq(stats.fuzzy, 0, "超长插入不硬串")
+end)
+
+T.case("容错对齐:整串命中行为不变(不进 fuzzy)", function()
+    local html = [[<html><body><p>春江潮水连海平，海上明月共潮生。</p></body></html>]]
+    local data = {
+        underline_count = 1,
+        underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+        review_map = {}, errors = {},
+    }
+    local _, _, stats = Annotations:new():apply(html, data)
+    T.eq(stats.quote_aligned, 1, "整串命中")
+    T.eq(stats.fuzzy, 0, "不走容错")
+    T.eq(stats.unlocated, 0, "无未定位")
+end)
+
+T.case("容错对齐:合并文件场景(no_numeric_fallback)仍可用", function()
+    -- 容错命中来自本地文本区间,不依赖数字偏移;合并文件禁数字兜底时仍应救回。
+    -- 原文为长句(真实形态):插入物(19B)远小于原文的 1/3。
+    local html = [[<html><body><p>亲密关系领域的多项追踪研究(Graham et al., 2016)一致表明依恋类型显著影响长期满意度与稳定性。</p></body></html>]]
+    local data = {
+        underline_count = 1, no_numeric_fallback = true,
+        underlines = {{range = "0-40", markText = "亲密关系领域的多项追踪研究一致表明依恋类型显著影响长期满意度与稳定性"}},
+        review_map = {}, errors = {},
+    }
+    local _, _, stats = Annotations:new():apply(html, data)
+    T.ok(stats.fuzzy >= 1, "合并文件容错仍命中")
+    T.eq(stats.unlocated, 0, "无未定位")
+end)
