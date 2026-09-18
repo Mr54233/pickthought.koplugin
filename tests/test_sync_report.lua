@@ -138,3 +138,52 @@ T.case("多书报告完成时明确表示绑定书目已完成", function()
     T.ok(text:find("全部已绑定书目章节已处理完成", 1, true), "多书完成语义明确")
     T.ok(not text:find("全部章节已处理完成", 1, true), "多书不得使用单书完成文案")
 end)
+
+T.case("划线降级:登录失效根因两行,不重复失衡提醒(需求 2026-09-18)", function()
+    local text = render({
+        batch_start = 1, batch_end = 23, chapters_processed = 23,
+        chapters_fetch_succeeded = 23, chapters_total = 23, chapters_pending = 0,
+        total_underlines = 9, total_thought_entries = 8702,
+        underlines_injected = 2, thoughts_injected = 8702,
+        annotation_agent_chapters = 23, annotation_auth_degraded = true,
+        unmatched = {}, backup = "book.epub.orig",
+    })
+    T.ok(text:find("划线仅拉取到个人数据:微信读书网页登录已失效", 1, true), "根因行: " .. text)
+    T.ok(text:find("重新登录撷思后重置本书,可恢复完整划线", 1, true), "恢复动作行")
+    T.ok(not text:find("划线数量远少于想法", 1, true), "根因已明示不重复失衡提醒")
+end)
+
+T.case("划线失衡:极端比例触发通用提醒", function()
+    local text = render({
+        batch_start = 1, batch_end = 23, chapters_processed = 23,
+        chapters_fetch_succeeded = 23, chapters_total = 23, chapters_pending = 0,
+        total_underlines = 9, total_thought_entries = 8702,
+        underlines_injected = 2, thoughts_injected = 8702,
+        unmatched = {}, backup = "book.epub.orig",
+    })
+    T.ok(text:find("划线数量远少于想法,可能仅拉到个人划线或绑定版本不符", 1, true), "失衡行: " .. text)
+    T.ok(text:find("重新登录或核对绑定版本后重置本书,通常可恢复", 1, true), "恢复动作行")
+    T.ok(not text:find("网页登录已失效", 1, true), "无 auth 信号不得断言登录失效")
+end)
+
+T.case("划线失衡门限:1:50 边界与小书豁免", function()
+    local function render_counts(u, t, processed)
+        return render({
+            batch_start = 1, batch_end = processed, chapters_processed = processed,
+            chapters_fetch_succeeded = processed, chapters_total = processed,
+            chapters_pending = 0, total_underlines = u, total_thought_entries = t,
+            underlines_injected = u, thoughts_injected = t,
+            unmatched = {}, backup = "book.epub.orig",
+        })
+    end
+    T.ok(render_counts(399, 20000, 200):find("划线数量远少于想法", 1, true),
+        "1:50.1 触发(399×50=19950<20000)")
+    T.ok(not render_counts(400, 20000, 200):find("划线数量远少于想法", 1, true),
+        "恰 1:50 不触发(400×50=20000)")
+    T.ok(not render_counts(5, 150, 10):find("划线数量远少于想法", 1, true),
+        "想法<200 小书豁免")
+    T.ok(not render_counts(0, 0, 0):find("划线数量远少于想法", 1, true),
+        "空批豁免")
+    T.ok(not render_counts(12081, 30338, 200):find("划线数量远少于想法", 1, true),
+        "正常书(1:2.5)不触发")
+end)

@@ -1489,6 +1489,7 @@ function Plugin:_sync_run(path,bound)
                      .."\n"..U.pair_line("本轮累计已拉取：划线 "..count(metrics.fetch_underlines).." 条",
                          "想法 "..count(metrics.fetch_thoughts).." 条",avail_px,fpx)
                      .."\n"..tostring(metrics.fetch_message or "")
+                     ..(metrics.annotation_degraded and "\n划线走备用通道:网页登录已失效,仅拉取个人划线" or "")
                      .."\n(点按屏幕可取消)"
                  elseif phase=="map" then
                      if n and n>0 and i and i>0 then

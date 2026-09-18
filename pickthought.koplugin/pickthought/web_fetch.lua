@@ -273,6 +273,14 @@ function WebFetch:fetch_chapter(book_id, uid, progress)
     result.errors = errors
     result.rate_limited = rate_limited or nil
     result.rate_limit_wait = rate_limit_wait
+    -- 降级可见化:underlines 走网关(web 不可用)时透传来源与失败原因,
+    -- 同步层据此提示「仅个人划线」(登录失效场景,想法通道不受影响)。
+    if data._annotation_source == "agent" then
+        result.underline_source = "agent"
+        result.underline_web_error = tostring(data._annotation_web_error or "")
+        result.underline_auth_degraded = Http_ok and Http.is_auth_error(result.underline_web_error)
+            and true or nil
+    end
     progress("thoughts", 1, 1, "", {
         current_underlines = result.underline_count,
         current_thoughts = result.thought_entry_count,

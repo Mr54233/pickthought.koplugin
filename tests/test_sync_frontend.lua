@@ -53,17 +53,25 @@ package.preload["pickthought.thoughts"] = function()
 end
 -- 网络拉取调用记录(评审七轮:用于断言冷却书 A 不走网络、正常书 B 走网络)。
 local fetcher_calls = {}
+-- 需求 2026-09-18:agent 降级行为开关(见下方 web_fetch 桩)。
+local fetcher_behavior = { agent_auth = false }
 package.preload["pickthought.web_fetch"] = function()
     return { new = function()
         return { fetch_chapter = function(_, book_id, uid)
             fetcher_calls[#fetcher_calls + 1] = tostring(book_id) .. ":" .. tostring(uid)
             -- 至少返回一条划线 + 想法,使 Sync.run 越过「没有划线」闸门、走到 inject。
-            return {
+            local data = {
                 underlines = { { range = "0-7", markText = "春江潮水连海平" } },
                 review_map = { ["0-7"] = { { content = "好句", author = "甲" } } },
                 review_groups = { { range = "0-7", texts = { { content = "好句", author = "甲" } } } },
                 underline_count = 1, thought_count = 1, thought_entry_count = 1, errors = {},
             }
+            -- 需求 2026-09-18:开关式注入 agent 降级字段,供前台降级文案用例复用同一桩。
+            if fetcher_behavior.agent_auth then
+                data.underline_source = "agent"
+                data.underline_auth_degraded = true
+            end
+            return data
         end }
     end }
 end
@@ -344,6 +352,45 @@ T.case("前台 progress 文案:总匹配紧跟阶段行,注入阶段显示匹配
     T.ok(inject_text ~= nil, "捕获到注入阶段文案")
     T.ok(inject_text:find("正在生成划线版并替换…\n本轮已拉取：1 章，划线 1 条，想法 1 条\n本轮已匹配：划线 1 条，想法 1 条\n已定位章节 1 / 1", 1, true),
         "注入阶段:阶段行→拉取汇总→已匹配量→章节占比")
+    trapper_texts = {}
+end)
+
+T.case("前台拉取文案:登录失效降级常驻行(需求 2026-09-18)", function()
+    -- 与 F3 用例同环境,但 web_fetch 桩带 agent+auth 降级字段,
+    -- 断言前台 Trapper 拉取阶段出现常驻降级行;正常态(F3 用例)无此行。
+    -- 同 F3:桌面环境下中文路径的备份步骤注定失败(报告标志位在 test_sync
+    -- 聚合用例断言),此处只断言备份失败前的拉取阶段文案与注入前置。
+    fetcher_behavior.agent_auth = true
+    trapper_texts = {}
+    captured.inject_called = false
+    local self = {}
+    function self:_sync_fail(msg) self.fail_msg = msg end
+    function self:_sync_report(r) self.report = r end
+    self._book_ids = function() return { "b001" } end
+    self.api = { chapters = function()
+        return { data = { { chapterUid = 1, title = "第一章", chapterIdx = 1 } } }
+    end }
+    self.store = {
+        book_dir = function() return "/tmp/pt_fake_bookdir" end,
+        preferences = function() return {} end,
+    }
+    local U = require("pickthought.util")
+    local original_atomic_write = U.atomic_write
+    U.atomic_write = function(cache_path, data, binary)
+        if tostring(cache_path):find("/sync%-cache/map%.json$") then return true end
+        return original_atomic_write(cache_path, data, binary)
+    end
+    Plugin._sync_run(self, "/tmp/书.epub", { book_id = "b001" })
+    U.atomic_write = original_atomic_write
+    fetcher_behavior.agent_auth = false
+    T.ok(captured.inject_called, "前置:同步链路走到注入")
+    local fetch_text
+    for _, text in ipairs(trapper_texts) do
+        if text:find("正在拉取划线与想法", 1, true) then fetch_text = text end
+    end
+    T.ok(fetch_text ~= nil, "捕获到拉取阶段文案")
+    T.ok(fetch_text:find("划线走备用通道:网页登录已失效,仅拉取个人划线", 1, true),
+        "降级常驻行出现: " .. tostring(fetch_text))
     trapper_texts = {}
 end)
 
@@ -886,6 +933,7 @@ T.case("三阶段进度显示累计明细,逐文件行已移除(F11)", function(
         fetch_underlines = 2435, fetch_thoughts = 30338})
     T.ok(dialog.status_text:find("第 17 章\n想法批次 2/3\n当前章节已拉取：划线 93 条，想法 740 条\n本轮累计已拉取：划线 2,435 条，想法 30,338 条", 1, true),
         "拉取阶段先保留原文案再追加当前章和累计数据")
+    T.ok(not dialog.status_text:find("备用通道", 1, true), "正常态无降级行")
 
     dialog:set_state({stage = "map", current = 415, total = 1284,
         chapter = "Text/0415.xhtml", map_phase = "primary", map_phase_count = 415,
@@ -967,6 +1015,29 @@ T.case("三阶段进度显示累计明细,逐文件行已移除(F11)", function(
     T.ok(dialog.status_text:find("书籍较大时，此阶段可能持续较长时间。\n具体耗时取决于书籍大小、设备性能和想法数量。\n进度会继续，请耐心等待，勿强制退出 KOReader。", 1, true),
         "注入阶段显示分行耗时提示")
     T.eq(SyncProgress.format_count(1234567), "1,234,567", "大数字千位分隔")
+end)
+
+T.case("后台拉取面板:登录失效降级常驻行(需求 2026-09-18)", function()
+    local dialog = {_title = "正在同步《剑来》"}
+    dialog.title_widget = {setText = function() end}
+    dialog.progress = {setPercentage = function() end}
+    dialog.percent_widget = {setText = function() end}
+    dialog.status_widget = {setText = function(_, text) dialog.status_text = text end}
+    function dialog:_redraw() end
+    setmetatable(dialog, {__index = SyncProgress})
+
+    dialog:set_state({stage = "fetch", current = 17, total = 1398,
+        chapter = "第 17 章",
+        current_fetch_underlines = 1, current_fetch_thoughts = 380,
+        fetch_underlines = 9, fetch_thoughts = 8702,
+        annotation_degraded = true})
+    T.ok(dialog.status_text:find("本轮累计已拉取：划线 9 条，想法 8,702 条\n划线走备用通道：网页登录已失效，仅拉取个人划线", 1, true),
+        "降级行紧跟累计行: " .. tostring(dialog.status_text))
+
+    dialog:set_state({stage = "fetch", current = 18, total = 1398,
+        current_fetch_underlines = 93, current_fetch_thoughts = 740,
+        fetch_underlines = 2444, fetch_thoughts = 31078})
+    T.ok(not dialog.status_text:find("备用通道", 1, true), "指标消失后不再显示降级行")
 end)
 
 T.case("窄面板自适应:成对数值行自动拆行(F14)", function()

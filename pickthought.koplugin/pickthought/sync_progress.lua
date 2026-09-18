@@ -287,6 +287,10 @@ function SyncProgress:set_state(state)
             "想法 " .. format_count(state.current_fetch_thoughts) .. " 条", pair_avail, pair_fpx)
         rows[#rows + 1] = U.pair_line("本轮累计已拉取：划线 " .. format_count(state.fetch_underlines) .. " 条",
             "想法 " .. format_count(state.fetch_thoughts) .. " 条", pair_avail, pair_fpx)
+        -- 划线通道降级(需求 2026-09-18):登录失效转网关仅个人划线,常驻提示
+        if state.annotation_degraded then
+            rows[#rows + 1] = "划线走备用通道：网页登录已失效，仅拉取个人划线"
+        end
     end
     local percent_text = tostring(math.floor(percent * 100 + 0.5)) .. "%"
     local status_text = table.concat(rows, "\n")

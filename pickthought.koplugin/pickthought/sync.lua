@@ -204,6 +204,10 @@ function Sync.run(deps)
     local fetched = {}
     local total_underlines = 0
     local total_thought_entries = 0
+    -- 划线通道降级统计(需求 2026-09-18):agent 来源章计数 + 登录失效降级置位,
+    -- 供进度渲染端与完成报告提示「仅个人划线」。
+    local annotation_agent_chapters = 0
+    local annotation_auth_degraded = false
     local chapters_total_all = 0
     -- fetch_budget 是网络预算; chapter_budget 是 CPU/注入预算,两者不能混用。
     local fetch_budget = tonumber(deps.fetch_budget)
@@ -408,6 +412,14 @@ function Sync.run(deps)
                 book_fetch_chapters = book_fetch_chapters + 1
                 book_fetch_underlines = book_fetch_underlines + (tonumber(data.underline_count) or 0)
                 book_fetch_thoughts = book_fetch_thoughts + (tonumber(data.thought_entry_count) or 0)
+                if data.underline_source == "agent" then
+                    annotation_agent_chapters = annotation_agent_chapters + 1
+                    if data.underline_auth_degraded then
+                        annotation_auth_degraded = true
+                        -- sticky:拉取阶段两渲染端常驻行,一旦降级整轮保持
+                        progress_metrics.annotation_degraded = true
+                    end
+                end
                 progress_metrics.book_fetch_chapters = book_fetch_chapters
                 progress_metrics.book_fetch_underlines = book_fetch_underlines
                 progress_metrics.book_fetch_thoughts = book_fetch_thoughts
@@ -626,6 +638,8 @@ function Sync.run(deps)
         }
         -- 多书标志:报告/弹窗层据此不推导单一连续章节范围(评审五轮 P1#1)。
         report.multi_book = multi_book or nil
+        report.annotation_agent_chapters = annotation_agent_chapters
+        report.annotation_auth_degraded = annotation_auth_degraded or nil
         report.book_count = #book_ids
         -- 失败书列表:报告层据此不得显示「全部章节已处理完成」(评审六轮 P1#2)。
         report.failed_books = #failed_books > 0 and failed_books or nil

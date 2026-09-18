@@ -171,6 +171,15 @@ function M.build(report, options)
     if report.rate_limited then
         lines[#lines + 1] = "微信读书触发频率限制，本批已提前停止；稍后重试即可继续"
     end
+    -- 划线通道降级与失衡提醒(需求 2026-09-18):登录失效时根因明示;
+    -- 否则数字失衡(想法≥200 且 划线×50<想法)给通用提醒,两种形态只报其一。
+    if report.annotation_auth_degraded then
+        lines[#lines + 1] = "划线仅拉取到个人数据:微信读书网页登录已失效"
+        lines[#lines + 1] = "重新登录撷思后重置本书,可恢复完整划线"
+    elseif batch_count > 0 and total_thoughts >= 200 and total_underlines * 50 < total_thoughts then
+        lines[#lines + 1] = "划线数量远少于想法,可能仅拉到个人划线或绑定版本不符"
+        lines[#lines + 1] = "重新登录或核对绑定版本后重置本书,通常可恢复"
+    end
     if number(report.save_failures) > 0 then
         lines[#lines + 1] = string.format("有 %s 章想法缓存写入失败，请检查存储空间",
             integer(report.save_failures))

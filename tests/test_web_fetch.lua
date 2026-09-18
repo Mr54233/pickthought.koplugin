@@ -402,3 +402,39 @@ T.case("大批次参数错误时二分拆分,不逐条盲重试", function()
     T.eq(result.rate_limited, nil, "参数错误不应误判为限流")
     T.eq(#result.errors, 0, "拆分后单 range 全部成功")
 end)
+
+T.case("fetch_chapter: agent 降级透传与登录失效判定(需求 2026-09-18)", function()
+    local function agent_api(web_error)
+        return {
+            underlines = function()
+                return {underlines = {
+                    {range = "10-20", markText = "个人划线"},
+                }, _annotation_source = "agent", _annotation_web_error = web_error}
+            end,
+            review_batches = function(_, items) return {items} end,
+            readreviews = function() return {reviews = {}} end,
+        }
+    end
+    local auth_err = "登录状态已失效 [撷思Auth] error_code=-2012: 登录超时"
+    local fetcher = WebFetch:new(agent_api(auth_err))
+    local result = fetcher:fetch_chapter("b1", 116)
+    T.eq(result.underline_source, "agent", "网关来源透传")
+    T.eq(result.underline_web_error, auth_err, "web 失败原因透传")
+    T.eq(result.underline_auth_degraded, true, "登录失效降级置位")
+
+    fetcher = WebFetch:new(agent_api("web underlines returned invalid data"))
+    result = fetcher:fetch_chapter("b1", 116)
+    T.eq(result.underline_source, "agent", "非 auth 降级来源仍透传")
+    T.eq(result.underline_auth_degraded, nil, "非 auth 错误不置位")
+
+    fetcher = WebFetch:new({
+        underlines = function()
+            return {underlines = {}, _annotation_source = "web"}
+        end,
+        review_batches = function(_, items) return {items} end,
+        readreviews = function() return {reviews = {}} end,
+    })
+    result = fetcher:fetch_chapter("b1", 116)
+    T.eq(result.underline_source, nil, "web 来源不携带降级字段")
+    T.eq(result.underline_auth_degraded, nil, "web 来源不置位")
+end)

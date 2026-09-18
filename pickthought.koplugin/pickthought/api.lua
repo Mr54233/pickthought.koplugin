@@ -391,7 +391,11 @@ function Api:underlines(id, chapter_uid)
         "book=", tostring(id), "chapter=", tostring(chapter_uid), "error=", tostring(value))
     local result = self:_chapter_call("/book/underlines", id, chapter_uid, nil,
         annotation_options_with_book(AGENT_ANNOTATION_OPTIONS, id))
-    if type(result) == "table" then result._annotation_source = "agent" end
+    if type(result) == "table" then
+        result._annotation_source = "agent"
+        -- 网关仅含个人划线,透传 web 侧失败原因供上层提示降级(登录失效场景)
+        result._annotation_web_error = tostring(value)
+    end
     return result
 end
 

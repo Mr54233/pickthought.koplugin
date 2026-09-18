@@ -1658,3 +1658,61 @@ T.case("连续硬失败触发断网熔断", function()
     T.eq(fetch_count, 3, "连续 3 章失败即中止,不磨完全书")
     T.eq(calls.injected, nil, "熔断后不注入")
 end)
+
+T.case("划线降级聚合:agent+登录失效贯通报告与进度指标(需求 2026-09-18)", function()
+    local function run_with(agent_fields)
+        local seen_degraded
+        local calls
+        local deps
+        deps, calls = make_deps({
+            annotations = {
+                fetch_chapter = function(_, _, uid)
+                    if tostring(uid) ~= "1" then
+                        return {underlines = {}, review_map = {}, review_groups = {},
+                            underline_count = 0, thought_count = 0, thought_entry_count = 0, errors = {}}
+                    end
+                    local data = {
+                        underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                        review_map = {["0-7"] = {{content = "好句", author = "甲"}}},
+                        review_groups = {{range = "0-7", texts = {{content = "好句", author = "甲"}}}},
+                        underline_count = 1, thought_count = 1, thought_entry_count = 1, errors = {},
+                    }
+                    for k, v in pairs(agent_fields) do data[k] = v end
+                    return data
+                end,
+            },
+            progress = function(phase, i, n, text, book_id, metrics)
+                calls.progress[#calls.progress + 1] = {
+                    phase = phase, i = i, n = n, text = text, book_id = book_id,
+                    metrics = metrics,
+                }
+                if type(metrics) == "table" and metrics.annotation_degraded then
+                    seen_degraded = true
+                end
+                return true
+            end,
+        })
+        local report = Sync.run(deps)
+        return report, seen_degraded
+    end
+
+    local report, seen = run_with({
+        underline_source = "agent", underline_auth_degraded = true,
+    })
+    T.ok(report, "应成功")
+    T.eq(report.annotation_agent_chapters, 1, "agent 来源章计数")
+    T.eq(report.annotation_auth_degraded, true, "登录失效降级进报告")
+    T.ok(seen, "进度指标 annotation_degraded 已置位(两渲染端可见)")
+
+    report, seen = run_with({underline_source = "agent"})
+    T.ok(report, "应成功")
+    T.eq(report.annotation_agent_chapters, 1, "非 auth 降级仍计数")
+    T.eq(report.annotation_auth_degraded, nil, "非 auth 不置位")
+    T.ok(not seen, "非 auth 不点亮进度提示行")
+
+    report, seen = run_with({})
+    T.ok(report, "应成功")
+    T.eq(report.annotation_agent_chapters, 0, "正常路径零计数")
+    T.eq(report.annotation_auth_degraded, nil, "正常路径无降级")
+    T.ok(not seen, "正常路径无提示")
+end)
