@@ -36,6 +36,7 @@ MANUAL_REFS = {
     "fix(inject): 低内存 HTML/CSS 注入优化": {"prs": {9}},
     "perf(thoughts): SQLite 句柄 LRU 与关书释放": {"prs": {11, 18}},
     "perf(sync): 持久化正文 spine 缓存": {"prs": {12, 19}},
+    "fix(sync): 锚点标题参与章节绑定,修复两级目录匹配失败": {"issues": {25}},
 }
 
 DESCRIPTION_REFS = {
@@ -50,6 +51,7 @@ DESCRIPTION_REFS = {
     "低内存 HTML/CSS 注入优化": {"prs": {9}},
     "SQLite 句柄 LRU 与关书释放": {"prs": {11, 18}},
     "持久化正文 spine 缓存": {"prs": {12, 19}},
+    "锚点标题参与章节绑定,修复两级目录匹配失败": {"issues": {25}},
 }
 
 CATEGORIES = {
