@@ -37,12 +37,12 @@ jobs:
       pull-requests: read
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: 安装 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
@@ -64,7 +64,7 @@ jobs:
 
       - name: 下载质量检查生成的测试包
         if: ${{ needs.quality.result == 'success' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: pickthought-package
           path: release-artifact
@@ -168,7 +168,7 @@ jobs:
           PY
 
       - name: 发 Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: 撷思 PickThought ${{ steps.version.outputs.version }}
           body_path: release-body.md

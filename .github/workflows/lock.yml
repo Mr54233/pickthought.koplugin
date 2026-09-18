@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 锁定已关闭的闲置议题
-        uses: dessant/lock-threads@v5
+        uses: dessant/lock-threads@v6
         with:
           issue-inactive-days: "30"
           issue-comment: "议题已解决并锁定。如问题再次出现或需要继续讨论，请新建议题。"
