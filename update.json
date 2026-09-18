@@ -1,15 +1,15 @@
 {
-  "version": "0.5.2",
-  "name": "撷思 PickThought 0.5.2",
+  "version": "0.5.3",
+  "name": "撷思 PickThought 0.5.3",
   "package_type": "full",
-  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.2/pickthought.koplugin.zip",
+  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.3/pickthought.koplugin.zip",
   "package_urls": [
-    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.2/pickthought.koplugin.zip",
-    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.2/pickthought.koplugin.zip",
-    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.2/pickthought.koplugin.zip",
-    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.2/pickthought.koplugin.zip"
+    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.3/pickthought.koplugin.zip",
+    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.3/pickthought.koplugin.zip",
+    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.3/pickthought.koplugin.zip",
+    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.3/pickthought.koplugin.zip"
   ],
-  "size": 842321,
-  "sha256": "34e047a42fddbdc927c66e3178945e3c421bf1a852ce6e9621794c1ee504e124",
-  "notes": "新功能：\n进度面板重排与自适应文案,菜单收敛与交互修复\n匹配口径最终化与 no_hit 缓存,真实已匹配量贯通\n文本宽度估算与成对数值行自适应拆分助手\n划线文字样式追加斜体选项\n划线文字样式可选(Issue #23)\n\n问题修复：\n默认划线样式补运行时覆盖,关闭内嵌样式不再变实线\n提交扫描拦截 LuaJIT 字节码等非 UTF-8 文件\n匹配阶段进度语义修正与回退取证日志\n移植上游章节标题索引并修复全命中误报取消 (#24)（PR #24/#150）"
+  "size": 844357,
+  "sha256": "12c2859f1fe0fc417a5b2e9cfdb8f6e3cbdf3c4dbdac8ecb221d434ef3fcda1e",
+  "notes": "问题修复：\n容错子序列对齐修复注释内联书的划线丢失\n锚点标题参与章节绑定,修复两级目录匹配失败（Issue #25）"
 }
