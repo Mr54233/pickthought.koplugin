@@ -22,6 +22,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: actionlint 检查 workflow 语法
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -shellcheck=
+
       - name: 安装构建依赖
         run: |
           sudo apt-get update
