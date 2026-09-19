@@ -143,3 +143,76 @@ T.case("R3: sync 加载段 manual 条目优先复用(不进自动 todo)", functi
     T.eq(report2.chapters_matched, 1, "仅 manual 章命中(另一章仍 no_hit)")
     os.remove(cache_file)
 end)
+
+T.case("R3 追加: spine 失效的手动条目被自动结果覆写,不再永留缓存", function()
+    -- CodeRabbit #27 Caution 回归:manual 指认的目标文件从 spine 消失后,
+    -- 加载段清标记回自动;自动匹配结果必须覆写掉失效 manual 条目,
+    -- 否则每批重扫该章、编辑器永远显示过期指认。
+    local Sync = require("pickthought.sync")
+    local ChapterMap = require("pickthought.chapter_map")
+    local cache_file = "tests/.tmp_map_editor_stale.json"
+    os.remove(cache_file)
+    local fixture = {api = {chapters = function() return {data = {
+        {chapterUid = 1, title = "第一章 春江潮水", chapterIdx = 1}}} end},
+        annotations = {fetch_chapter = function()
+            return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                review_map = {}, review_groups = {},
+                underline_count = 1, thought_count = 0, thought_entry_count = 0, errors = {}}
+        end}}
+    local function build_deps(spine)
+        return {
+            doc_path = "fake.epub", book_id = "b1",
+            api = fixture.api, annotations = fixture.annotations,
+            map_cache_path = cache_file,
+            spine = spine,
+            read_text = function(_, href)
+                return href == "OEBPS/c1.xhtml"
+                    and "<html><body><p>春江潮水连海平。</p></body></html>"
+                    or "<html><body><p>别处正文。</p></body></html>"
+            end,
+            load_meta = function() return {spine = spine,
+                names = {"OEBPS/c1.xhtml", "OEBPS/c2.xhtml"}} end,
+            file_exists = function(p) return p == "fake.epub.orig" or p == "fake.epub" end,
+            file_size = function() return 100 end,
+            content_fingerprint = function() return "fp" end,
+            rename = function() return true, nil end,
+            remove = function() return true end,
+            copy_file = function() return true end,
+            progress = function() return true end,
+            inject = function() return {unlocated = 0, unlocated_by_uid = {}} end,
+            save_thoughts = function() return true end,
+            merge_thoughts = function() return true end,
+            atomic_write = function() return true end,
+            read_file = function(p)
+                if tostring(p):find("map%.json$") then return U.read_file(cache_file, true) end
+                return nil
+            end,
+        }
+    end
+    local old_spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}
+    -- 首轮:自动命中第一章(有老 spine)
+    local report1 = Sync.run(build_deps(old_spine))
+    T.ok(report1, "首轮成功")
+    -- 手动指认到 c2
+    local ok = MapEditor.assign(cache_file, "1", "OEBPS/c2.xhtml", old_spine,
+        ChapterMap.ALGO_VERSION)
+    T.ok(ok, "手动指认到 c2")
+    -- 模拟 spine 变化:c2 被删,只剩 c1
+    local new_spine = {{href = "OEBPS/c1.xhtml"}}
+    local report2 = Sync.run(build_deps(new_spine))
+    T.ok(report2, "spine 变化后仍成功")
+    -- 失效 manual 必须已被自动结果覆写:条目不再是 manual 且指向现存文件
+    local decoded = Json.decode(U.read_file(cache_file, true))
+    local entry = decoded.map["1"]
+    T.eq(entry.manual, nil, "失效 manual 标记已清除")
+    T.eq(entry.hrefs[1], "OEBPS/c1.xhtml", "已被自动结果覆写为现存目标")
+    -- 第三轮:同 spine 再跑,应零重扫(条目已是正常自动缓存)
+    local reads3 = 0
+    local deps3 = build_deps(new_spine)
+    local raw_read = deps3.read_text
+    deps3.read_text = function(...) reads3 = reads3 + 1 return raw_read(...) end
+    local report3 = Sync.run(deps3)
+    T.ok(report3, "第三轮成功")
+    T.eq(reads3, 0, "覆写后的条目正常复用,不再反复重扫")
+    os.remove(cache_file)
+end)

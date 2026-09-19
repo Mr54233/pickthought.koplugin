@@ -807,6 +807,10 @@ function Sync.run(deps)
                 base_thoughts = base_thoughts + (tonumber(ch.thought_entry_count)
                     or tonumber(ch.thought_count) or 0)
             else
+                -- spine 已不含指认目标:旧 manual 失效,清标记回自动匹配。
+                -- 不清的话写入段的 manual 保护会让失效条目永留缓存——
+                -- 每批重扫该章、编辑器一直显示过期指认(CodeRabbit #27 Caution)。
+                cached.manual = nil
                 todo[#todo + 1] = ch
             end
         elseif cached == nil or cached == false then
@@ -1050,9 +1054,9 @@ function Sync.run(deps)
                 hrefs[#hrefs + 1] = row.href
             end
             if map_store then
-                -- 手动指认的章(R3)不覆写:manual 条目在加载段已直接复用,
-                -- 不会进 todo,此分支只会因 spine 失效回自动时到达——
-                -- 那种情况下旧 manual 已无意义,按自动结果覆写。
+                -- 手动指认的章(R3)不覆写:活跃 manual 条目在加载段已直接
+                -- 复用不会进 todo;失效 manual(spine 变化)在加载段已清标记,
+                -- 到达此处的自动结果可以安全覆写。
                 local existing = map_store[key]
                 if not (type(existing) == "table" and existing.manual) then
                     map_store[key] = {hrefs = hrefs,
