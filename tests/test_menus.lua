@@ -270,3 +270,16 @@ T.case("更新菜单:四项构成与自动更新开关", function()
 end)
 
 print("test_menus: 全部用例通过")
+
+T.case("书籍管理抽屉:重注缓存可用时含章节映射入口(R3)", function()
+    local env = make_env()
+    env.plugin.current_doc_path = function() return "/books/test.epub" end
+    env.plugin._has_reinject_cache = function() return true end
+    local items = texts(Menus.book_management_menu(env.plugin))
+    T.ok(table.concat(items, "|"):find("章节映射", 1, true), "章节映射入口存在")
+    T.ok(table.concat(items, "|"):find("重新注入", 1, true), "与重注入口同条件展示")
+    -- 无重注缓存时不显示
+    env.plugin._has_reinject_cache = function() return false end
+    items = texts(Menus.book_management_menu(env.plugin))
+    T.ok(not table.concat(items, "|"):find("章节映射", 1, true), "无缓存时不显示入口")
+end)

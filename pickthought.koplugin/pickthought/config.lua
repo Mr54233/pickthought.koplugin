@@ -34,7 +34,8 @@ local C = {
         "https://ghproxy.net/",
     },
 
-    AUTO_UPDATE_INTERVAL = 24 * 60 * 60,
+    -- 自动检查更新间隔 1 小时(对齐上游 v1.5.0):发版频繁,24h 拿到更新太慢。
+    AUTO_UPDATE_INTERVAL = 60 * 60,
     AUTO_UPDATE_RETRY_INTERVAL = 6 * 60 * 60,
     LOW_MEMORY_SETTING = "DGLOBAL_CACHE_FREE_PROPORTION",
     LOW_MEMORY_RATIO = 0.15,

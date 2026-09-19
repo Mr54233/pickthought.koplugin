@@ -479,8 +479,8 @@ T.case("合并章跨文件不触发序倒挂(A7 反例)", function()
     T.eq(by_uid["2"].quote_only, nil, "守卫未触发:单强目标保留数字兜底资格")
 end)
 
-T.case("ALGO_VERSION 升至 10(A9)", function()
-    T.eq(ChapterMap.ALGO_VERSION, 10, "锚点参与绑定改变映射结果,旧映射缓存整体作废")
+T.case("ALGO_VERSION 升至 11(R4 按章失效)", function()
+    T.eq(ChapterMap.ALGO_VERSION, 11, "条目级 algo 字段引入,旧条目重扫新条目复用")
 end)
 
 T.case("on_file 上报已定位章节数,回退章节清单进入 metrics(P3/P4 取证字段)", function()

@@ -1716,3 +1716,165 @@ T.case("划线降级聚合:agent+登录失效贯通报告与进度指标(需求 
     T.eq(report.annotation_auth_degraded, nil, "正常路径无降级")
     T.ok(not seen, "正常路径无提示")
 end)
+
+-- ===== 上游四项移植 R4:map.json 按章增量失效 =====
+
+local R4_CH = {api = {chapters = function() return {data = {
+    {chapterUid = 1, title = "第一章 春江潮水", chapterIdx = 1},
+    {chapterUid = 2, title = "第二章 月照花林", chapterIdx = 2}}} end},
+    annotations = {fetch_chapter = function(_, _, uid)
+        return {underlines = {{range = "0-7", markText = tostring(uid) == "1" and "春江潮水连海平" or "滟滟随波千万里"}},
+            review_map = {}, review_groups = {},
+            underline_count = 1, thought_count = 0, thought_entry_count = 0, errors = {}}
+    end}}
+
+T.case("R4: 新格式命中条目零重扫并计数复用", function()
+    local cache_file = "tests/.tmp_map_r4_reuse.json"
+    os.remove(cache_file)
+    local U = require("pickthought.util")
+    local Json = require("pickthought.json")
+    -- 首轮建立新格式缓存
+    local reads1 = 0
+    local deps1 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            reads1 = reads1 + 1
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(R4_CH) do deps1[k] = v end
+    local report1 = Sync.run(deps1)
+    T.ok(report1, "首轮成功")
+    -- 落盘条目应带 algo 字段
+    local decoded = Json.decode(U.read_file(cache_file, true))
+    T.ok(decoded.map["1"] and tonumber(decoded.map["1"].algo), "条目携带 algo 字段")
+    -- 第二轮:全部复用,零读取,进度指标计数(make_deps 默认 progress 已捕获 metrics)
+    local reads2 = 0
+    local deps2, calls2 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            reads2 = reads2 + 1
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(R4_CH) do deps2[k] = v end
+    local report2 = Sync.run(deps2)
+    T.ok(report2, "续批成功")
+    T.eq(reads2, 0, "新格式命中零重扫")
+    local seen_reused
+    for _, p in ipairs(calls2.progress) do
+        if p.metrics and p.metrics.map_cache_reused then
+            seen_reused = p.metrics.map_cache_reused
+        end
+    end
+    T.eq(seen_reused, 2, "复用计数=2")
+    os.remove(cache_file)
+end)
+
+T.case("R4: 旧格式条目(无 algo)进重扫,结果覆写为新格式", function()
+    local cache_file = "tests/.tmp_map_r4_legacy.json"
+    os.remove(cache_file)
+    local U = require("pickthought.util")
+    local Json = require("pickthought.json")
+    -- 手工构造旧格式缓存:条目无 algo(签名需与运行时一致,否则整体作废测不到条目级)
+    local ChapterMap = require("pickthought.chapter_map")
+    local fingerprint = U.content_fingerprint("fake.epub") or "0"
+    local signature = tostring(U.file_size("fake.epub") or 0) .. "@"
+        .. tostring(ChapterMap.ALGO_VERSION) .. "@" .. fingerprint
+    -- 直接用首轮真实运行产物改掉 algo 更稳:先跑一轮
+    local deps1 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(R4_CH) do deps1[k] = v end
+    T.ok(Sync.run(deps1), "首轮成功")
+    -- 剥掉 algo 模拟旧格式
+    local decoded = Json.decode(U.read_file(cache_file, true))
+    decoded.map["1"].algo = nil
+    decoded.map["2"].algo = nil
+    U.atomic_write(cache_file, Json.encode(decoded), true)
+    -- 第二轮:两条目都进重扫
+    local reads2 = 0
+    local deps2 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            reads2 = reads2 + 1
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(R4_CH) do deps2[k] = v end
+    local report2 = Sync.run(deps2)
+    T.ok(report2, "旧格式重扫成功")
+    T.ok(reads2 > 0, "旧格式条目触发重扫")
+    -- 写回后应恢复 algo
+    local decoded2 = Json.decode(U.read_file(cache_file, true))
+    T.ok(tonumber(decoded2.map["1"].algo), "重扫后条目恢复 algo")
+    os.remove(cache_file)
+end)
+
+T.case("R4: spine 变化(href 消失)条目失效重扫", function()
+    local cache_file = "tests/.tmp_map_r4_spine.json"
+    os.remove(cache_file)
+    local U = require("pickthought.util")
+    local Json = require("pickthought.json")
+    -- 首轮正常建立
+    local deps1 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(R4_CH) do deps1[k] = v end
+    T.ok(Sync.run(deps1), "首轮成功")
+    -- 篡改缓存:第一章指向不存在的 href(模拟 spine 变化后旧映射)
+    local decoded = Json.decode(U.read_file(cache_file, true))
+    decoded.map["1"].hrefs = {"OEBPS/gone.xhtml"}
+    U.atomic_write(cache_file, Json.encode(decoded), true)
+    -- 第二轮:该条目必须重扫(href 校验失败),另一章照常复用
+    local reads2 = 0
+    local read_hrefs = {}
+    local deps2 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            reads2 = reads2 + 1
+            read_hrefs[#read_hrefs + 1] = href
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(R4_CH) do deps2[k] = v end
+    local report2 = Sync.run(deps2)
+    T.ok(report2, "spine 变化重扫成功")
+    T.ok(reads2 > 0, "失效条目触发重扫")
+    T.eq(report2.injected, 2, "两章均注入(一重扫一复用)")
+    os.remove(cache_file)
+end)
+
+T.case("R4: no_hit 条目恒重试语义保持(改版书救赎)", function()
+    local cache_file = "tests/.tmp_map_r4_nohit.json"
+    os.remove(cache_file)
+    local U = require("pickthought.util")
+    local Json = require("pickthought.json")
+    -- 首轮:第二章无法命中
+    local ch_mixed = {api = R4_CH.api,
+        annotations = {fetch_chapter = function(_, _, uid)
+            return {underlines = {{range = "0-7", markText = tostring(uid) == "1" and "春江潮水连海平" or "书里完全不存在的句子"}},
+                review_map = {}, review_groups = {},
+                underline_count = 1, thought_count = 0, thought_entry_count = 0, errors = {}}
+        end}}
+    local deps1 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(ch_mixed) do deps1[k] = v end
+    T.ok(Sync.run(deps1), "首轮成功(一章命中一章 no_hit)")
+    -- no_hit 条目写盘应带 algo
+    local decoded = Json.decode(U.read_file(cache_file, true))
+    T.ok(decoded.map["2"] and decoded.map["2"].no_hit
+        and tonumber(decoded.map["2"].algo), "no_hit 条目携带 algo")
+    -- 第二轮:划线改成能命中的句子 → no_hit 失效重扫救回
+    local ch_fixed = {api = R4_CH.api,
+        annotations = {fetch_chapter = function(_, _, uid)
+            return {underlines = {{range = "0-7", markText = tostring(uid) == "1" and "春江潮水连海平" or "滟滟随波千万里"}},
+                review_map = {}, review_groups = {},
+                underline_count = 1, thought_count = 0, thought_entry_count = 0, errors = {}}
+        end}}
+    local deps2 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(ch_fixed) do deps2[k] = v end
+    local report2 = Sync.run(deps2)
+    T.ok(report2, "第二轮成功")
+    T.eq(report2.injected, 2, "改划线后 no_hit 失效重扫,两章都注入")
+    os.remove(cache_file)
+end)
