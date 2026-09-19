@@ -768,6 +768,26 @@ function Sync.run(deps)
     -- "已定位 0/3、已匹配 0 条"的全零面板。
     local known, todo, no_hit_known = {}, {}, {}
     local base_chapters, base_underlines, base_thoughts = 0, 0, 0
+    -- R4(上游 #161 按章失效适配):algo 字段缺失(旧格式)或版本不符的条目
+    -- 进重扫;命中条目计数复用。signature 校验仍是第一道门(书变了整体作废)。
+    -- spine 校验(上游 range_key 语义):目标文件在当前 spine 里不存在时
+    -- 条目失效——重排/删文件的 EPUB 不会把旧 href 注入到不存在的目标上。
+    local cache_reused = 0
+    local spine_href_set = {}
+    for _, item in ipairs(map_meta.spine or {}) do
+        spine_href_set[tostring(item.href)] = true
+    end
+    local function cache_entry_current(entry)
+        if type(entry) ~= "table" then return false end
+        if tonumber(entry.algo) ~= ChapterMap.ALGO_VERSION then return false end
+        -- no_hit 条目没有 hrefs,只校验算法版本。
+        if entry.no_hit then return true end
+        if type(entry.hrefs) ~= "table" or #entry.hrefs == 0 then return false end
+        for _, href in ipairs(entry.hrefs) do
+            if not spine_href_set[tostring(href)] then return false end
+        end
+        return true
+    end
     for _, ch in ipairs(fetched) do
         local key = ck(ch.book_id, ch.uid)
         local cached = map_store and map_store[key]
@@ -776,21 +796,28 @@ function Sync.run(deps)
             todo[#todo + 1] = ch
         elseif type(cached) == "table" and cached.no_hit then
             local n, len = quotes_fingerprint(ch)
-            if cached.n == n and cached.len == len then
+            if cached.n == n and cached.len == len and cache_entry_current(cached) then
                 no_hit_known[key] = true
             else
                 todo[#todo + 1] = ch
             end
         elseif type(cached) == "table" and type(cached.hrefs) == "table" and #cached.hrefs > 0 then
-            known[key] = cached
-            base_chapters = base_chapters + 1
-            base_underlines = base_underlines + #(ch.underlines or {})
-            base_thoughts = base_thoughts + (tonumber(ch.thought_entry_count)
-                or tonumber(ch.thought_count) or 0)
+            if cache_entry_current(cached) then
+                known[key] = cached
+                cache_reused = cache_reused + 1
+                base_chapters = base_chapters + 1
+                base_underlines = base_underlines + #(ch.underlines or {})
+                base_thoughts = base_thoughts + (tonumber(ch.thought_entry_count)
+                    or tonumber(ch.thought_count) or 0)
+            else
+                -- 旧算法条目:不能沿用其映射结果,重扫后由写入段覆写为新格式。
+                todo[#todo + 1] = ch
+            end
         else
             todo[#todo + 1] = ch
         end
     end
+    progress_metrics.map_cache_reused = cache_reused
     progress_metrics.located_chapters = base_chapters
     progress_metrics.map_target_chapters = #fetched
     progress_metrics.located_underlines = base_underlines
@@ -1006,7 +1033,8 @@ function Sync.run(deps)
             end
             if map_store then
                 map_store[key] = {hrefs = hrefs,
-                    num = (#hrefs == 1 and not new_rows_by_uid[key][1].quote_only) or nil}
+                    num = (#hrefs == 1 and not new_rows_by_uid[key][1].quote_only) or nil,
+                    algo = ChapterMap.ALGO_VERSION}
             end
         elseif unmatched_uid[key] then
             unmatched[#unmatched + 1] = {uid = tostring(ch.uid), title = ch.title, reason = "no_hit", book_id = ch.book_id}
@@ -1014,7 +1042,8 @@ function Sync.run(deps)
             -- 全书回退重扫;引文集变化(新增划线)自动失效重试。
             local n, len = quotes_fingerprint(ch)
             if map_store then
-                map_store[key] = {no_hit = true, n = n, len = len}
+                map_store[key] = {no_hit = true, n = n, len = len,
+                    algo = ChapterMap.ALGO_VERSION}
             end
         else
             -- no_data(无划线)章节:不入缓存,下批有数据时再匹配。
