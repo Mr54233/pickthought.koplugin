@@ -65,8 +65,10 @@ function Auth:_uid()
     return data.uid
 end
 function Auth:_poll(uid,otp)
-    local url=BASE.."/api/auth/getLoginInfo?uid="..Protocol.escape(uid).."&otp"
-    if type(otp)=="string" and otp~="" then url=url.."="..Protocol.escape(otp) end
+    -- OTP 空值必须是 "&otp="(带等号)——裸参数会被部分登录会话拒绝
+    -- (对齐上游 #167:serialize empty QR login OTP value)。
+    local url=BASE.."/api/auth/getLoginInfo?uid="..Protocol.escape(uid).."&otp="
+    if type(otp)=="string" and otp~="" then url=url..Protocol.escape(otp) end
     local data,headers=self.http:get_json(url,{auth=false,timeout={5,9},headers={Referer=BASE.."/r/weread-skills",Cookie=Cookies.header(self.jar)}})
     self.jar=Cookies.absorb(self.jar,header_value(headers,"set-cookie"))
     return data
