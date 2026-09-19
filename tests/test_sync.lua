@@ -539,9 +539,10 @@ T.case("正文 spine 缓存:冷读落盘,续批暖读不再解压", function()
         if not ok then error(err, 0) end
     end
     local cache_file = "tests/.tmp_sync_spine_map.json"
-    -- 签名格式 = 大小@算法版本@内容指纹(无干净源时干净源后缀为空);
-    -- 测试中 map_source 为不存在的虚拟路径,故大小=0、指纹=0。
-    local signature = "0@" .. tostring(require("pickthought.chapter_map").ALGO_VERSION) .. "@0"
+    -- 签名格式 = v2:大小@内容指纹(无干净源时后缀为空;ALGO_VERSION 已移出
+    -- 签名,由条目级 algo 字段接管——CodeRabbit #27 二轮);测试中 map_source
+    -- 为不存在的虚拟路径,故大小=0、指纹=0。
+    local signature = "v2:0@0"
     local spine_dir = SpineCache.dir_for(cache_file, signature)
     U.remove_tree(spine_dir)
 
@@ -1876,5 +1877,77 @@ T.case("R4: no_hit 条目恒重试语义保持(改版书救赎)", function()
     local report2 = Sync.run(deps2)
     T.ok(report2, "第二轮成功")
     T.eq(report2.injected, 2, "改划线后 no_hit 失效重扫,两章都注入")
+    os.remove(cache_file)
+end)
+
+-- ===== CodeRabbit #27 二轮 Caution:签名与条目校验分层 =====
+
+T.case("R4 二轮: 算法升级只重扫旧条目,签名不再含 ALGO_VERSION", function()
+    local cache_file = "tests/.tmp_map_r4_algojump.json"
+    os.remove(cache_file)
+    local U = require("pickthought.util")
+    local Json = require("pickthought.json")
+    local ChapterMap = require("pickthought.chapter_map")
+    -- 首轮建立新格式缓存(两章都命中)
+    local deps1 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(R4_CH) do deps1[k] = v end
+    T.ok(Sync.run(deps1), "首轮成功")
+    -- 模拟算法升级:一章条目停在旧版本,一章已是当前版本
+    local decoded = Json.decode(U.read_file(cache_file, true))
+    decoded.map["1"].algo = ChapterMap.ALGO_VERSION - 1
+    U.atomic_write(cache_file, Json.encode(decoded), true)
+    -- 第二轮:只有旧条目进重扫(签名不因版本变化整体作废)
+    local reads2 = 0
+    local deps2 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            reads2 = reads2 + 1
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(R4_CH) do deps2[k] = v end
+    local report2 = Sync.run(deps2)
+    T.ok(report2, "算法升级后成功")
+    T.ok(reads2 > 0, "旧版本条目触发重扫")
+    T.eq(report2.chapters_matched, 2, "两章均照常匹配")
+    os.remove(cache_file)
+end)
+
+T.case("R4 二轮: EPUB 内容变化时手动指认保留(自动条目作废)", function()
+    local cache_file = "tests/.tmp_map_r4_content.json"
+    os.remove(cache_file)
+    local U = require("pickthought.util")
+    local Json = require("pickthought.json")
+    local ChapterMap = require("pickthought.chapter_map")
+    local MapEditor = require("pickthought.map_editor")
+    -- 首轮正常建立缓存
+    local deps1 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(R4_CH) do deps1[k] = v end
+    T.ok(Sync.run(deps1), "首轮成功")
+    -- 用户手动指认第三章(内容变化前的裁定)
+    local ok = MapEditor.assign(cache_file, "3", "OEBPS/c2.xhtml",
+        {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}, ChapterMap.ALGO_VERSION)
+    T.ok(ok, "手动指认第三章")
+    -- 模拟 EPUB 内容变化:签名不同(条目级校验不会执行,manual 必须独立存活)
+    local decoded = Json.decode(U.read_file(cache_file, true))
+    decoded.signature = "v2:99999@deadbeef"
+    U.atomic_write(cache_file, Json.encode(decoded), true)
+    -- 第二轮:签名不匹配 → 自动条目作废重扫,manual 条目捞回
+    local deps2 = make_deps({map_cache_path = cache_file,
+        read_text = function(_, href)
+            return href == "OEBPS/c1.xhtml" and CH1_TEXT or CH2_TEXT
+        end})
+    for k, v in pairs(R4_CH) do deps2[k] = v end
+    local report2 = Sync.run(deps2)
+    T.ok(report2, "内容变化后成功")
+    -- 第二轮写回后 manual 条目必须仍在盘上(签名已更新为新书指纹)
+    local decoded2 = Json.decode(U.read_file(cache_file, true))
+    T.ok(decoded2.map["3"] and decoded2.map["3"].manual
+        and decoded2.map["3"].hrefs[1] == "OEBPS/c2.xhtml",
+        "手动指认跨内容变化存活")
     os.remove(cache_file)
 end)

@@ -701,18 +701,21 @@ function Sync.run(deps)
     -- 避免 HTML 标记增长后改变引文定位结果。
     local map_meta = backup_meta or meta
     if deps.map_cache_path then
-        -- 指纹 = 源书大小 + 匹配算法版本 + 内容指纹:换书/改算法/改内容都让旧映射作废重建。
+        -- 签名 = 书籍身份(源书大小 + 内容指纹 + clean 路径哈希):换书/改内容作废重建。
         -- 内容指纹取文件头尾采样做 FNV-1a,避免"同体积不同内容"的 EPUB 复用旧章节映射/缓存(P2, 2026-08-15 二轮)。
         -- 指定 clean_source 重建时,映射必须基于干净源本身(而非可能版本不同的 .orig/当前书),
         -- 故把 clean_source 的规范化路径也纳入签名;签名相同的连续重建可复用缓存。
+        -- 注意 ALGO_VERSION 不在签名里(CodeRabbit #27 二轮 Caution):算法升级的
+        -- 失效交给条目级 entry.algo 校验——放签名里会短路条目校验,整个缓存被
+        -- 第一道门拒掉,R4 的"跨版本只重扫旧条目"就形同虚设。
         local use_clean = (src == clean_source and clean_source) or nil
         local map_source = use_clean or (file_exists(backup) and backup) or doc_path
         -- 作者意见 #6:clean_source 完整路径含分隔符,直接进签名会让分隔符落入缓存目录名,
         -- 生成异常嵌套目录;改为对路径做哈希(定长、无分隔符)。
         local src_sig = use_clean and ("@" .. U.path_hash(use_clean)) or ""
         local fingerprint = U.content_fingerprint(map_source) or "0"
-        map_signature = tostring(U.file_size(map_source) or 0) .. "@"
-            .. tostring(ChapterMap.ALGO_VERSION) .. "@" .. fingerprint .. src_sig
+        map_signature = "v2:" .. tostring(U.file_size(map_source) or 0) .. "@"
+            .. fingerprint .. src_sig
         -- 多书:汇总每本书的独立缓存文件(命名空间化键);单书:沿用原缓存文件。
         map_store = {}
         for _, bid in ipairs(book_ids) do
@@ -721,10 +724,31 @@ function Sync.run(deps)
             if raw then
                 local ok_decode, decoded = pcall(Json.decode, raw)
                 if ok_decode and type(decoded) == "table"
-                    and tostring(decoded.signature) == map_signature
                     and type(decoded.map) == "table" then
-                    for k, v in pairs(decoded.map) do
-                        map_store[ck(bid, k)] = v
+                    if tostring(decoded.signature) == map_signature then
+                        for k, v in pairs(decoded.map) do
+                            map_store[ck(bid, k)] = v
+                        end
+                    else
+                        -- 签名不匹配(换书/改内容/旧格式):自动条目整体作废,
+                        -- 但手动指认是用户裁定,目标仍在 spine 内时必须保留
+                        -- (CodeRabbit #27 二轮:换 EPUB 版本不该丢用户的指认)。
+                        local stale_spine_set = {}
+                        for _, item in ipairs(map_meta.spine or {}) do
+                            stale_spine_set[tostring(item.href)] = true
+                        end
+                        for k, v in pairs(decoded.map) do
+                            if type(v) == "table" and v.manual
+                                and type(v.hrefs) == "table" then
+                                local ok = #v.hrefs > 0
+                                for _, href in ipairs(v.hrefs) do
+                                    if not stale_spine_set[tostring(href)] then
+                                        ok = false break
+                                    end
+                                end
+                                if ok then map_store[ck(bid, k)] = v end
+                            end
+                        end
                     end
                 end
             end
