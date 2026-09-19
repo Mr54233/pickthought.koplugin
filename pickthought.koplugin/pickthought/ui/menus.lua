@@ -123,6 +123,7 @@ function M.book_management_menu(plugin)
     items[#items + 1] = {text = "重新绑定微信读书", callback = plugin:safe("rebind", function() plugin:bind_book() end)}
     if doc_path and plugin:_has_reinject_cache(doc_path) then
         items[#items + 1] = {text = "重新注入(用上次数据,离线)", callback = plugin:safe("reinject", function() plugin:reinject_with_clean(doc_path) end)}
+        items[#items + 1] = {text = "章节映射(手动指认)", callback = plugin:safe("map_editor", function() plugin:chapter_map_editor(doc_path) end)}
     end
     if doc_path or (doc_path and require("pickthought.util").file_exists(doc_path .. ".orig")) then
         items[#items + 1] = {text = "重置本书(清数据+还原原版)", callback = plugin:safe("reset", function() plugin:reset_book_data(doc_path) end)}

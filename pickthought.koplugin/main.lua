@@ -891,6 +891,111 @@ function Plugin:_has_reinject_cache(path)
     return false
 end
 
+-- 章节映射手动指认(上游 v1.5.1「章节对应管理」的最小闭环适配):
+-- 列出本批章节的映射状态,允许把未匹配/错配的章指认到正确的本地文件。
+-- 纯 UI 组装,读写逻辑在 pickthought/map_editor.lua。
+function Plugin:chapter_map_editor(path)
+    path = path or self:current_doc_path()
+    if not path then return end
+    local bound = Binding.get(self.store, path)
+    if not bound then
+        UIManager:show(InfoMessage:new{text = "本书未绑定微信读书"})
+        return
+    end
+    local MapEditor = require("pickthought.map_editor")
+    local ChapterMap = require("pickthought.chapter_map")
+    local Json = require("pickthought.json")
+    local EpubReader = require("pickthought.epub_reader")
+    local ids = self:_book_ids(path)
+    -- 单书才有意义:多书映射来自多本微信书,章节归属本就分开。
+    if #ids ~= 1 then
+        UIManager:show(InfoMessage:new{text = "多书绑定的映射由各书独立管理,暂不支持手动指认"})
+        return
+    end
+    local bid = ids[1]
+    local cache_dir = self.store:book_cache_path(bid) .. "/sync-cache"
+    local map_path = cache_dir .. "/map.json"
+    -- 章节名列表来自 chapters.json 缓存
+    local chapters = {}
+    local raw = U.read_file(cache_dir .. "/chapters.json", true)
+    if raw then
+        local ok, decoded = pcall(Json.decode, raw)
+        if ok and type(decoded) == "table" then
+            local ok_rows, rows = pcall(Binding.normalize_chapters, decoded, bid)
+            if ok_rows then chapters = rows end
+        end
+    end
+    if #chapters == 0 then
+        UIManager:show(InfoMessage:new{text = "章节列表缓存不存在,先执行一次同步"})
+        return
+    end
+    local rows, err = MapEditor.list(map_path, chapters)
+    if not rows then
+        UIManager:show(InfoMessage:new{text = tostring(err)})
+        return
+    end
+    -- spine 来自原书/干净备份
+    local backup = path .. ".orig"
+    local source = U.file_exists(backup) and backup or path
+    local meta = EpubReader.load(source)
+    if not meta then
+        UIManager:show(InfoMessage:new{text = "无法读取原书结构"})
+        return
+    end
+    local function status_label(row)
+        if row.status == "manual" then return "[手动] " .. row.title end
+        if row.status == "miss" then return "[未匹配] " .. row.title end
+        return "[自动] " .. row.title
+    end
+    local function open_chapter(row)
+        local sub_items = {}
+        for _, item in ipairs(meta.spine or {}) do
+            sub_items[#sub_items + 1] = {
+                text = tostring(item.href),
+                callback = function()
+                    local ok, assign_err = MapEditor.assign(map_path, row.uid,
+                        tostring(item.href), meta.spine, ChapterMap.ALGO_VERSION)
+                    UIManager:show(InfoMessage:new{text = ok
+                        and "已指认到 " .. tostring(item.href) .. "\n重新注入后生效"
+                        or "指认失败: " .. tostring(assign_err)})
+                end,
+            }
+        end
+        UIManager:show(Menu:new{
+            title = "指认「" .. row.title .. "」到本地文件",
+            item_table = sub_items,
+            items_per_page = 12,
+        })
+    end
+    local items = {}
+    local function add_section(label, section)
+        if #section == 0 then return end
+        items[#items + 1] = {text = label, enabled = false}
+        for _, row in ipairs(section) do
+            local entry = {
+                text = status_label(row),
+                callback = function() open_chapter(row) end,
+            }
+            if row.status == "manual" then
+                entry.hold_callback = function()
+                    local ok = MapEditor.clear(map_path, row.uid)
+                    UIManager:show(InfoMessage:new{text = ok
+                        and "已清除指认,下一批同步恢复自动匹配" or "清除失败"})
+                end
+            end
+            items[#items + 1] = entry
+        end
+    end
+    add_section("── 手动指认(长按清除) ──", rows.manual)
+    add_section("── 未匹配(点击指认) ──", rows.miss)
+    add_section("── 自动匹配(点击可改指) ──", rows.auto)
+    UIManager:show(Menu:new{
+        title = "章节映射",
+        item_table = items,
+        items_per_page = 12,
+    })
+end
+
 -- 离线重注入口:先让用户决定是否提供一份干净原书作为注入源。
 -- 当 .orig 备份被污染(本身是撷思版)时,必须选一份干净原书才能重注(clean_source 逃生舱);
 -- 选「直接重注」则走旧逻辑(依赖 .orig,脏备份会报错提示恢复原书)。

@@ -791,7 +791,25 @@ function Sync.run(deps)
     for _, ch in ipairs(fetched) do
         local key = ck(ch.book_id, ch.uid)
         local cached = map_store and map_store[key]
-        if cached == nil or cached == false then
+        if type(cached) == "table" and cached.manual
+            and type(cached.hrefs) == "table" and #cached.hrefs > 0 then
+            -- 手动指认(R3):用户裁定优先于算法版本与自动匹配,直接复用;
+            -- href 合法性仍校验(spine 变化后旧指认指向不存在的文件时回自动)。
+            local manual_ok = true
+            for _, href in ipairs(cached.hrefs) do
+                if not spine_href_set[tostring(href)] then manual_ok = false break end
+            end
+            if manual_ok then
+                known[key] = cached
+                cache_reused = cache_reused + 1
+                base_chapters = base_chapters + 1
+                base_underlines = base_underlines + #(ch.underlines or {})
+                base_thoughts = base_thoughts + (tonumber(ch.thought_entry_count)
+                    or tonumber(ch.thought_count) or 0)
+            else
+                todo[#todo + 1] = ch
+            end
+        elseif cached == nil or cached == false then
             -- false 是旧版本写入的"永久未匹配"结果,不能继续信任;重新加入待匹配。
             todo[#todo + 1] = ch
         elseif type(cached) == "table" and cached.no_hit then
@@ -1032,9 +1050,15 @@ function Sync.run(deps)
                 hrefs[#hrefs + 1] = row.href
             end
             if map_store then
-                map_store[key] = {hrefs = hrefs,
-                    num = (#hrefs == 1 and not new_rows_by_uid[key][1].quote_only) or nil,
-                    algo = ChapterMap.ALGO_VERSION}
+                -- 手动指认的章(R3)不覆写:manual 条目在加载段已直接复用,
+                -- 不会进 todo,此分支只会因 spine 失效回自动时到达——
+                -- 那种情况下旧 manual 已无意义,按自动结果覆写。
+                local existing = map_store[key]
+                if not (type(existing) == "table" and existing.manual) then
+                    map_store[key] = {hrefs = hrefs,
+                        num = (#hrefs == 1 and not new_rows_by_uid[key][1].quote_only) or nil,
+                        algo = ChapterMap.ALGO_VERSION}
+                end
             end
         elseif unmatched_uid[key] then
             unmatched[#unmatched + 1] = {uid = tostring(ch.uid), title = ch.title, reason = "no_hit", book_id = ch.book_id}
@@ -1042,8 +1066,11 @@ function Sync.run(deps)
             -- 全书回退重扫;引文集变化(新增划线)自动失效重试。
             local n, len = quotes_fingerprint(ch)
             if map_store then
-                map_store[key] = {no_hit = true, n = n, len = len,
-                    algo = ChapterMap.ALGO_VERSION}
+                local existing = map_store[key]
+                if not (type(existing) == "table" and existing.manual) then
+                    map_store[key] = {no_hit = true, n = n, len = len,
+                        algo = ChapterMap.ALGO_VERSION}
+                end
             end
         else
             -- no_data(无划线)章节:不入缓存,下批有数据时再匹配。

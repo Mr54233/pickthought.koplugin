@@ -54,6 +54,7 @@ local files = {
     "tests.test_comments_view",
     "tests.test_review_api",
     "tests.test_auth",
+    "tests.test_map_editor",
     "tests.test_ensure_online",
     "tests.test_thought_comments_ui",
     "tests.test_menus",
