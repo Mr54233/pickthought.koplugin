@@ -24,7 +24,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("if: ${{ !inputs.skip_tests }}", workflow)
         self.assertIn("luajit tests/run.lua", workflow)
         self.assertIn("python3 -m unittest discover", workflow)
-        self.assertRegex(workflow, r"actions/upload-artifact@v\d+")
+        self.assertRegex(workflow, r"actions/upload-artifact@(v\d+|[0-9a-f]{40})")
 
     def test_release_requires_quality_or_explicit_manual_skip(self):
         workflow = self._read("release.yml")
@@ -33,9 +33,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("needs: quality", workflow)
         self.assertIn("needs.quality.result == 'success'", workflow)
         self.assertIn("needs.quality.result == 'skipped' && inputs.skip_tests == true", workflow)
-        self.assertRegex(workflow, r"actions/download-artifact@v\d+")
+        self.assertRegex(workflow, r"actions/download-artifact@(v\d+|[0-9a-f]{40})")
         self.assertIn("tools/validate_manifest.py", workflow)
-        self.assertRegex(workflow, r"softprops/action-gh-release@v\d+")
+        self.assertRegex(workflow, r"softprops/action-gh-release@(v\d+|[0-9a-f]{40})")
 
 
 if __name__ == "__main__":

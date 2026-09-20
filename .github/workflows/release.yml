@@ -13,8 +13,7 @@ on:
         default: false
 
 permissions:
-  contents: write
-  pull-requests: read
+  contents: read
 
 concurrency:
   group: pickthought-release
@@ -37,12 +36,12 @@ jobs:
       pull-requests: read
     steps:
       - name: Check out
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
       - name: 安装 Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.x"
 
@@ -64,7 +63,7 @@ jobs:
 
       - name: 下载质量检查生成的测试包
         if: ${{ needs.quality.result == 'success' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: pickthought-package
           path: release-artifact
@@ -168,7 +167,7 @@ jobs:
           PY
 
       - name: 发 Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           name: 撷思 PickThought ${{ steps.version.outputs.version }}
           body_path: release-body.md
