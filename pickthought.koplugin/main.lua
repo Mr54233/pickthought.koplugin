@@ -358,18 +358,23 @@ function Plugin:_show_book_detail(row,do_bind)
                     headers={Referer="https://weread.qq.com/"},
                     retries=1,timeout={8,15},
                 })
-                if type(bytes)~="string" or #bytes==0 then return end
+                if type(bytes)~="string" or bytes=="" then return end
+                -- POSIX 下 os.tmpname() 已创建文件,任何失败路径都必须兜底删除
+                -- (CodeRabbit #29:io.open/写入异常不能让临时文件残留)。
                 local tmp=os.tmpname()
-                local f=io.open(tmp,"wb")
-                if not f then return end
-                local ok_write=f:write(bytes)
-                f:close()
-                if not ok_write then os.remove(tmp) return end
-                -- 缩放后 PNG 落书缓存目录,与详情缓存同生命周期复用(R5)。
-                local png=self.store:book_dir(row.book_id).."/"..BookDetail.COVER_CACHE_NAME
-                local rendered=CoverThumbnail.render(tmp,png,160,240)
+                local f
+                local ok_all,rendered=pcall(function()
+                    f=assert(io.open(tmp,"wb"))
+                    assert(f:write(bytes))
+                    assert(f:close())
+                    f=nil
+                    -- 缩放后 PNG 落书缓存目录,与详情缓存同生命周期复用(R5)。
+                    local png=self.store:book_dir(row.book_id).."/"..BookDetail.COVER_CACHE_NAME
+                    return CoverThumbnail.render(tmp,png,160,240) and png or nil
+                end)
+                if f then pcall(function() f:close() end) end
                 os.remove(tmp)
-                if rendered then cover_path=png end
+                if ok_all and rendered then cover_path=rendered end
             end)
         end
         BookDetail.save_cache(self.store,row.book_id,info,cover_path)
