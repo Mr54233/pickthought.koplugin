@@ -176,12 +176,33 @@ function Binding.normalize_search(data)
         -- 兼容旧网关响应:id 字段可能是 book_id(下划线)而非 bookId。
         local id = raw.bookId or raw.book_id
         if id ~= nil and tostring(id) ~= "" then
-            out[#out + 1] = {
+            local row = {
                 book_id = tostring(id),
                 title = tostring(raw.title or "") .. suffix(raw.format),
                 author = tostring(raw.author or ""),
             }
+            -- Issue #28:长按详情需要版本区分字段;仅透传非空字符串,
+            -- 搜索响应未必携带,详情弹窗以 /book/info 归一结果为准。
+            for _, key in ipairs({"format", "cover", "translator", "publisher", "publishTime"}) do
+                if type(raw[key]) == "string" and raw[key] ~= "" then row[key] = raw[key] end
+            end
+            out[#out + 1] = row
         end
+    end
+    return out
+end
+
+-- 书籍详情归一(Issue #28):网关 /book/info 响应防御式提取。
+-- 顶层或 data 键下两种形态都认;字段缺失统一为 "",由展示层显示「—」。
+function Binding.normalize_book_info(data)
+    local raw = type(data) == "table" and (type(data.data) == "table" and data.data or data) or {}
+    local out = {}
+    for _, key in ipairs({"title", "author", "translator", "publisher",
+        "publishTime", "categoryName", "intro", "cover", "format"}) do
+        local v = raw[key]
+        if v == nil and key == "categoryName" then v = raw.category end
+        if v == nil and key == "publishTime" then v = raw.publish_time end
+        out[key] = (type(v) == "string" or type(v) == "number") and tostring(v) or ""
     end
     return out
 end
