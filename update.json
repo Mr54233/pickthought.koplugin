@@ -1,15 +1,15 @@
 {
-  "version": "0.5.3",
-  "name": "撷思 PickThought 0.5.3",
+  "version": "0.5.4",
+  "name": "撷思 PickThought 0.5.4",
   "package_type": "full",
-  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.3/pickthought.koplugin.zip",
+  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.4/pickthought.koplugin.zip",
   "package_urls": [
-    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.3/pickthought.koplugin.zip",
-    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.3/pickthought.koplugin.zip",
-    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.3/pickthought.koplugin.zip",
-    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.3/pickthought.koplugin.zip"
+    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.4/pickthought.koplugin.zip",
+    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.4/pickthought.koplugin.zip",
+    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.4/pickthought.koplugin.zip",
+    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.4/pickthought.koplugin.zip"
   ],
-  "size": 844357,
-  "sha256": "12c2859f1fe0fc417a5b2e9cfdb8f6e3cbdf3c4dbdac8ecb221d434ef3fcda1e",
-  "notes": "问题修复：\n容错子序列对齐修复注释内联书的划线丢失\n锚点标题参与章节绑定,修复两级目录匹配失败（Issue #25）"
+  "size": 856891,
+  "sha256": "608a17caee1e6f23c1c0a8c6ea8e0cc55c7fc63fa96bff4cbcbe1ec9e745395a",
+  "notes": "性能优化：\n上游四项移植——更新间隔/OTP空值/按章失效/手动指认（PR #27）\n\n新功能：\n绑定搜索长按显示书籍详情与缓存(Issue #28)（Issue #28 / PR #29）\n网页登录失效降级提示与完成报告失衡提醒\n\n问题修复：\n签名只管书籍身份,算法/条目失效交给条目级校验\nScorecard 行动固定 v2.4.4 版本标签"
 }
