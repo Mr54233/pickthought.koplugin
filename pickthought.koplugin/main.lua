@@ -33,6 +33,8 @@ local PopupConfig=require("pickthought.thought_popup.popup_config")
 local ReviewComments=require("pickthought.review_comments")
 local Menus=require("pickthought.ui.menus")
 local EnsureOnline=require("pickthought.ensure_online")
+local BookDetail=require("pickthought.book_detail")
+local CoverThumbnail=require("pickthought.cover_thumbnail")
 local _=Text.tr
 local unpack_args=unpack or table.unpack
 local source=debug.getinfo(1,"S").source:gsub("^@",""); local ROOT=source:match("^(.*)/main%.lua$") or "."
@@ -296,20 +298,83 @@ function Plugin:bind_search(path,on_bound)
                 for _,row in ipairs(rows) do
                     local label=row.title~="" and row.title or row.book_id
                     if row.author~="" then label=label.." · "..row.author end
-                    items[#items+1]={text=label,callback=function()
+                    local function do_bind()
                         if menu then UIManager:close(menu) end
                         Binding.save(self.store,path,{book_id=row.book_id,title=row.title,author=row.author})
                         self:toast("已绑定:"..(row.title~="" and row.title or row.book_id))
                         if on_bound then on_bound() end
-                    end}
+                    end
+                    items[#items+1]={text=label,callback=do_bind,
+                        -- Issue #28:行数据随条目携带,实例级 onMenuHold 分发到详情弹窗。
+                        row=row,_bind=do_bind}
                 end
                 menu=Menu:new{title="选择要绑定的书",item_table=items,is_borderless=true,title_bar_fm_style=true}
+                -- KOReader 契约(v2026.03 源码核实):条目长按由 MenuItem:onHoldSelect
+                -- 分发到菜单实例的 onMenuHold 方法(默认空实现待覆写);条目级
+                -- hold_callback 不是 Menu 的能力(TouchMenu/按钮类才有)。行数据
+                -- 已随条目携带,这里实例覆写分发到详情弹窗,列表保持打开便于比对。
+                menu.onMenuHold=function(m,item)
+                    if item and item.row then
+                        self:_show_book_detail(item.row,item._bind)
+                    end
+                    return true
+                end
                 UIManager:show(menu)
                 end))
             end)
         end},
     }}}
     UIManager:show(d); d:onShowKeyboard()
+end
+
+-- Issue #28:长按搜索结果 → 书籍详情(译者/出版社/出版时间/分类/简介/封面)。
+-- 数据走网关 /book/info(Api:book);R5:归一化详情+缩放封面按 book_id 落缓存
+-- (TTL 15 天,元数据不可变取宽),命中直接弹窗不联网,未命中拉取后回写。
+function Plugin:_show_book_detail(row,do_bind)
+    local cached_info,cached_cover=BookDetail.load_cache(self.store,row.book_id)
+    if cached_info then
+        BookDetail.show{
+            row=row,info=cached_info,cover_path=cached_cover,
+            on_bind=do_bind,
+        }
+        return
+    end
+    local busy=InfoMessage:new{text="正在获取书籍信息…"}
+    UIManager:show(busy)
+    UIManager:scheduleIn(0.1,self:safe("book_detail_run",function()
+        local ok,data=pcall(function() return self.api:book(row.book_id) end)
+        UIManager:close(busy)
+        if not ok or type(data)~="table" then
+            self:info("获取书籍详情失败:\n"..U.first_line(data))
+            return
+        end
+        local info=Binding.normalize_book_info(data)
+        if info.format=="" and row.format then info.format=row.format end
+        local cover_path
+        local cover_url=info.cover~="" and info.cover or row.cover
+        if type(cover_url)=="string" and cover_url:match("^https://") then
+            pcall(function()
+                local bytes=self.http:download(cover_url,{
+                    headers={Referer="https://weread.qq.com/"},
+                    retries=1,timeout={8,15},
+                })
+                local tmp=os.tmpname()
+                local f=assert(io.open(tmp,"wb"))
+                f:write(bytes)
+                f:close()
+                -- 缩放后 PNG 落书缓存目录,与详情缓存同生命周期复用(R5)。
+                local png=self.store:book_dir(row.book_id).."/"..BookDetail.COVER_CACHE_NAME
+                local rendered=CoverThumbnail.render(tmp,png,160,240)
+                os.remove(tmp)
+                if rendered then cover_path=png end
+            end)
+        end
+        BookDetail.save_cache(self.store,row.book_id,info,cover_path)
+        BookDetail.show{
+            row=row,info=info,cover_path=cover_path,
+            on_bind=do_bind,
+        }
+    end))
 end
 
 function Plugin:manual_credentials()
