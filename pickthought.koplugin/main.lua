@@ -2330,36 +2330,71 @@ function Plugin:_show_thought_comments(item,book_id,popup)
     end)
     logger.info("[撷思][ReviewComments] cache miss, connected=", tostring(connected))
     if connected then
-        -- 异步步进加载(2026-10-07 真机反馈:登录失效时续期交换多轮重试,
-        -- 同步阻塞可达 30s+,普通提示点击根本处理不到,弹窗被锁死)。
-        -- 改为 scheduleIn 步进:每个 UI tick 只做一次请求尝试,尝试之间
-        -- 处理输入——点按别处照常关弹窗/翻页;提示走 toast 通道只是告知。
-        -- 失败自动重试(指数退避,至多 3 次);auth 类失败靠续期冷静期
-        -- 快速失败,不再拖满超时。
-        local attempts=0
-        local function attempt()
-            if not popup_shown() then return end
-            local result=ReviewComments.cache_get(cache,review_id,
-                function() return self:_request_review_comments(review_id) end,
-                book_id,os.time(),ttl)
-            if type(result)=="table" and result.ok then
-                deliver(result)
-                return
+        -- 子进程后台获取(2026-10-07 三轮反馈:同步 HTTP 占死 UI 循环,
+        -- 请求期间点击事件根本处理不到,提示永远"点不掉"——冷静期只是
+        -- 缩短阻塞,没有解决阻塞本身)。子进程跑请求,父循环继续处理
+        -- 输入:点按屏幕随时关提示/关弹窗;子进程完成即落缓存,稍后
+        -- 重新打开秒出;结果迟到且弹窗仍在则直接投递。
+        local FFIUtil=require("ffi/util")
+        local result_path=self.store.temp_dir.."/review-comments-"
+            ..tostring(os.time()).."-"..tostring(math.random(100000,999999))..".json"
+        local child=function()
+            -- 子进程兜底:cache_get 的 loader 自带 pcall,但 normalize/
+            -- sqlite 回写仍可能抛错——异常一旦穿透 runInSubProcess,子进程
+            -- 会继续执行父进程代码(双 UI 循环)。全 body pcall,无论成败
+            -- 都写结果文件并 _exit。
+            local ok_child,result=pcall(function()
+                return ReviewComments.cache_get(cache,review_id,
+                    function() return self:_request_review_comments(review_id) end,
+                    book_id,os.time(),ttl)
+            end)
+            local ok_json,encoded=pcall(function()
+                return require("pickthought.json").encode(
+                    ok_child and (result or {ok=false})
+                        or {ok=false,error="network",
+                            message=ReviewComments.message_for("network")})
+            end)
+            if ok_json then
+                U.atomic_write(result_path,encoded,true)
             end
-            local kind=type(result)=="table" and result.error or nil
-            if kind=="invalid_review_id" then
-                deliver(result)
-                return
-            end
-            if attempts<2 then
-                attempts=attempts+1
-                popup:_showCommentNotice("正在加载评论…(第 "..attempts.." 次尝试失败,将自动重试)")
-                UIManager:scheduleIn(2*attempts,function() attempt() end)
-            else
-                deliver(result)
-            end
+            local C=require("ffi")
+            C._exit(0)
         end
-        UIManager:scheduleIn(0.05,function() attempt() end)
+        local ok_pid,pid=pcall(FFIUtil.runInSubProcess,child,false,false)
+        if not ok_pid or not pid then
+            -- fork 失败(极端低内存):回退同步加载,行为与旧版一致。
+            deliver(blocking_load())
+            return nil
+        end
+        local poll_deadline=os.time()+180
+        local poll
+        poll=function()
+            local child_done=not U.file_exists("/proc/"..tostring(pid))
+            if U.file_exists(result_path) then
+                local raw=U.read_file(result_path,true)
+                os.remove(result_path)
+                pcall(function() FFIUtil.isSubProcessDone(pid) end) -- 回收防僵尸
+                local ok_decode,decoded=pcall(function()
+                    return require("pickthought.json").decode(raw or "")
+                end)
+                logger.info("[撷思][ReviewComments] subprocess fetch done ok=",
+                    tostring(type(decoded)=="table" and decoded.ok or tostring(decoded):sub(1,40)))
+                deliver(ok_decode and decoded or nil)
+                return
+            end
+            if child_done then
+                -- 子进程无结果退出( fork 前失败等):按网络错误收尾
+                logger.warn("[撷思][ReviewComments] child exited without result")
+                deliver(nil)
+                return
+            end
+            if os.time()>poll_deadline then
+                logger.warn("[撷思][ReviewComments] subprocess poll timeout, keep background")
+                return
+            end
+            UIManager:scheduleIn(0.5,poll)
+        end
+        UIManager:scheduleIn(0.5,poll)
         return nil
     end
 
