@@ -38,7 +38,8 @@ local FaceFactory = {
 FaceFactory.VARIANTS = {
     content = 0.9,  -- thought body
     quote   = 0.9,  -- quoted abstract (italic, gray)
-    meta    = 0.9,  -- author line; keep it as readable as the thought body
+    meta    = 0.72, -- author line(上游 #193 双列头:略小更利落)
+    likes   = 0.68, -- likes column(右列,再小一档)
 }
 
 function FaceFactory:init()
@@ -309,6 +310,15 @@ function FaceFactory:getFace(doc_font_name, size, variant)
     if not face then
         local ok, fallback = pcall(Font.getFace, Font, "cfont", v_size)
         if ok then face = fallback end
+    end
+
+    -- meta 变体加半强度 embolden(上游 #193):双列头里作者名比正文轻粗,
+    -- 便于与内容区分;ftsize 不支持时静默跳过。
+    if face and variant == "meta" and face.ftsize
+        and type(face.ftsize.getEmboldenHalfStrength) == "function" then
+        pcall(function()
+            face.ftsize:getEmboldenHalfStrength(3 / 8)
+        end)
     end
 
     if face then

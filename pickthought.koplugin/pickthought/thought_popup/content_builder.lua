@@ -173,6 +173,17 @@ function ContentBuilder.build(items, opts)
     end
 
     for item_index, item in ipairs(items) do
+        -- 条目分隔线(上游 #193 双列样式):第二条起,每条想法上方一条灰线,
+        -- 间距 0.54em 前后;第一条不画(无 leading separator)。
+        if item_index > 1 then
+            blocks[#blocks + 1] = {
+                kind = "separator",
+                fg = adjustedGray(10, opts.contrast),
+                spacing_before = 0.54,
+                spacing_after = 0.54,
+            }
+        end
+
         -- meta 行只在有话可说时渲染(作者/赞/评论数至少一项非空):
         -- 底部评论视图的父想法引用块三项全空,不再多出孤行。
         local author = trimText(tostring(item.author or ""))
@@ -180,24 +191,24 @@ function ContentBuilder.build(items, opts)
         local comment_count = tonumber(item.comment_count) or 0
         if author ~= "" or likes > 0 or comment_count > 0 then
             if author == "" then author = "微信读书用户" end
-            local meta = "▸ " .. author
-            if likes > 0 then
-                meta = meta .. " · ♥ " .. tostring(likes)
-            end
+            -- 双列样式(上游 #193):author 左列 / likes 右列分字段,
+            -- 排版层(pages.lua)负责右对齐与基线对齐;不再拼单串。
+            -- ❝ 评论数(撷思扩展,上游无此列)拼在作者名尾部,维持单列文字。
             if comment_count > 0 then
                 -- ❝(U+275D,实心引号饰符,Dingbats 区):与 ♥ 同为实心图标,
                 -- 语义"说过的话"。刻意不用 4 字节 emoji——meta 块 XText
-                -- shaping 走 emoji 回退字形有 SIGBUS 前科(sanitize_meta 因此存在);
-                -- ✉ 候选已实测渲染正常但是空心的,与 ♥ 观感不配。
-                meta = meta .. " · ❝ " .. tostring(comment_count)
+                -- shaping 走 emoji 回退字形有 SIGBUS 前科(sanitize_meta 因此存在)。
+                author = author .. " · ❝ " .. tostring(comment_count)
             end
             blocks[#blocks + 1] = {
-                kind = "paragraph",
+                kind = "meta",
                 variant = "meta",
-                text = meta,
+                text = author,
+                likes_text = likes > 0 and ("♥ " .. tostring(likes)) or nil,
+                likes_fg = adjustedGray(7, opts.contrast),
                 fg = adjustedGray(9, opts.contrast),
-                spacing_before = item_index > 1 and 0.45 or nil,
-                spacing_after = 0.18,
+                spacing_before = item_index > 1 and 0.27 or nil,
+                spacing_after = 0.27,
             }
         end
 

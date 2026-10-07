@@ -137,7 +137,9 @@ T.case("想法弹窗内容构建保留引用作者点赞并支持 Unicode 清理
     }}, {contrast = 9})
     T.eq(#blocks, 3, "引用、作者和正文各有一个块")
     T.eq(blocks[1].text, "「" .. string.rep("汉", 50) .. "…」", "引用按 rune 截断")
-    T.eq(blocks[2].text, "▸ 甲 · ♥ 3", "作者和点赞按上游格式显示")
+    -- R2(上游 #193):meta 拆双列字段,text 不再带 ▸ 前缀,likes 进独立列
+    T.eq(blocks[2].text, "甲", "作者名独立成列(无 ▸ 前缀)")
+    T.eq(blocks[2].likes_text, "♥ 3", "点赞右列字段")
     T.eq(blocks[3].text, "正文", "末尾不可见 Unicode 空白被清理")
     T.eq(blocks[1].fg, 0, "默认最大对比度为纯黑")
 
@@ -146,9 +148,10 @@ T.case("想法弹窗内容构建保留引用作者点赞并支持 Unicode 清理
     }}, {skip_quote = true, contrast = 0})
     T.eq(#centered, 2, "居中标题栏模式不重复渲染引用")
     T.eq(centered[1].fg, 9, "对比度零保留基础灰阶")
+    T.eq(centered[1].likes_text, nil, "零赞不产出 likes 列")
 end)
 
-T.case("meta 行条件渲染:全空不渲染,有评论数追加 评论 N", function()
+T.case("meta 行条件渲染:全空不渲染,有评论数追加 ❝ N", function()
     local empty = ContentBuilder.build({{
         abstract = "想法原文", author = "", content = "", likes_count = 0,
     }}, {})
@@ -160,13 +163,34 @@ T.case("meta 行条件渲染:全空不渲染,有评论数追加 评论 N", funct
         likes_count = 2, comment_count = 5,
     }}, {skip_quote = true})
     T.eq(#with_all, 2, "meta + 正文两个块")
-    T.eq(with_all[1].text, "▸ 甲 · ♥ 2 · ❝ 5", "评论数按格式追加在赞后")
+    T.eq(with_all[1].text, "甲 · ❝ 5", "评论数拼在作者尾(上游无此列,撷思扩展)")
+    T.eq(with_all[1].likes_text, "♥ 2", "点赞仍独立右列")
 
     local anonymous = ContentBuilder.build({{
         abstract = "", author = "", content = "正文", comment_count = 1,
     }}, {skip_quote = true})
-    T.eq(anonymous[1].text, "▸ 微信读书用户 · ❝ 1",
+    T.eq(anonymous[1].text, "微信读书用户 · ❝ 1",
         "有评论数但无作者时仍渲染 meta 行并兜底作者名")
+end)
+
+T.case("R2 separator:多条目间产分隔线,首条无", function()
+    local blocks = ContentBuilder.build({
+        {abstract = "", author = "甲", content = "内容一", likes_count = 0},
+        {abstract = "", author = "乙", content = "内容二", likes_count = 1},
+        {abstract = "", author = "丙", content = "内容三", likes_count = 0},
+    }, {skip_quote = true})
+    local separators, metas = 0, 0
+    for _, block in ipairs(blocks) do
+        if block.kind == "separator" then
+            separators = separators + 1
+            T.ok(block.spacing_before == 0.54 and block.spacing_after == 0.54,
+                "分隔线间距 0.54em")
+        elseif block.kind == "meta" then
+            metas = metas + 1
+        end
+    end
+    T.eq(metas, 3, "三条 meta")
+    T.eq(separators, 2, "分隔线=条目数-1(首条无)")
 end)
 
 T.case("想法弹窗 xtext 缓存可被显式释放", function()
