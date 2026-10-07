@@ -146,20 +146,29 @@ class MenuContractTests(unittest.TestCase):
         # F5 深层根因:UIManager:sendEvent 只把顶层未消费的事件发给
         # active_widgets/is_always_active 的下层 widget,提示层作为普通 widget
         # 压在弹窗上必然挡死分发——必须走 toast 通道(源码:toast 从不截停
-        # 事件传播)。dismissable=false 让提示自身不吃点击、获取期间稳定显示。
+        # 事件传播)。
         # "查看评论"的加载提示原为阻塞语义;2026-10-07 真机反馈推翻:
         # 网页登录失效时请求阻塞 30s+,普通 InfoMessage 挡死弹窗无法打断,
         # 与预取提示统一改走 toast 通道(事件穿透,弹窗可关闭/翻页)。
+        # dismissable=false 曾是阻塞时代的钉死设计(获取期间稳定显示);
+        # 2026-10-07 预取/查看评论双双子进程化后获取不再受 UI 影响,
+        # 真机反馈"翻页后提示仍覆盖、点不掉"——dismissable 应回默认 true
+        # (infomessage.lua:全屏 TapClose+任意按键,点一下随手关)。
         source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
         self.assertIn(
-            'InfoMessage:new{text="正在获取评论数…",dismissable=false,timeout=30,toast=true}',
+            'InfoMessage:new{text="正在获取评论数…",timeout=30,toast=true}',
             source,
-            "预取提示必须走 toast 通道且 dismissable=false(获取期间弹窗可关闭)",
+            "预取提示必须走 toast 通道且可点掉(子进程化后 dismissable=false 已废除)",
         )
         blocker = source.split('text="正在加载评论…"', 1)[1][:80]
         self.assertIn(
             "toast=true", blocker,
             "查看评论的加载提示同样走 toast 通道(2026-10-07 真机反馈:登录失效时阻塞请求可达 30s+,提示不得挡死弹窗)",
+        )
+        self.assertNotIn(
+            "dismissable=false",
+            blocker,
+            "查看评论的加载提示同样必须可点掉",
         )
 
     def test_book_actions_has_single_reset_and_restore_entries(self):

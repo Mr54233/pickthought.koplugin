@@ -2206,11 +2206,13 @@ function Plugin:_prefetch_visible_comment_counts(popup,book_id)
     end
     -- 获取提示(用户拍板 2026-09-06):整批要几秒,默认弹提示告诉用户
     -- "在干活";设置里可关。所有退出路径都要关闭(close_notice 幂等)。
-    -- toast=true(F5):展示在栈顶但"从不截停事件传播",点击穿透到弹窗;
-    -- dismissable=false 让提示自身不注册 TapClose/按键;timeout=30 安全网。
+    -- toast=true:展示在栈顶但"从不截停事件传播"(uimanager),点击穿透。
+    -- 不设 dismissable=false(真机反馈 2026-10-07"翻页后提示仍覆盖"):
+    -- 阻塞时代的钉死设计已无必要——dismissable 默认 true 即全屏 TapClose
+    -- +任意按键,点一下随手关,获取照常在子进程跑完;timeout=30 安全网。
     local notice
     if self:_thought_popup_preferences().comment_fetch_notice~=false then
-        notice=InfoMessage:new{text="正在获取评论数…",dismissable=false,timeout=30,toast=true}
+        notice=InfoMessage:new{text="正在获取评论数…",timeout=30,toast=true}
         UIManager:show(notice)
         pcall(function() UIManager:forceRePaint() end)
     end
