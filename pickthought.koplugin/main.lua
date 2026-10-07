@@ -2330,10 +2330,37 @@ function Plugin:_show_thought_comments(item,book_id,popup)
     end)
     logger.info("[撷思][ReviewComments] cache miss, connected=", tostring(connected))
     if connected then
-        local result=blocking_load()
-        logger.info("[撷思][ReviewComments] blocking_load done ok=",
-            tostring(type(result)=="table" and result.ok or result))
-        return result
+        -- 异步步进加载(2026-10-07 真机反馈:登录失效时续期交换多轮重试,
+        -- 同步阻塞可达 30s+,普通提示点击根本处理不到,弹窗被锁死)。
+        -- 改为 scheduleIn 步进:每个 UI tick 只做一次请求尝试,尝试之间
+        -- 处理输入——点按别处照常关弹窗/翻页;提示走 toast 通道只是告知。
+        -- 失败自动重试(指数退避,至多 3 次);auth 类失败靠续期冷静期
+        -- 快速失败,不再拖满超时。
+        local attempts=0
+        local function attempt()
+            if not popup_shown() then return end
+            local result=ReviewComments.cache_get(cache,review_id,
+                function() return self:_request_review_comments(review_id) end,
+                book_id,os.time(),ttl)
+            if type(result)=="table" and result.ok then
+                deliver(result)
+                return
+            end
+            local kind=type(result)=="table" and result.error or nil
+            if kind=="invalid_review_id" then
+                deliver(result)
+                return
+            end
+            if attempts<2 then
+                attempts=attempts+1
+                popup:_showCommentNotice("正在加载评论…(第 "..attempts.." 次尝试失败,将自动重试)")
+                UIManager:scheduleIn(2*attempts,function() attempt() end)
+            else
+                deliver(result)
+            end
+        end
+        UIManager:scheduleIn(0.05,function() attempt() end)
+        return nil
     end
 
     -- 3) 离线:异步开 Wi-Fi,就绪后补发请求(实施文档 §7)。
