@@ -173,6 +173,18 @@ function ContentBuilder.build(items, opts)
     end
 
     for item_index, item in ipairs(items) do
+        -- 条目分隔线(上游 #193 双列样式):第二条起,每条想法上方一条灰线;
+        -- 第一条不画(无 leading separator)。间距 0.30em 前后——上游 0.54em
+        -- 在撷思字号下条目间距明显偏松(真机反馈"行高太高"),压紧一档。
+        if item_index > 1 then
+            blocks[#blocks + 1] = {
+                kind = "separator",
+                fg = adjustedGray(10, opts.contrast),
+                spacing_before = 0.30,
+                spacing_after = 0.30,
+            }
+        end
+
         -- meta 行只在有话可说时渲染(作者/赞/评论数至少一项非空):
         -- 底部评论视图的父想法引用块三项全空,不再多出孤行。
         local author = trimText(tostring(item.author or ""))
@@ -180,23 +192,29 @@ function ContentBuilder.build(items, opts)
         local comment_count = tonumber(item.comment_count) or 0
         if author ~= "" or likes > 0 or comment_count > 0 then
             if author == "" then author = "微信读书用户" end
-            local meta = "▸ " .. author
+            -- 双列样式(上游 #193):author 左列,右列承载 ♥ 与 ❝ 两个
+            -- 计数字段(2026-10-07 真机反馈:❝ 留在作者尾看着像作者名
+            -- 的一部分,应与点赞同列右置);零赞时右列纯 "❝ M" 照样右对齐。
+            -- ❝(U+275D,实心引号饰符,Dingbats 区):与 ♥ 同为实心图标,
+            -- 语义"说过的话"。刻意不用 4 字节 emoji——meta 块 XText
+            -- shaping 走 emoji 回退字形有 SIGBUS 前科(sanitize_meta 因此存在)。
+            local meta_right
             if likes > 0 then
-                meta = meta .. " · ♥ " .. tostring(likes)
+                meta_right = "♥ " .. tostring(likes)
             end
             if comment_count > 0 then
-                -- ❝(U+275D,实心引号饰符,Dingbats 区):与 ♥ 同为实心图标,
-                -- 语义"说过的话"。刻意不用 4 字节 emoji——meta 块 XText
-                -- shaping 走 emoji 回退字形有 SIGBUS 前科(sanitize_meta 因此存在);
-                -- ✉ 候选已实测渲染正常但是空心的,与 ♥ 观感不配。
-                meta = meta .. " · ❝ " .. tostring(comment_count)
+                meta_right = meta_right
+                    and (meta_right .. " · ❝ " .. tostring(comment_count))
+                    or ("❝ " .. tostring(comment_count))
             end
             blocks[#blocks + 1] = {
-                kind = "paragraph",
+                kind = "meta",
                 variant = "meta",
-                text = meta,
+                text = author,
+                likes_text = meta_right,
+                likes_fg = adjustedGray(7, opts.contrast),
                 fg = adjustedGray(9, opts.contrast),
-                spacing_before = item_index > 1 and 0.45 or nil,
+                spacing_before = item_index > 1 and 0.18 or nil,
                 spacing_after = 0.18,
             }
         end

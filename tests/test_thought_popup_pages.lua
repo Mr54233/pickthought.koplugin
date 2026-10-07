@@ -171,7 +171,17 @@ local function assert_piece_ranges_contiguous(renderer, pages, piece)
             ranges[#ranges + 1] = range
         end
     end
-    T.ok(#ranges > 0, '文本块至少出现在一页')
+    T.ok(#ranges > 0, "likes不可见 p0=" .. tostring(pages[1])
+        .. " p1=" .. tostring(pages[2] or -1)
+        .. " content_h=" .. tostring(renderer.content_h)
+        .. " piece.y=" .. tostring(piece.y)
+        .. " piece.piece_h=" .. tostring(piece.piece_h)
+        .. " piece.x=" .. tostring(piece.x)
+        .. " piece.width=" .. tostring(piece.width)
+        .. " lb_n=" .. tostring(piece.line_bounds and #piece.line_bounds or "nil")
+        .. " n_lines=" .. tostring(piece.n_lines)
+        .. " lb1=" .. tostring(piece.line_bounds and piece.line_bounds[1]
+            and (tostring(piece.line_bounds[1].top) .. "-" .. tostring(piece.line_bounds[1].bottom)) or "nil"))
     T.eq(ranges[1].src_y, 0, '文本块首段从位图起点开始')
     for index = 2, #ranges do
         T.eq(ranges[index - 1].src_y + ranges[index - 1].src_h,
@@ -179,6 +189,25 @@ local function assert_piece_ranges_contiguous(renderer, pages, piece)
     end
     T.eq(ranges[#ranges].src_y + ranges[#ranges].src_h, piece.piece_h,
         '文本块末段覆盖位图结尾')
+end
+
+-- R2 分隔线 piece 的连续性变体:separator 整块单行,首段 src_y=0 同样成立;
+-- 失败时打印 piece 详情便于定位。
+local function assert_separator_range(renderer, pages, piece)
+    local Paginator = require('pickthought.thought_popup.paginator')
+    local seen
+    for page_index = 1, #pages do
+        local p0 = pages[page_index]
+        local p1 = pages[page_index + 1] or renderer.content_h
+        local range = Paginator.pieceVisibleRange(piece, p0, p1)
+        if range then
+            T.ok(range.src_y == 0, '分隔线整块单行,src_y 恒为 0: '
+                .. tostring(range.src_y) .. ' piece.y=' .. tostring(piece.y))
+            seen = true
+        end
+    end
+    T.ok(seen, '分隔线至少出现在一页 kind=' .. tostring(piece.kind)
+        .. ' y=' .. tostring(piece.y) .. ' h=' .. tostring(piece.piece_h))
 end
 
 T.case("想法页面渲染器公开布局字段和长内容分页", function()
@@ -242,33 +271,56 @@ T.case("分页边界覆盖文本块最后一行的实际位图尾部", function(
 end)
 
 T.case("全部合法宽高组合均不重复或裁切跨页正文", function()
-    for width_percent = 60, 100, 5 do
-        for height_percent = 50, 90, 5 do
-            local renderer = PageRenderer:new{
-                items = items,
-                doc_font_size = 18,
-                doc_margins = {left = 20, right = 20, top = 10, bottom = 10},
-                height_ratio = height_percent / 100,
-                content_width = math.floor(600 * width_percent / 100),
-                contrast = 9,
-                skip_quote = true,
-            }
-            renderer:ensureLayout()
-            local viewport_h = math.max(1, math.floor(800 * height_percent / 100) - 180)
-            local pages = renderer:computePages(viewport_h)
-            T.ok(#pages > 1, width_percent .. "x" .. height_percent .. " 长内容跨页")
-            for index = 2, #pages do
-                T.ok(pages[index] > pages[index - 1], "页起点单调递增")
-            end
-            for page_index = 1, #pages do
-                local page_bb = renderer:renderPage(page_index, pages)
-                T.ok(page_bb and page_bb.getHeight, "每种宽高组合均生成页面位图")
-            end
-            for _, piece in ipairs(renderer.layout.pieces) do
-                assert_piece_ranges_contiguous(renderer, pages, piece)
+    local PopupDiagnostic = require('pickthought.diagnostic')
+    local diag_was_enabled = PopupDiagnostic.is_enabled()
+    PopupDiagnostic.set_enabled(true)
+    -- 临时诊断:logger 桩是 noop,这里把 info 换成收集器接住构造/偏移数据。
+    -- 断言失败也必须恢复诊断开关与 logger(CodeRabbit #31),收集统一在
+    -- 结束后输出,不再边收集边打印(否则 restore 时重复打印)。
+    local diag_lines = {}
+    local logger = require("logger")
+    local orig_info = logger.info
+    logger.info = function(...) diag_lines[#diag_lines + 1] = table.concat({...}, " ") end
+    local function restore_logger()
+        logger.info = orig_info
+        PopupDiagnostic.set_enabled(diag_was_enabled)
+    end
+    local ok_case, err = pcall(function()
+        for width_percent = 60, 100, 5 do
+            for height_percent = 50, 90, 5 do
+                local renderer = PageRenderer:new{
+                    items = items,
+                    doc_font_size = 18,
+                    doc_margins = {left = 20, right = 20, top = 10, bottom = 10},
+                    height_ratio = height_percent / 100,
+                    content_width = math.floor(600 * width_percent / 100),
+                    contrast = 9,
+                    skip_quote = true,
+                }
+                renderer:ensureLayout()
+                local viewport_h = math.max(1, math.floor(800 * height_percent / 100) - 180)
+                local pages = renderer:computePages(viewport_h)
+                T.ok(#pages > 1, width_percent .. "x" .. height_percent .. " 长内容跨页")
+                for index = 2, #pages do
+                    T.ok(pages[index] > pages[index - 1], "页起点单调递增")
+                end
+                for page_index = 1, #pages do
+                    local page_bb = renderer:renderPage(page_index, pages)
+                    T.ok(page_bb and page_bb.getHeight, "每种宽高组合均生成页面位图")
+                end
+                for _, piece in ipairs(renderer.layout.pieces) do
+                    if piece.kind == "separator" then
+                        assert_separator_range(renderer, pages, piece)
+                    else
+                        assert_piece_ranges_contiguous(renderer, pages, piece)
+                    end
+                end
             end
         end
-    end
+    end)
+    restore_logger()
+    for _, line in ipairs(diag_lines) do print("[diag] " .. line) end
+    if not ok_case then error(err, 0) end
 end)
 
 T.case("相同内容复用布局，尺寸或对比度变化会重新布局", function()
@@ -295,4 +347,58 @@ T.case("页面与文本缓存关闭时完整释放且可重新布局", function(
     T.eq(renderer.boundaries, nil, "清理后不保留边界")
     renderer:ensureLayout()
     T.ok(renderer.content_h > 0 and renderer.layout, "清理后仍可重新布局")
+end)
+
+T.case("R3 追加: 双列 likes piece 必须可见(基线对齐后行边界不得留在构造位置)", function()
+    -- CodeRabbit 式边界 bug 回归:likes_piece.y 基线对齐后,lb 偏移若用
+    -- author 推进后的 y 计算会得出 0 偏移,likes 行边界永远停在构造位置,
+    -- pieceVisibleRange 对 piece.y..piece.y+piece_h 返回 nil=整块不可见。
+    local width_percent, height_percent = 60, 50
+    local renderer = PageRenderer:new{
+        items = items,
+        doc_font_size = 18,
+        doc_margins = {left = 20, right = 20, top = 10, bottom = 10},
+        height_ratio = height_percent / 100,
+        content_width = math.floor(600 * width_percent / 100),
+        contrast = 9,
+        skip_quote = true,
+    }
+    renderer:ensureLayout()
+    local viewport_h = math.max(1, math.floor(800 * height_percent / 100) - 180)
+    local pages = renderer:computePages(viewport_h)
+    local Paginator = require('pickthought.thought_popup.paginator')
+    for _, piece in ipairs(renderer.layout.pieces) do
+        if piece.variant == "likes" then
+            local seen
+            for page_index = 1, #pages do
+                local range = Paginator.pieceVisibleRange(piece,
+                    pages[page_index], pages[page_index + 1] or renderer.content_h)
+                if range then seen = true end
+            end
+            T.ok(seen, "likes piece 在某页可见(行边界与 piece.y 同步)")
+        end
+    end
+end)
+
+T.case("R2 追加: 零赞条目(likes_text=nil)的作者名必须渲染", function()
+    -- 真机回归(2026-10-07 截图):0 赞条目的 meta 块曾被排版分支条件
+    -- (meta AND likes_text)整块丢弃,作者名消失。
+    local renderer = PageRenderer:new{
+        items = {
+            {abstract = "", author = "甲", content = "内容一", likes_count = 0},
+            {abstract = "", author = "乙", content = "内容二", likes_count = 3},
+        },
+        doc_font_size = 18,
+        doc_margins = {left = 20, right = 20, top = 10, bottom = 10},
+        height_ratio = .70, contrast = 9,
+    }
+    renderer:ensureLayout()
+    local found_meta = false
+    for _, piece in ipairs(renderer.layout.pieces) do
+        if piece.variant == "meta" and piece.text == "甲" then
+            found_meta = true
+            T.ok(piece.piece_h > 0 and piece.width > 0, "零赞作者行有有效尺寸")
+        end
+    end
+    T.ok(found_meta, "零赞条目的作者行已渲染(不再整块丢弃)")
 end)

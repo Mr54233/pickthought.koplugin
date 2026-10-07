@@ -43,9 +43,8 @@ local Plugin=WidgetContainer:extend{name="pickthought",is_doc_only=false,version
 -- 评论数懒加载节奏(评论数懒加载需求 2026-09-06)。必须声明在文件头部:
 -- _show_thought_href 在这些 local 声明之前就会用到(教训同 check_exists=nil,
 -- 2026-09-06 真机"想法弹窗打开失败 time.lua arithmetic on nil"即此)。
--- STEP_DELAY 只是步骤间让出输入的小间隙,请求节奏由 HTTP 层限速
+-- FIRST_DELAY 只是首屏第一轮等首帧刷完的间隙;请求节奏由 HTTP 层限速
 -- (min_interval 0.45s)兜底,不在此叠加等待。
-local COMMENT_PREFETCH_STEP_DELAY=0.05
 local COMMENT_PREFETCH_FIRST_DELAY=0.6
 
 local function sanitize_saved_auth(store)
@@ -2145,11 +2144,10 @@ end
 -- 只补"当前可见"的想法。触发点:弹窗打开后的首轮 + 组件的防抖回调
 -- on_visible_items_settled。列表接口没有评论数字段(2026-09-06 真机
 -- 155KB 响应全字段核验),逐条详情是唯一来源;缓存命中的就地补显示,
--- 未缓存的按评论限速逐条请求(HTTP 层限速 0.45s/条),整批完成后
--- 一次性刷新(用户拍板:逐条刷"一下一下"观感差;KOReader 插件网络
--- 为同步调用、无线程,真并发做不到,串行整批+单次刷新观感等同并发)。
+-- 未缓存的整批搬子进程串行拉取(2026-10-07:同步请求锁死 UI 循环的
+-- 根因,子进程化后父循环全程可交互),整批完成后一次性刷新(用户
+-- 拍板:逐条刷"一下一下"观感差,攒一批一起上屏观感等同并发)。
 -- 离线不为此自动开 Wi-Fi——点"查看评论"时才走 ensure_online。
--- (节奏常量声明在文件头部,_show_thought_href 先于本函数使用。)
 
 function Plugin:_prefetch_visible_comment_counts(popup,book_id)
     local ttl=ReviewComments.normalize_ttl(
@@ -2193,21 +2191,29 @@ function Plugin:_prefetch_visible_comment_counts(popup,book_id)
     -- 缓存里就有的立即补上(条目与弹窗共享同一张表)
     if changed then popup:refresh_comment_counts() end
     if #pending==0 then return end
-    -- 新一轮作废旧循环(防抖重触发/弹窗池复用,防止两代循环叠加)
-    local gen=(self._comment_prefetch_gen or 0)+1
-    self._comment_prefetch_gen=gen
+    -- 子进程后台预取(2026-10-07 真机反馈:旧步进方案每条仍是一次同步
+    -- HTTP,单个请求期间 UI 循环照样锁死——输入事件被排队、请求结束后
+    -- 一次性灌入,用户实测"点什么都没用,结束后指令全部一次输入"。
+    -- 与查看评论同一解法:整批搬进子进程,父循环 0.5s 轮询结果文件,
+    -- 期间全程可交互;结果照常落缓存,弹窗还开着就一次性补显示。)
+    -- 单飞:上一轮子进程还在跑就跳过本轮(HTTP 限速器状态随 fork 分拷,
+    -- 双跑=双倍请求速率;sqlite 写也会锁竞争)。跑完自然落缓存,下次
+    -- 视口稳定会把漏掉的条目补上。
+    if self._comment_prefetch_pid
+        and U.file_exists("/proc/"..tostring(self._comment_prefetch_pid)) then
+        logger.info("[撷思][ReviewComments] prefetch in-flight, skip round")
+        return
+    end
     -- 获取提示(用户拍板 2026-09-06):整批要几秒,默认弹提示告诉用户
-    -- "在干活";设置里可关。notice 生命周期绑定本轮循环,所有退出路径
-    -- 都要关闭(close_notice 幂等)。
-    -- toast=true(F5,真机反馈 2026-09-13 二轮):仅 dismissable=false 不够——
-    -- UIManager:sendEvent 只把顶层未消费的事件发给 active_widgets/is_always_active
-    -- 的下层 widget,提示层作为普通 widget 压在弹窗上必然挡死分发。toast 通道
-    -- 展示在栈顶但"从不截停事件传播"(uimanager.lua 源码注释),点击穿透到弹窗,
-    -- 获取期间翻页/关闭照常。dismissable=false 让提示自身不注册 TapClose/按键,
-    -- 稳定显示到获取结束;timeout=30 是安全网,正常路径 close_notice 几秒内收回。
+    -- "在干活";设置里可关。所有退出路径都要关闭(close_notice 幂等)。
+    -- 普通 InfoMessage(真机反馈 2026-10-07 三轮定稿):不走 toast 通道——
+    -- toast 在 uimanager 硬编码"从不截停事件传播",一击会同时关提示+
+    -- 翻页(用户:不符合逻辑)。普通提示压在栈顶,第一击被它的全屏
+    -- TapClose 消费掉只关提示,第二击才落到书页/弹窗;获取在子进程
+    -- 照常进行,提示挡不挡栈顶毫无影响。timeout=30 安全网。
     local notice
     if self:_thought_popup_preferences().comment_fetch_notice~=false then
-        notice=InfoMessage:new{text="正在获取评论数…",dismissable=false,timeout=30,toast=true}
+        notice=InfoMessage:new{text="正在获取评论数…",timeout=30}
         UIManager:show(notice)
         pcall(function() UIManager:forceRePaint() end)
     end
@@ -2219,42 +2225,108 @@ function Plugin:_prefetch_visible_comment_counts(popup,book_id)
     end
     logger.info("[撷思][ReviewComments] prefetch visible","book=",tostring(book_id),
         "pending=",tostring(#pending))
-    local done=0
-    local function step(idx)
-        if self._comment_prefetch_gen~=gen then close_notice() return end
-        local ok,err=pcall(function()
-            local it=pending[idx]
-            if not it then close_notice() return end
-            local still_shown=true
-            pcall(function() still_shown=UIManager:isWidgetShown(popup)~=false end)
-            if not still_shown then close_notice() return end  -- 弹窗已关:停止剩余请求
-            local result=ReviewComments.cache_get(cache,it.review_id,
-                function() return self:_request_review_comments(it.review_id,
-                    {pacing_min_interval=0.2}) end,
-                book_id,os.time(),ttl)
-            if self._comment_prefetch_gen~=gen then close_notice() return end
-            if type(result)=="table" and result.ok then
-                it.comment_count=tonumber(result.total_count) or 0
-                done=done+1
+    local FFIUtil=require("ffi/util")
+    local result_path=self.store.temp_dir.."/prefetch-counts-"
+        ..tostring(os.time()).."-"..tostring(math.random(100000,999999))..".json"
+    local batch={}
+    for _,it in ipairs(pending) do batch[#batch+1]=it.review_id end
+    local child=function()
+        -- 子进程兜底同查看评论:异常穿透 runInSubProcess 会带着 fork 状态
+        -- 继续执行父进程代码(双 UI 循环),全 body pcall+无条件 _exit。
+        local ok_child,results=pcall(function()
+            local out={}
+            for _,rid in ipairs(batch) do
+                local r=ReviewComments.cache_get(cache,rid,
+                    function() return self:_request_review_comments(rid,
+                        {pacing_min_interval=0.2}) end,
+                    book_id,os.time(),ttl)
+                if type(r)=="table" and r.ok then
+                    out[#out+1]={review_id=rid,
+                        total_count=tonumber(r.total_count) or 0}
+                end
             end
-            UIManager:scheduleIn(COMMENT_PREFETCH_STEP_DELAY,function() step(idx+1) end)
+            return out
         end)
-        if not ok then
+        local ok_json,encoded=pcall(function()
+            return require("pickthought.json").encode(
+                ok_child and (results or {}) or {child_error=true})
+        end)
+        if ok_json then
+            U.atomic_write(result_path,encoded,true)
+        end
+        local C=require("ffi")
+        C._exit(0)
+    end
+    local ok_pid,pid=pcall(FFIUtil.runInSubProcess,child,false,false)
+    if not ok_pid or not pid then
+        -- fork 失败(极端低内存):放弃本轮预取,不回退同步路径——预取是
+        -- 锦上添花,不该为此重新引入 UI 锁死;点开单条走查看评论路径。
+        logger.warn("[撷思][ReviewComments] fork failed, skip prefetch round")
+        close_notice()
+        return
+    end
+    self._comment_prefetch_pid=pid
+    local poll_deadline=os.time()+300
+    local poll
+    poll=function()
+        -- 先回收子进程(waitpid),再查结果文件
+        pcall(function() FFIUtil.isSubProcessDone(pid) end)
+        local still_shown=true
+        pcall(function() still_shown=UIManager:isWidgetShown(popup)~=false end)
+        if not still_shown then
+            -- 弹窗已关:提示收回;子进程照常跑完落缓存,结果不再上屏
             close_notice()
-            logger.warn("[撷思][ReviewComments] prefetch step error:",
-                U.first_line(tostring(err),160))
+        end
+        if U.file_exists(result_path) then
+            local raw=U.read_file(result_path,true)
+            os.remove(result_path)
+            if self._comment_prefetch_pid==pid then self._comment_prefetch_pid=nil end
+            close_notice()
+            local ok_decode,list=pcall(function()
+                return require("pickthought.json").decode(raw or "")
+            end)
+            if still_shown and ok_decode and type(list)=="table" then
+                local by_id={}
+                for _,r in ipairs(list) do
+                    by_id[tostring(r.review_id)]=tonumber(r.total_count) or 0
+                end
+                local done=0
+                for _,it in ipairs(pending) do
+                    local c=by_id[tostring(it.review_id)]
+                    if c and (tonumber(it.comment_count) or 0)~=c then
+                        it.comment_count=c
+                        done=done+1
+                    end
+                end
+                -- 整批一次性刷新(条目与弹窗共享同一张表):
+                -- 逐条刷"一下一下",攒一批一起上屏观感等同并发。
+                if done>0 then popup:refresh_comment_counts() end
+            end
             return
         end
-        -- 整批完成后一次性刷新(条目与弹窗共享同一张表):
-        -- 逐条刷"一下一下",攒一批一起上屏观感等同并发。
-        if idx==#pending then
+        if not U.file_exists("/proc/"..tostring(pid)) then
+            -- /proc 消失(顶部 waitpid 已回收)才释放单飞占位:提前清 pid
+            -- 会放行新轮次与仍存活的子进程双跑(双倍请求速率,CodeRabbit #31)
+            if self._comment_prefetch_pid==pid then self._comment_prefetch_pid=nil end
             close_notice()
-            if done>0 then
-                popup:refresh_comment_counts()
-            end
+            return
         end
+        if os.time()>poll_deadline then
+            -- 到期不放弃轮询、不清单飞占位:降级为慢速回收直到子进程退出,
+            -- 其间结果文件出现仍照常应用;提示由自身 timeout=30 收回
+            UIManager:scheduleIn(10,poll)
+            return
+        end
+        if os.time()>poll_deadline+300 then
+            -- 硬顶(HTTP 超时上界理应兜住,理论不该到这):放弃占位与结果
+            if self._comment_prefetch_pid==pid then self._comment_prefetch_pid=nil end
+            close_notice()
+            logger.warn("[撷思][ReviewComments] prefetch poll hard cap:",result_path)
+            return
+        end
+        UIManager:scheduleIn(0.5,poll)
     end
-    UIManager:scheduleIn(0,function() step(1) end)
+    UIManager:scheduleIn(0.5,poll)
 end
 
 -- 查看想法评论(长按菜单入口,实施文档 §6「加载与错误处理」):
@@ -2298,7 +2370,10 @@ function Plugin:_show_thought_comments(item,book_id,popup)
     end
     local function blocking_load()
         -- 短超时阻塞请求:先刷出提示,避免墨水屏在请求期间毫无反馈。
-        local notice=InfoMessage:new{text="正在加载评论…"}
+        -- toast=true(F5 同款):请求期间 UI 循环被同步 HTTP 占死,普通
+        -- InfoMessage 的点击关闭根本处理不到,看起来"点不掉";toast 通道
+        -- 不截停事件,提示只是告知,配合续期冷静期把阻塞时间压到有限。
+        local notice=InfoMessage:new{text="正在加载评论…",toast=true}
         UIManager:show(notice)
         pcall(function() UIManager:forceRePaint() end)
         local result=ReviewComments.cache_get(cache,review_id,
@@ -2327,10 +2402,82 @@ function Plugin:_show_thought_comments(item,book_id,popup)
     end)
     logger.info("[撷思][ReviewComments] cache miss, connected=", tostring(connected))
     if connected then
-        local result=blocking_load()
-        logger.info("[撷思][ReviewComments] blocking_load done ok=",
-            tostring(type(result)=="table" and result.ok or result))
-        return result
+        -- 子进程后台获取(2026-10-07 三轮反馈:同步 HTTP 占死 UI 循环,
+        -- 请求期间点击事件根本处理不到,提示永远"点不掉"——冷静期只是
+        -- 缩短阻塞,没有解决阻塞本身)。子进程跑请求,父循环继续处理
+        -- 输入:点按屏幕随时关提示/关弹窗;子进程完成即落缓存,稍后
+        -- 重新打开秒出;结果迟到且弹窗仍在则直接投递。
+        local FFIUtil=require("ffi/util")
+        local result_path=self.store.temp_dir.."/review-comments-"
+            ..tostring(os.time()).."-"..tostring(math.random(100000,999999))..".json"
+        local child=function()
+            -- 子进程兜底:cache_get 的 loader 自带 pcall,但 normalize/
+            -- sqlite 回写仍可能抛错——异常一旦穿透 runInSubProcess,子进程
+            -- 会继续执行父进程代码(双 UI 循环)。全 body pcall,无论成败
+            -- 都写结果文件并 _exit。
+            local ok_child,result=pcall(function()
+                return ReviewComments.cache_get(cache,review_id,
+                    function() return self:_request_review_comments(review_id) end,
+                    book_id,os.time(),ttl)
+            end)
+            local ok_json,encoded=pcall(function()
+                return require("pickthought.json").encode(
+                    ok_child and (result or {ok=false})
+                        or {ok=false,error="network",
+                            message=ReviewComments.message_for("network")})
+            end)
+            if ok_json then
+                U.atomic_write(result_path,encoded,true)
+            end
+            local C=require("ffi")
+            C._exit(0)
+        end
+        local ok_pid,pid=pcall(FFIUtil.runInSubProcess,child,false,false)
+        if not ok_pid or not pid then
+            -- fork 失败(极端低内存):回退同步加载,行为与旧版一致。
+            deliver(blocking_load())
+            return nil
+        end
+        local poll_deadline=os.time()+180
+        local poll
+        poll=function()
+            local child_done=not U.file_exists("/proc/"..tostring(pid))
+            if U.file_exists(result_path) then
+                local raw=U.read_file(result_path,true)
+                os.remove(result_path)
+                pcall(function() FFIUtil.isSubProcessDone(pid) end) -- 回收防僵尸
+                local ok_decode,decoded=pcall(function()
+                    return require("pickthought.json").decode(raw or "")
+                end)
+                logger.info("[撷思][ReviewComments] subprocess fetch done ok=",
+                    tostring(type(decoded)=="table" and decoded.ok or tostring(decoded):sub(1,40)))
+                deliver(ok_decode and decoded or nil)
+                return
+            end
+            if child_done then
+                -- 子进程无结果退出( fork 前失败等):按网络错误收尾
+                logger.warn("[撷思][ReviewComments] child exited without result")
+                deliver(nil)
+                return
+            end
+            if os.time()>poll_deadline then
+                -- 到期不放弃轮询(CodeRabbit #31):降级为慢速回收直到
+                -- 子进程退出(僵尸靠结果/退出分支的 waitpid 逐轮回收),
+                -- 其间若结果文件出现仍照常投递
+                UIManager:scheduleIn(10,poll)
+                return
+            end
+            if os.time()>poll_deadline+300 then
+                -- 硬顶(HTTP 超时上界理应兜住,理论不该到这):放弃结果
+                pcall(function() os.remove(result_path) end)
+                logger.warn("[撷思][ReviewComments] subprocess poll hard cap:",
+                    result_path)
+                return
+            end
+            UIManager:scheduleIn(0.5,poll)
+        end
+        UIManager:scheduleIn(0.5,poll)
+        return nil
     end
 
     -- 3) 离线:异步开 Wi-Fi,就绪后补发请求(实施文档 §7)。

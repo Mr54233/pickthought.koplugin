@@ -38,7 +38,8 @@ local FaceFactory = {
 FaceFactory.VARIANTS = {
     content = 0.9,  -- thought body
     quote   = 0.9,  -- quoted abstract (italic, gray)
-    meta    = 0.9,  -- author line; keep it as readable as the thought body
+    meta    = 0.72, -- author line(上游 #193 双列头:略小更利落)
+    likes   = 0.68, -- likes column(右列,再小一档)
 }
 
 function FaceFactory:init()
@@ -309,6 +310,28 @@ function FaceFactory:getFace(doc_font_name, size, variant)
     if not face then
         local ok, fallback = pcall(Font.getFace, Font, "cfont", v_size)
         if ok then face = fallback end
+    end
+
+    -- meta 变体加半强度 embolden(上游 #193):双列头里作者名比正文轻粗,
+    -- 便于与内容区分。font.lua 的懒初始化只覆盖 Font:getFace 造的 face,
+    -- 自建 face 必须把返回值存到 face.embolden_half_strength——rendertext
+    -- 的 getGlyphByIndex(bold=true) 按它取强度(CodeRabbit #31:此前调用
+    -- 后丢弃返回值,半粗从未生效)。fallback face 跨变体共享,但该字段
+    -- 只在 meta 片段 bold=true 时被读取,共享无副作用;单个 fallback 不
+    -- 支持时跳过(paginator 侧按字段存在与否退回不加粗)。
+    if face and variant == "meta" then
+        local function apply_embolden(f)
+            if f and f.ftsize and not f.embolden_half_strength
+                and type(f.ftsize.getEmboldenHalfStrength) == "function" then
+                pcall(function()
+                    f.embolden_half_strength = f.ftsize:getEmboldenHalfStrength(3 / 8)
+                end)
+            end
+        end
+        apply_embolden(face)
+        if type(face.fallbacks) == "table" then
+            for _, f in pairs(face.fallbacks) do apply_embolden(f) end
+        end
     end
 
     if face then

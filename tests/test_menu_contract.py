@@ -143,21 +143,34 @@ class MenuContractTests(unittest.TestCase):
 
     def test_comment_prefetch_notice_does_not_block_input(self):
         # F4/F5(真机反馈 2026-09-13):预取提示必须不挡弹窗。
-        # F5 深层根因:UIManager:sendEvent 只把顶层未消费的事件发给
-        # active_widgets/is_always_active 的下层 widget,提示层作为普通 widget
-        # 压在弹窗上必然挡死分发——必须走 toast 通道(源码:toast 从不截停
-        # 事件传播)。dismissable=false 让提示自身不吃点击、获取期间稳定显示。
-        # "查看评论"的加载提示是用户主动触发的阻塞请求,保持原语义。
+        # 历史演变:阻塞时代请求占死 UI 循环,toast 通道(从不截停事件
+        # 传播)是唯一能让输入到达下层的方式;2026-10-07 预取/查看评论
+        # 双双子进程化后,获取不再受 UI 影响,提示语义按用户最新拍板定稿:
+        # 普通 InfoMessage 压在栈顶——第一击被全屏 TapClose 消费只关提示,
+        # 第二击才落到书页/弹窗(toast 通道一击两用"关提示+翻页",
+        # 真机反馈"不符合逻辑");dismissable=false(不可点掉)已废除。
+        # "查看评论"的加载提示仅存在于 fork 失败回退的同步路径(请求期间
+        # UI 冻结,toast 与否无观察差异),保持 toast 通道不变。
         source = (ROOT / "pickthought.koplugin/main.lua").read_text(encoding="utf-8")
         self.assertIn(
-            'InfoMessage:new{text="正在获取评论数…",dismissable=false,timeout=30,toast=true}',
+            'InfoMessage:new{text="正在获取评论数…",timeout=30}',
             source,
-            "预取提示必须走 toast 通道且 dismissable=false(获取期间弹窗可关闭)",
+            "预取提示必须是普通 InfoMessage:可点掉,且第一击只关提示不穿透",
+        )
+        notice_seg = source.split('text="正在获取评论数…"', 1)[1][:60]
+        self.assertNotIn(
+            "toast=true", notice_seg,
+            "预取提示不得走 toast 通道(一击两用:关提示+翻页,不符合逻辑)",
         )
         blocker = source.split('text="正在加载评论…"', 1)[1][:80]
-        self.assertNotIn(
+        self.assertIn(
             "toast=true", blocker,
-            "查看评论的加载提示保持阻塞语义(用户主动请求,不属 F4/F5 范围)",
+            "查看评论回退路径(fork 失败同步加载)保持 toast 通道",
+        )
+        self.assertNotIn(
+            "dismissable=false",
+            blocker,
+            "查看评论的加载提示同样必须可点掉",
         )
 
     def test_book_actions_has_single_reset_and_restore_entries(self):

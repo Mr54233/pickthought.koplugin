@@ -83,7 +83,9 @@ end
 function Paginator.textPieceMetrics(face)
     local line_h = math.floor((1 + 0.2) * face.size + 0.5)
     local face_height, face_ascender = face.ftsize:getHeightAndAscender()
-    local extra = math.max(0, face_height - line_h)
+    -- ceil 修齐(上游 #193):FreeType 可能返回小数高度,不取整会让
+    -- piece_h 带小数、页坐标回卷把上一页末行重排进下一页=翻页重字。
+    local extra = math.max(0, math.ceil(face_height) - line_h)
     local line_heights_diff = math.floor(line_h - face_height)
     local baseline
     if line_heights_diff >= 0 then
@@ -94,7 +96,9 @@ function Paginator.textPieceMetrics(face)
     return line_h, extra, baseline
 end
 
-local function shapeLineCached(xtext, line)
+-- shapeLineCached 增强(上游 #193):显式传入对齐与目标宽度,
+-- 双列 meta 的 likes 列(右对齐+定宽)依赖此参数;不传时行为不变。
+local function shapeLineCached(xtext, line, align, width)
     if line._shaped then return end
     line._shaped = true
     if not line.end_offset or line.end_offset < line.offset then
@@ -102,8 +106,8 @@ local function shapeLineCached(xtext, line)
         return
     end
     local xshaping = xtext:shapeLine(line.offset, line.end_offset)
-    local alignment = xshaping.para_is_rtl and "right" or "left"
-    local targeted = line.targeted_width or line.width or 0
+    local alignment = align or (xshaping.para_is_rtl and "right" or "left")
+    local targeted = width or line.targeted_width or line.width or 0
     local pen_x = 0
     if alignment == "right" then
         pen_x = (targeted - (line.width or xshaping.width or 0))
@@ -125,6 +129,13 @@ local function shapeLineCached(xtext, line)
     line.para_is_rtl = xshaping.para_is_rtl
 end
 
+-- meta 半粗的前提:face 预存了 embolden_half_strength(face_factory 只给
+-- meta 变体存);缺失时退回不加粗——rendertext 的 renderGlyphByIndex 拿到
+-- nil 强度会在 C 层出错。
+local function glyph_bold_capable(face)
+    return face ~= nil and face.embolden_half_strength ~= nil
+end
+
 --- Rasterize a text piece from pagination-cached XText.
 function Paginator.renderTextPiece(piece)
     if not piece or not piece.xtext or not piece.lines then return nil end
@@ -144,15 +155,21 @@ function Paginator.renderTextPiece(piece)
 
     local y = piece.baseline or math.floor(line_h * 0.8)
     local face = piece.face
+    -- meta 变体半强度加粗(上游 #193):强度值由 face_factory 预存,
+    -- 缺失(fallback 链不支持)时保持原样不加粗,避免 C 层拿到 nil
+    local bold = piece.variant == "meta"
+        and glyph_bold_capable(face)
+        or false
     for i = 1, #piece.lines do
         local line = piece.lines[i]
-        shapeLineCached(piece.xtext, line)
+        shapeLineCached(piece.xtext, line, piece.align, piece.width)
         if line.xglyphs then
             for _, xglyph in ipairs(line.xglyphs) do
                 if not xglyph.no_drawing then
                     local glyph_face = face.getFallbackFont(xglyph.font_num)
                     if glyph_face then
-                        local glyph = RenderText:getGlyphByIndex(glyph_face, xglyph.glyph, false, false)
+                        local glyph = RenderText:getGlyphByIndex(glyph_face,
+                            xglyph.glyph, bold and glyph_bold_capable(glyph_face), false)
                         if glyph and glyph.bb then
                             local dx = xglyph.x0 + glyph.l + xglyph.x_offset
                             local dy = y - glyph.t - xglyph.y_offset
@@ -272,10 +289,12 @@ function Paginator.pieceVisibleRange(piece, p0, p1)
     local pbot = math.min(p1, piece.y + piece.piece_h)
     if pbot <= ptop then return nil end
 
-    -- Page boundaries normally coincide with line bounds. Keep the exact
-    -- pixel intersection here as a defensive guard for rounding or a future
-    -- caller that supplies a boundary inside a text line.
+    -- separator 等"整块"piece(无行结构):整体按单行处理,
+    -- 可见性只由 y 区间决定(上游 #193 分隔线跨页裁剪依赖此路径)。
     local line_bounds = piece.line_bounds
+    if not line_bounds and not piece.n_lines then
+        line_bounds = {{top = piece.y, bottom = piece.y + piece.piece_h}}
+    end
     if not line_bounds then
         line_bounds = {}
         for k = 1, piece.n_lines or 0 do

@@ -166,7 +166,7 @@ function PageRenderer:paginate()
     local boundaries = {}
     local y = 0
 
-    local function addTextPiece(variant, text, fg, width, x, keep_next)
+    local function addTextPiece(variant, text, fg, width, x, keep_next, opts)
         local face = FaceFactory:getFace(self.doc_font_name, base_size, variant)
         if not face then return false end
         local line_h, extra, baseline = Paginator.textPieceMetrics(face)
@@ -189,6 +189,8 @@ function PageRenderer:paginate()
             n_lines = n_lines, line_h = line_h, piece_h = piece_h,
             baseline = baseline, xtext = paginated.xtext, lines = paginated.lines,
             line_bounds = line_bounds,
+            align = opts and opts.align or nil,
+            targeted_width = opts and opts.targeted_width or nil,
         }
         if keep_next and n_lines >= 1 then
             boundaries[#boundaries + 1] = {
@@ -209,7 +211,105 @@ function PageRenderer:paginate()
     end
 
     for _, block in ipairs(blocks) do
-        if block.kind == "paragraph" then
+        if block.kind == "separator" then
+            -- 分隔线与其后作者行同属一个条目的 header(上游 #193):
+            -- 线的边界归到 meta 行,长按定位才能覆盖整组视觉元素。
+            y = y + math.floor(base_size * (block.spacing_before or 0) + 0.5)
+            local thickness = math.max(1, Screen:scaleBySize(1))
+            pieces[#pieces + 1] = {
+                kind = "separator", fg = block.fg,
+                x = 0, y = y, width = text_w, piece_h = thickness,
+            }
+            y = y + thickness + math.floor(base_size * (block.spacing_after or 0) + 0.5)
+        elseif block.kind == "meta" then
+            -- meta 行(上游 #193 双列):likes 右列先量宽(上限 text_w*0.4),
+            -- author 左列用剩余宽度;两列基线对齐,行边界含分隔线起点。
+            -- 零赞零评论(likes_text=nil)时走单列整宽,作者名照样渲染
+            -- (此前该分支要求 likes_text,0 赞条目的作者名整行消失)。
+            y = y + math.floor(base_size * (block.spacing_before or 0) + 0.5)
+            local header_top = y
+            local likes_piece = nil
+            if block.likes_text then
+            local likes_width_max = math.max(1, math.floor(text_w * 0.4))
+            local likes_face = FaceFactory:getFace(self.doc_font_name, base_size, "likes")
+            if likes_face then
+                local likes_line_h, likes_extra, likes_baseline =
+                    Paginator.textPieceMetrics(likes_face)
+                local likes_paginated = Paginator.paginateText(
+                    block.likes_text, likes_face, likes_width_max)
+                local likes_w = 0
+                for _, line in ipairs(likes_paginated.lines or {}) do
+                    likes_w = math.max(likes_w, line.width or 0)
+                end
+                likes_w = math.max(1, math.min(likes_width_max,
+                    math.ceil(likes_w)))
+                likes_piece = {
+                    kind = "text", variant = "likes", text = block.likes_text,
+                    fg = block.likes_fg, face = likes_face,
+                    width = likes_w, x = text_w - likes_w, y = y,
+                    n_lines = likes_paginated.n_lines, line_h = likes_line_h,
+                    piece_h = likes_paginated.n_lines * likes_line_h + likes_extra,
+                    baseline = likes_baseline,
+                    xtext = likes_paginated.xtext, lines = likes_paginated.lines,
+                    line_bounds = {}, align = "right", targeted_width = likes_w,
+                }
+                for k = 1, likes_piece.n_lines do
+                    likes_piece.line_bounds[k] = {
+                        top = y + (k - 1) * likes_line_h,
+                        bottom = y + k * likes_line_h,
+                    }
+                end
+            end
+            end
+            local author_width = likes_piece
+                and math.max(1, likes_piece.x - math.floor(base_size * 0.6 + 0.5))
+                or text_w
+            -- 记录 likes 构造时的 y:author 排版会推进 y,lb 偏移必须以
+            -- 构造点为基准(CodeRabbit 式边界 bug:用推进后的 y 算偏移
+            -- 会得出 0,likes 行边界留在构造位置导致整块不可见)。
+            local likes_base_y = y
+            local author_added = addTextPiece("meta", block.text, block.fg,
+                author_width, 0, false)
+            if author_added and likes_piece then
+                -- 基线对齐:likes 列顶部下移,与 author 首行基线一致
+                local author_piece = pieces[#pieces]
+                likes_piece.y = likes_base_y + math.max(0,
+                    (author_piece.baseline or 0) - (likes_piece.baseline or 0))
+                local lb_shift = likes_piece.y - likes_base_y
+                for k, bounds in ipairs(likes_piece.line_bounds) do
+                    bounds.top = bounds.top + lb_shift
+                    bounds.bottom = bounds.bottom + lb_shift
+                end
+                pieces[#pieces + 1] = likes_piece
+                local row_h = math.max(author_piece.piece_h,
+                    likes_piece.y - likes_base_y + likes_piece.piece_h)
+                -- 边界注册顺序必须按 top 单调:likes 行(同 y 起)在 author
+                -- 多行边界之前插入;computePages 顺序遍历,乱序会切断 likes
+                -- 的可见区间(它整块不可见)。
+                local author_bounds_count = #author_piece.line_bounds
+                local insert_at = #boundaries - author_bounds_count + 1
+                for k = #likes_piece.line_bounds, 1, -1 do
+                    local bounds = likes_piece.line_bounds[k]
+                    table.insert(boundaries, insert_at,
+                        { top = bounds.top, bottom = bounds.bottom })
+                end
+                -- meta 行边界覆盖整组 header(分隔线+双列),供长按定位;
+                -- 必须插到组首:computePages 顺序遍历依赖 top 单调,追加
+                -- 到尾部会乱序(CodeRabbit #31)
+                table.insert(boundaries, insert_at, {
+                    top = header_top, bottom = likes_base_y + row_h,
+                })
+                y = likes_base_y + row_h
+            elseif author_added then
+                local author_piece = pieces[#pieces]
+                -- 同上:汇总边界插到作者行界之前,保持 top 单调
+                table.insert(boundaries, #boundaries - #author_piece.line_bounds + 1, {
+                    top = header_top,
+                    bottom = author_piece.y + author_piece.piece_h,
+                })
+            end
+            y = y + math.floor(base_size * (block.spacing_after or 0) + 0.5)
+        elseif block.kind == "paragraph" then
             y = y + math.floor(base_size * (block.spacing_before or 0) + 0.5)
             addTextPiece(block.variant, block.text, block.fg, text_w, 0,
                 block.variant == "meta")
@@ -303,7 +403,29 @@ function PageRenderer:renderPage(page_idx, page_starts)
 
     for _, piece in ipairs(self._page_pieces[page_idx] or {}) do
         local r = Paginator.pieceVisibleRange(piece, p0, p1)
-        if r and piece.kind == "text" then
+        if r and piece.kind == "separator" then
+            -- 分隔线(上游 #193):在 piece.y 处画一条 text_w 宽、piece_h 粗的灰线,
+            -- 随页面位图一起被裁剪(r.dest_y/r.src_y 处理跨页)。
+            -- 颜色取用与现有渲染兼容:灰度值直接走 Color8(有桩环境可能缺构造器,
+            -- 此时退回 paintRect 的默认白写——线缺失但不崩)。
+            local line_y = math.floor(r.dest_y + 0.5)
+            local line_h = math.min(math.ceil(r.src_h), h - line_y)
+            if line_y >= 0 and line_h > 0 then
+                local ok_paint, paint_err = pcall(function()
+                    if Screen:isColorEnabled() then
+                        bb:paintRectRGB32(0, line_y, self.text_w, line_h,
+                            Blitbuffer.ColorRGB32(piece.fg, 0xFF))
+                    else
+                        bb:paintRect(0, line_y, self.text_w, line_h,
+                            Blitbuffer.Color8(piece.fg))
+                    end
+                end)
+                if not ok_paint then
+                    PopupDiagnostic.log("popup_separator_paint_fallback",
+                        {err = tostring(paint_err)})
+                end
+            end
+        elseif r and piece.kind == "text" then
             local text_bb = self:_getPieceTextBB(piece)
             if text_bb then
                 local source_height = text_bb.getHeight and text_bb:getHeight() or piece.piece_h
