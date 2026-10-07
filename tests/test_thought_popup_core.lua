@@ -151,7 +151,7 @@ T.case("想法弹窗内容构建保留引用作者点赞并支持 Unicode 清理
     T.eq(centered[1].likes_text, nil, "零赞不产出 likes 列")
 end)
 
-T.case("meta 行条件渲染:全空不渲染,有评论数追加 ❝ N", function()
+T.case("meta 行条件渲染:全空不渲染,计数与点赞同列右置", function()
     local empty = ContentBuilder.build({{
         abstract = "想法原文", author = "", content = "", likes_count = 0,
     }}, {})
@@ -163,14 +163,15 @@ T.case("meta 行条件渲染:全空不渲染,有评论数追加 ❝ N", function
         likes_count = 2, comment_count = 5,
     }}, {skip_quote = true})
     T.eq(#with_all, 2, "meta + 正文两个块")
-    T.eq(with_all[1].text, "甲 · ❝ 5", "评论数拼在作者尾(上游无此列,撷思扩展)")
-    T.eq(with_all[1].likes_text, "♥ 2", "点赞仍独立右列")
+    T.eq(with_all[1].text, "甲", "左列只留作者名")
+    T.eq(with_all[1].likes_text, "♥ 2 · ❝ 5", "点赞与评论数同列右置")
 
     local anonymous = ContentBuilder.build({{
         abstract = "", author = "", content = "正文", comment_count = 1,
     }}, {skip_quote = true})
-    T.eq(anonymous[1].text, "微信读书用户 · ❝ 1",
+    T.eq(anonymous[1].text, "微信读书用户",
         "有评论数但无作者时仍渲染 meta 行并兜底作者名")
+    T.eq(anonymous[1].likes_text, "❝ 1", "零赞时评论数独占右列")
 end)
 
 T.case("R2 separator:多条目间产分隔线,首条无", function()

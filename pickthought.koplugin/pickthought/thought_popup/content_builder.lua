@@ -192,20 +192,26 @@ function ContentBuilder.build(items, opts)
         local comment_count = tonumber(item.comment_count) or 0
         if author ~= "" or likes > 0 or comment_count > 0 then
             if author == "" then author = "微信读书用户" end
-            -- 双列样式(上游 #193):author 左列 / likes 右列分字段,
-            -- 排版层(pages.lua)负责右对齐与基线对齐;不再拼单串。
-            -- ❝ 评论数(撷思扩展,上游无此列)拼在作者名尾部,维持单列文字。
+            -- 双列样式(上游 #193):author 左列,右列承载 ♥ 与 ❝ 两个
+            -- 计数字段(2026-10-07 真机反馈:❝ 留在作者尾看着像作者名
+            -- 的一部分,应与点赞同列右置);零赞时右列纯 "❝ M" 照样右对齐。
+            -- ❝(U+275D,实心引号饰符,Dingbats 区):与 ♥ 同为实心图标,
+            -- 语义"说过的话"。刻意不用 4 字节 emoji——meta 块 XText
+            -- shaping 走 emoji 回退字形有 SIGBUS 前科(sanitize_meta 因此存在)。
+            local meta_right
+            if likes > 0 then
+                meta_right = "♥ " .. tostring(likes)
+            end
             if comment_count > 0 then
-                -- ❝(U+275D,实心引号饰符,Dingbats 区):与 ♥ 同为实心图标,
-                -- 语义"说过的话"。刻意不用 4 字节 emoji——meta 块 XText
-                -- shaping 走 emoji 回退字形有 SIGBUS 前科(sanitize_meta 因此存在)。
-                author = author .. " · ❝ " .. tostring(comment_count)
+                meta_right = meta_right
+                    and (meta_right .. " · ❝ " .. tostring(comment_count))
+                    or ("❝ " .. tostring(comment_count))
             end
             blocks[#blocks + 1] = {
                 kind = "meta",
                 variant = "meta",
                 text = author,
-                likes_text = likes > 0 and ("♥ " .. tostring(likes)) or nil,
+                likes_text = meta_right,
                 likes_fg = adjustedGray(7, opts.contrast),
                 fg = adjustedGray(9, opts.contrast),
                 spacing_before = item_index > 1 and 0.18 or nil,
