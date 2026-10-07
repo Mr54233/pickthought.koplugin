@@ -129,6 +129,13 @@ local function shapeLineCached(xtext, line, align, width)
     line.para_is_rtl = xshaping.para_is_rtl
 end
 
+-- meta 半粗的前提:face 预存了 embolden_half_strength(face_factory 只给
+-- meta 变体存);缺失时退回不加粗——rendertext 的 renderGlyphByIndex 拿到
+-- nil 强度会在 C 层出错。
+local function glyph_bold_capable(face)
+    return face ~= nil and face.embolden_half_strength ~= nil
+end
+
 --- Rasterize a text piece from pagination-cached XText.
 function Paginator.renderTextPiece(piece)
     if not piece or not piece.xtext or not piece.lines then return nil end
@@ -148,6 +155,11 @@ function Paginator.renderTextPiece(piece)
 
     local y = piece.baseline or math.floor(line_h * 0.8)
     local face = piece.face
+    -- meta 变体半强度加粗(上游 #193):强度值由 face_factory 预存,
+    -- 缺失(fallback 链不支持)时保持原样不加粗,避免 C 层拿到 nil
+    local bold = piece.variant == "meta"
+        and glyph_bold_capable(face)
+        or false
     for i = 1, #piece.lines do
         local line = piece.lines[i]
         shapeLineCached(piece.xtext, line, piece.align, piece.width)
@@ -156,7 +168,8 @@ function Paginator.renderTextPiece(piece)
                 if not xglyph.no_drawing then
                     local glyph_face = face.getFallbackFont(xglyph.font_num)
                     if glyph_face then
-                        local glyph = RenderText:getGlyphByIndex(glyph_face, xglyph.glyph, false, false)
+                        local glyph = RenderText:getGlyphByIndex(glyph_face,
+                            xglyph.glyph, bold and glyph_bold_capable(glyph_face), false)
                         if glyph and glyph.bb then
                             local dx = xglyph.x0 + glyph.l + xglyph.x_offset
                             local dy = y - glyph.t - xglyph.y_offset

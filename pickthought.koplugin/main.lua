@@ -2305,14 +2305,23 @@ function Plugin:_prefetch_visible_comment_counts(popup,book_id)
             return
         end
         if not U.file_exists("/proc/"..tostring(pid)) then
+            -- /proc 消失(顶部 waitpid 已回收)才释放单飞占位:提前清 pid
+            -- 会放行新轮次与仍存活的子进程双跑(双倍请求速率,CodeRabbit #31)
             if self._comment_prefetch_pid==pid then self._comment_prefetch_pid=nil end
             close_notice()
             return
         end
         if os.time()>poll_deadline then
+            -- 到期不放弃轮询、不清单飞占位:降级为慢速回收直到子进程退出,
+            -- 其间结果文件出现仍照常应用;提示由自身 timeout=30 收回
+            UIManager:scheduleIn(10,poll)
+            return
+        end
+        if os.time()>poll_deadline+300 then
+            -- 硬顶(HTTP 超时上界理应兜住,理论不该到这):放弃占位与结果
             if self._comment_prefetch_pid==pid then self._comment_prefetch_pid=nil end
             close_notice()
-            logger.warn("[撷思][ReviewComments] prefetch poll timeout:",result_path)
+            logger.warn("[撷思][ReviewComments] prefetch poll hard cap:",result_path)
             return
         end
         UIManager:scheduleIn(0.5,poll)
@@ -2452,7 +2461,17 @@ function Plugin:_show_thought_comments(item,book_id,popup)
                 return
             end
             if os.time()>poll_deadline then
-                logger.warn("[撷思][ReviewComments] subprocess poll timeout, keep background")
+                -- 到期不放弃轮询(CodeRabbit #31):降级为慢速回收直到
+                -- 子进程退出(僵尸靠结果/退出分支的 waitpid 逐轮回收),
+                -- 其间若结果文件出现仍照常投递
+                UIManager:scheduleIn(10,poll)
+                return
+            end
+            if os.time()>poll_deadline+300 then
+                -- 硬顶(HTTP 超时上界理应兜住,理论不该到这):放弃结果
+                pcall(function() os.remove(result_path) end)
+                logger.warn("[撷思][ReviewComments] subprocess poll hard cap:",
+                    result_path)
                 return
             end
             UIManager:scheduleIn(0.5,poll)

@@ -293,17 +293,20 @@ function PageRenderer:paginate()
                     table.insert(boundaries, insert_at,
                         { top = bounds.top, bottom = bounds.bottom })
                 end
-                -- meta 行边界覆盖整组 header(分隔线+双列),供长按定位
-                boundaries[#boundaries + 1] = {
+                -- meta 行边界覆盖整组 header(分隔线+双列),供长按定位;
+                -- 必须插到组首:computePages 顺序遍历依赖 top 单调,追加
+                -- 到尾部会乱序(CodeRabbit #31)
+                table.insert(boundaries, insert_at, {
                     top = header_top, bottom = likes_base_y + row_h,
-                }
+                })
                 y = likes_base_y + row_h
             elseif author_added then
                 local author_piece = pieces[#pieces]
-                boundaries[#boundaries + 1] = {
+                -- 同上:汇总边界插到作者行界之前,保持 top 单调
+                table.insert(boundaries, #boundaries - #author_piece.line_bounds + 1, {
                     top = header_top,
                     bottom = author_piece.y + author_piece.piece_h,
-                }
+                })
             end
             y = y + math.floor(base_size * (block.spacing_after or 0) + 0.5)
         elseif block.kind == "paragraph" then

@@ -272,49 +272,55 @@ end)
 
 T.case("全部合法宽高组合均不重复或裁切跨页正文", function()
     local PopupDiagnostic = require('pickthought.diagnostic')
+    local diag_was_enabled = PopupDiagnostic.is_enabled()
     PopupDiagnostic.set_enabled(true)
-    -- 临时诊断:logger 桩是 noop,这里把 info 换成收集器接住构造/偏移数据
+    -- 临时诊断:logger 桩是 noop,这里把 info 换成收集器接住构造/偏移数据。
+    -- 断言失败也必须恢复诊断开关与 logger(CodeRabbit #31),收集统一在
+    -- 结束后输出,不再边收集边打印(否则 restore 时重复打印)。
     local diag_lines = {}
     local logger = require("logger")
     local orig_info = logger.info
-    logger.info = function(...) diag_lines[#diag_lines + 1] = table.concat({...}, " ")
-        print("[diag] " .. diag_lines[#diag_lines]) end
-    local restore_logger = function()
+    logger.info = function(...) diag_lines[#diag_lines + 1] = table.concat({...}, " ") end
+    local function restore_logger()
         logger.info = orig_info
-        for _, line in ipairs(diag_lines) do print("[diag] " .. line) end
+        PopupDiagnostic.set_enabled(diag_was_enabled)
     end
-    for width_percent = 60, 100, 5 do
-        for height_percent = 50, 90, 5 do
-            local renderer = PageRenderer:new{
-                items = items,
-                doc_font_size = 18,
-                doc_margins = {left = 20, right = 20, top = 10, bottom = 10},
-                height_ratio = height_percent / 100,
-                content_width = math.floor(600 * width_percent / 100),
-                contrast = 9,
-                skip_quote = true,
-            }
-            renderer:ensureLayout()
-            local viewport_h = math.max(1, math.floor(800 * height_percent / 100) - 180)
-            local pages = renderer:computePages(viewport_h)
-            T.ok(#pages > 1, width_percent .. "x" .. height_percent .. " 长内容跨页")
-            for index = 2, #pages do
-                T.ok(pages[index] > pages[index - 1], "页起点单调递增")
-            end
-            for page_index = 1, #pages do
-                local page_bb = renderer:renderPage(page_index, pages)
-                T.ok(page_bb and page_bb.getHeight, "每种宽高组合均生成页面位图")
-            end
-            for _, piece in ipairs(renderer.layout.pieces) do
-                if piece.kind == "separator" then
-                    assert_separator_range(renderer, pages, piece)
-                else
-                    assert_piece_ranges_contiguous(renderer, pages, piece)
+    local ok_case, err = pcall(function()
+        for width_percent = 60, 100, 5 do
+            for height_percent = 50, 90, 5 do
+                local renderer = PageRenderer:new{
+                    items = items,
+                    doc_font_size = 18,
+                    doc_margins = {left = 20, right = 20, top = 10, bottom = 10},
+                    height_ratio = height_percent / 100,
+                    content_width = math.floor(600 * width_percent / 100),
+                    contrast = 9,
+                    skip_quote = true,
+                }
+                renderer:ensureLayout()
+                local viewport_h = math.max(1, math.floor(800 * height_percent / 100) - 180)
+                local pages = renderer:computePages(viewport_h)
+                T.ok(#pages > 1, width_percent .. "x" .. height_percent .. " 长内容跨页")
+                for index = 2, #pages do
+                    T.ok(pages[index] > pages[index - 1], "页起点单调递增")
+                end
+                for page_index = 1, #pages do
+                    local page_bb = renderer:renderPage(page_index, pages)
+                    T.ok(page_bb and page_bb.getHeight, "每种宽高组合均生成页面位图")
+                end
+                for _, piece in ipairs(renderer.layout.pieces) do
+                    if piece.kind == "separator" then
+                        assert_separator_range(renderer, pages, piece)
+                    else
+                        assert_piece_ranges_contiguous(renderer, pages, piece)
+                    end
                 end
             end
         end
-    end
+    end)
     restore_logger()
+    for _, line in ipairs(diag_lines) do print("[diag] " .. line) end
+    if not ok_case then error(err, 0) end
 end)
 
 T.case("相同内容复用布局，尺寸或对比度变化会重新布局", function()

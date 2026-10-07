@@ -147,6 +147,10 @@ function Api:_web_call(fn)
         end
         error(retry_a, 0)
     end
+    -- 重试成功:会话其实还活着(刚才的续期交换只是暂时网络失败),
+    -- 解除冷静期——否则后续真到期需要续期时,会被残留冷却误拦成
+    -- "请重新扫码登录"(CodeRabbit #31)。
+    self._renew_fail_until = nil
     return retry_a, retry_b
 end
 

@@ -153,9 +153,14 @@ function Auth:_begin(refresh_count)
     UIManager:show(qr_notice)
     pcall(function() UIManager:forceRePaint() end)
     UIManager:scheduleIn(.05,function()
-        pcall(function() UIManager:close(qr_notice) end)
-        if gen~=self.generation or not self.active then return end
+        local function close_notice()
+            pcall(function() UIManager:close(qr_notice) end)
+        end
+        if gen~=self.generation or not self.active then close_notice() return end
         local ok,uid=pcall(self._uid,self)
+        -- 提示必须盖住 _uid 的整个阻塞期(两连发同步请求,慢网数秒),
+        -- 返回后再收——提前关会让阻塞期间毫无反馈(CodeRabbit #31)
+        close_notice()
         if not ok then
             logger.warn("[撷思][Auth] QR creation failed", tostring(uid):gsub("[%c]+"," "):sub(1,180))
             self:_show_retry("二维码获取失败："..Util.first_line(uid,120))
