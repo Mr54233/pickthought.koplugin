@@ -3,6 +3,7 @@ local logger=require("logger")
 local QRMessage=require("ui/widget/qrmessage")
 local ButtonDialog=require("ui/widget/buttondialog")
 local InputDialog=require("ui/widget/inputdialog")
+local InfoMessage=require("ui/widget/infomessage")
 local UIManager=require("ui/uimanager")
 local Cookies=require("pickthought.cookies")
 local Protocol=require("pickthought.protocol")
@@ -146,7 +147,13 @@ function Auth:_begin(refresh_count)
         self:_show_retry("网络不可用，暂时无法获取登录二维码。")
         return
     end
+    -- 二维码获取是两连发的同步请求(登录页+getLoginUid),网络慢时 UI 线程
+    -- 阻塞数秒,菜单点击后毫无反馈像卡死——先刷"正在获取"提示再阻塞。
+    local qr_notice=InfoMessage:new{text="正在获取登录二维码…"}
+    UIManager:show(qr_notice)
+    pcall(function() UIManager:forceRePaint() end)
     UIManager:scheduleIn(.05,function()
+        pcall(function() UIManager:close(qr_notice) end)
         if gen~=self.generation or not self.active then return end
         local ok,uid=pcall(self._uid,self)
         if not ok then

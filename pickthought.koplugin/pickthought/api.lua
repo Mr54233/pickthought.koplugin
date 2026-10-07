@@ -102,6 +102,12 @@ end
 -- 网络错误;会话确实被吊销→如实报登录过期;轮换成功→重试直接成功。
 function Api:renew_session()
     if self._renewing then return false, "登录状态正在续期" end
+    -- 冷静期(真机 2026-10-07):网页登录彻底失效(轮换被拒)时,续期交换
+    -- 每轮要 5~9s×2 次重试,评论/划线每个请求都阻塞一轮直到超时,前台
+    -- 弹窗长时间无法打断。交换失败后 5 分钟内快速失败,只报"登录已失效"。
+    if self._renew_fail_until and os.time() < self._renew_fail_until then
+        return true, "cooldown"
+    end
     self._renewing = true
     local exchanged, exchange_err = pcall(function()
         self.http:post_json(WEB .. "/web/login/renewal", {rq="%2Fweb%2Fbook%2Fread", ql=false},
@@ -110,9 +116,12 @@ function Api:renew_session()
     self._renewing = false
     if exchanged then
         logger.info("[撷思][Api] web session renewed")
+        self._renew_fail_until = nil
     else
         logger.warn("[撷思][Api] web renewal exchange error (retry will verify):",
             U.first_line(tostring(exchange_err), 160))
+        -- 交换失败进入冷静期;期间后续请求快速失败,到点后自动再试续期。
+        self._renew_fail_until = os.time() + 300
     end
     return true
 end
@@ -125,7 +134,20 @@ function Api:_web_call(fn)
     if not renewed then
         error(tostring(result) .. ";自动续期失败(" .. tostring(renew_err or "") .. "),请重新扫码登录")
     end
-    return fn()
+    if renew_err == "cooldown" then
+        -- 冷静期内:跳过续期交换直接失败,错误保持 auth 语义让上层提示登录失效
+        error(tostring(result) .. ";网页登录已失效(自动续期冷却中,请重新扫码登录)", 0)
+    end
+    local retry_ok, retry_a, retry_b = pcall(fn)
+    if not retry_ok then
+        if Http.is_auth_error(retry_a) then
+            -- 续期交换完成但重试仍鉴权失败:会话确实被吊销,进入冷静期,
+            -- 后续请求快速失败,不再每个请求阻塞一轮续期交换。
+            self._renew_fail_until = os.time() + 300
+        end
+        error(retry_a, 0)
+    end
+    return retry_a, retry_b
 end
 
 function Api:call(name, params, request_options)

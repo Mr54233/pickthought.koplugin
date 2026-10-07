@@ -173,14 +173,15 @@ function ContentBuilder.build(items, opts)
     end
 
     for item_index, item in ipairs(items) do
-        -- 条目分隔线(上游 #193 双列样式):第二条起,每条想法上方一条灰线,
-        -- 间距 0.54em 前后;第一条不画(无 leading separator)。
+        -- 条目分隔线(上游 #193 双列样式):第二条起,每条想法上方一条灰线;
+        -- 第一条不画(无 leading separator)。间距 0.30em 前后——上游 0.54em
+        -- 在撷思字号下条目间距明显偏松(真机反馈"行高太高"),压紧一档。
         if item_index > 1 then
             blocks[#blocks + 1] = {
                 kind = "separator",
                 fg = adjustedGray(10, opts.contrast),
-                spacing_before = 0.54,
-                spacing_after = 0.54,
+                spacing_before = 0.30,
+                spacing_after = 0.30,
             }
         end
 
@@ -207,8 +208,8 @@ function ContentBuilder.build(items, opts)
                 likes_text = likes > 0 and ("♥ " .. tostring(likes)) or nil,
                 likes_fg = adjustedGray(7, opts.contrast),
                 fg = adjustedGray(9, opts.contrast),
-                spacing_before = item_index > 1 and 0.27 or nil,
-                spacing_after = 0.27,
+                spacing_before = item_index > 1 and 0.18 or nil,
+                spacing_after = 0.18,
             }
         end
 

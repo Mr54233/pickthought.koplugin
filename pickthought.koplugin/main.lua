@@ -2298,7 +2298,10 @@ function Plugin:_show_thought_comments(item,book_id,popup)
     end
     local function blocking_load()
         -- 短超时阻塞请求:先刷出提示,避免墨水屏在请求期间毫无反馈。
-        local notice=InfoMessage:new{text="正在加载评论…"}
+        -- toast=true(F5 同款):请求期间 UI 循环被同步 HTTP 占死,普通
+        -- InfoMessage 的点击关闭根本处理不到,看起来"点不掉";toast 通道
+        -- 不截停事件,提示只是告知,配合续期冷静期把阻塞时间压到有限。
+        local notice=InfoMessage:new{text="正在加载评论…",toast=true}
         UIManager:show(notice)
         pcall(function() UIManager:forceRePaint() end)
         local result=ReviewComments.cache_get(cache,review_id,

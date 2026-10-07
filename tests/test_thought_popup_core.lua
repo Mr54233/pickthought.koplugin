@@ -183,8 +183,8 @@ T.case("R2 separator:多条目间产分隔线,首条无", function()
     for _, block in ipairs(blocks) do
         if block.kind == "separator" then
             separators = separators + 1
-            T.ok(block.spacing_before == 0.54 and block.spacing_after == 0.54,
-                "分隔线间距 0.54em")
+            T.ok(block.spacing_before == 0.30 and block.spacing_after == 0.30,
+                "分隔线间距 0.30em(压紧版)")
         elseif block.kind == "meta" then
             metas = metas + 1
         end
