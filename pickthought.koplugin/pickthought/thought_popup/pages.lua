@@ -221,13 +221,16 @@ function PageRenderer:paginate()
                 x = 0, y = y, width = text_w, piece_h = thickness,
             }
             y = y + thickness + math.floor(base_size * (block.spacing_after or 0) + 0.5)
-        elseif block.kind == "meta" and block.likes_text then
-            -- 双列 meta(上游 #193):likes 右列先量宽(上限 text_w*0.4),
+        elseif block.kind == "meta" then
+            -- meta 行(上游 #193 双列):likes 右列先量宽(上限 text_w*0.4),
             -- author 左列用剩余宽度;两列基线对齐,行边界含分隔线起点。
+            -- 零赞零评论(likes_text=nil)时走单列整宽,作者名照样渲染
+            -- (此前该分支要求 likes_text,0 赞条目的作者名整行消失)。
             y = y + math.floor(base_size * (block.spacing_before or 0) + 0.5)
             local header_top = y
-            local likes_width_max = math.max(1, math.floor(text_w * 0.4))
             local likes_piece = nil
+            if block.likes_text then
+            local likes_width_max = math.max(1, math.floor(text_w * 0.4))
             local likes_face = FaceFactory:getFace(self.doc_font_name, base_size, "likes")
             if likes_face then
                 local likes_line_h, likes_extra, likes_baseline =
@@ -256,10 +259,7 @@ function PageRenderer:paginate()
                         bottom = y + k * likes_line_h,
                     }
                 end
-                logger.info("[撷思][Diag] likes_bounds构建",
-                    "y=", tostring(y), "likes_piece.y=", tostring(likes_piece.y),
-                    "lb1=", tostring(likes_piece.line_bounds[1].top) .. "-" ..
-                    tostring(likes_piece.line_bounds[1].bottom))
+            end
             end
             local author_width = likes_piece
                 and math.max(1, likes_piece.x - math.floor(base_size * 0.6 + 0.5))

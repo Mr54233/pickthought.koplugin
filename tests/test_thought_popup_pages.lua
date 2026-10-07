@@ -373,3 +373,26 @@ T.case("R3 追加: 双列 likes piece 必须可见(基线对齐后行边界不�
         end
     end
 end)
+
+T.case("R2 追加: 零赞条目(likes_text=nil)的作者名必须渲染", function()
+    -- 真机回归(2026-10-07 截图):0 赞条目的 meta 块曾被排版分支条件
+    -- (meta AND likes_text)整块丢弃,作者名消失。
+    local renderer = PageRenderer:new{
+        items = {
+            {abstract = "", author = "甲", content = "内容一", likes_count = 0},
+            {abstract = "", author = "乙", content = "内容二", likes_count = 3},
+        },
+        doc_font_size = 18,
+        doc_margins = {left = 20, right = 20, top = 10, bottom = 10},
+        height_ratio = .70, contrast = 9,
+    }
+    renderer:ensureLayout()
+    local found_meta = false
+    for _, piece in ipairs(renderer.layout.pieces) do
+        if piece.variant == "meta" and piece.text == "甲" then
+            found_meta = true
+            T.ok(piece.piece_h > 0 and piece.width > 0, "零赞作者行有有效尺寸")
+        end
+    end
+    T.ok(found_meta, "零赞条目的作者行已渲染(不再整块丢弃)")
+end)
