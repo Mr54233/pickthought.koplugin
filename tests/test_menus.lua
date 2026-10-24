@@ -242,7 +242,9 @@ T.case("划线样式菜单:开关+线条三项+文字四项(A4)", function()
     local env = make_env()
     local rows = Menus.annotation_style_menu(env.plugin)
     T.eq(#rows, 8, "划线样式菜单共 8 项(1 开关 + 3 线条 + 4 文字)")
-    T.eq(type(rows[1].text) == "function" and rows[1].text(),
+    -- CodeRabbit PR#34:动态文案必须挂 text_func(Menu.getMenuText 只调它)。
+    T.eq(rows[1].text, nil, "开关行动态文案不挂在 text 上")
+    T.eq(type(rows[1].text_func) == "function" and rows[1].text_func(),
         "划线与想法：显示", "首行为显示开关,默认显示态文案")
     T.ok(rows[1].checked_func(), "默认勾选显示")
     T.eq(rows[2].text, "默认样式", "线条组第一项为默认样式")
@@ -277,7 +279,7 @@ T.case("划线样式菜单:开关切换隐藏态锁线条组,文字组不动(A4)
     -- 切到隐藏
     rows[1].callback()
     T.eq(env.prefs.annotations_visible, false, "开关回调写入隐藏偏好")
-    T.eq(type(rows[1].text) == "function" and rows[1].text(),
+    T.eq(type(rows[1].text_func) == "function" and rows[1].text_func(),
         "划线与想法：隐藏（点按不再弹窗）", "隐藏态文案")
     T.ok(not rows[1].checked_func(), "隐藏态不勾选")
     for i = 2, 4 do
@@ -289,7 +291,7 @@ T.case("划线样式菜单:开关切换隐藏态锁线条组,文字组不动(A4)
     -- 切回显示
     rows[1].callback()
     T.eq(env.prefs.annotations_visible, true, "开关回调写回显示偏好")
-    T.eq(type(rows[1].text) == "function" and rows[1].text(),
+    T.eq(type(rows[1].text_func) == "function" and rows[1].text_func(),
         "划线与想法：显示", "恢复显示态文案")
     for i = 2, 4 do
         T.eq(rows[i].enabled_func(), true, "恢复显示后线条组解锁")

@@ -2039,6 +2039,7 @@ end
 
 function Plugin:_teardown_thought_tap()
     if self._thought_tap_setup and self.ui and self.ui.unRegisterTouchZones then pcall(function() self.ui:unRegisterTouchZones({{id="pickthought_thought_popup",overrides={"tap_link"}}}) end) end
+    self:_remove_link_filter()
     self._thought_tap_setup=nil
 end
 
@@ -2592,7 +2593,57 @@ function Plugin:_setup_thought_tap()
     if self._thought_tap_setup or not self.ui or not self.ui.registerTouchZones then return end
     local ok,Device=pcall(require,"device"); if ok and Device.isTouchDevice and not Device:isTouchDevice() then return end
     self.ui:registerTouchZones({{id="pickthought_thought_popup",ges="tap",screen_zone={ratio_x=0,ratio_y=0,ratio_w=1,ratio_h=1},overrides={"tap_link"},handler=function(ges) return self:_on_thought_tap(ges) end}})
+    self:_install_link_filter()
     self._thought_tap_setup=true
+end
+
+-- CodeRabbit PR#34(2026-10-24):我们的 zone return false 后手势会继续落到
+-- KOReader 原生 tap_link(ReaderLink),后者会对 pickthought- 锚点走"打开链接"
+-- 路径。对齐上游 _installLinkFilter:隐藏态/边缘点击时把自家锚点从
+-- getLinkFromGes 结果中滤掉,并包 onTap 拦截 larger-area 路径,让事件
+-- 继续传播到翻页 zone。
+function Plugin:_install_link_filter()
+    if not self.ui or not self.ui.link or self._orig_getLinkFromGes then return end
+    local plugin=self
+    -- 1) 滤 getLinkFromGes(普通命中路径):命中自家锚点且应忽略时返回 nil。
+    self._orig_getLinkFromGes=self.ui.link.getLinkFromGes
+    self.ui.link.getLinkFromGes=function(link_self,ges)
+        local link=plugin._orig_getLinkFromGes(link_self,ges)
+        if not link then return nil end
+        local href=extract_thought_href(link,{},0)
+        if not href then return link end
+        if not plugin:annotations_visible() or plugin:_is_edge_tap(ges) then
+            return nil
+        end
+        return link
+    end
+    -- 2) 包 onTap(larger-area/onGoToPageLink 路径):应忽略且确实命中
+    -- 自家锚点时 return false,事件放行给翻页。
+    if self._orig_onTap then return end
+    self._orig_onTap=self.ui.link.onTap
+    self.ui.link.onTap=function(link_self,arg,ges)
+        if not plugin:annotations_visible() or plugin:_is_edge_tap(ges) then
+            local link=plugin._orig_getLinkFromGes(link_self,ges)
+            if link then
+                local href=extract_thought_href(link,{},0)
+                if href then return false end
+            end
+        end
+        return plugin._orig_onTap(link_self,arg,ges)
+    end
+end
+
+function Plugin:_remove_link_filter()
+    if self.ui and self.ui.link then
+        if self._orig_getLinkFromGes then
+            self.ui.link.getLinkFromGes=self._orig_getLinkFromGes
+            self._orig_getLinkFromGes=nil
+        end
+        if self._orig_onTap then
+            self.ui.link.onTap=self._orig_onTap
+            self._orig_onTap=nil
+        end
+    end
 end
 
 -- ===== 事件 =====
@@ -2628,6 +2679,7 @@ function Plugin:onCloseDocument()
     end
     pcall(function() require("pickthought.thought_popup").cleanup() end)
     self:_teardown_thought_tap()
+    self:_remove_link_filter()
 end
 
 function Plugin:onFlushSettings() self.store:flush() end

@@ -229,7 +229,9 @@ function M.annotation_style_menu(plugin)
     -- 划线显示开关(A4,2026-10-24):比线条样式组更高优先级;关闭时线条组置灰,
     -- 文字样式组不受影响。行为由 plugin:toggle_annotation_visibility 统一处理。
     rows[#rows + 1] = {
-        text = function()
+        -- CodeRabbit PR#34(2026-10-24):KOReader Menu.getMenuText 只在
+        -- text_func 存在时调用,函数必须挂 text_func 而非 text。
+        text_func = function()
             return plugin.store:preferences().annotations_visible == false
                 and "划线与想法：隐藏（点按不再弹窗）" or "划线与想法：显示"
         end,
