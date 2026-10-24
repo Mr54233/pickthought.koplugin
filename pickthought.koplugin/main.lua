@@ -607,7 +607,10 @@ function Plugin:maybe_auto_check_update(force)
             fresh.last_success_at=os.time()
             self.store:set("update_check",fresh)
             if current_settings.notify_update==true then
-                self:toast(string.format("撷思发现新版本 %s，请前往「更新」查看",tostring(m.version or "")),5)
+                -- A2: 提醒升级为三选弹窗,skip/snooze 状态经 should_notify 节流。
+                if self.updater:should_notify(m.version) then
+                    UIManager:nextTick(function() self:_show_update_prompt(m) end)
+                end
             end
             if current_settings.auto_update==true then
                 UIManager:nextTick(function() self:_do_update(m,true) end)
@@ -645,6 +648,47 @@ function Plugin:_show_update_log(m)
     UIManager:show(viewer)
 end
 
+-- 更新提醒三选弹窗(A2,上游 codex/update-notification-dialog 布局):
+-- 本次忽略(24h)/跳过此版本/立即更新。自动路径经 should_notify 节流,
+-- 手动检查无条件弹;关闭弹窗等价「本次忽略」(幂等守卫防双写)。
+local active_update_dialog -- filemanager/reader 实例共享,防双弹
+function Plugin:_show_update_prompt(m)
+    if active_update_dialog then return end
+    local version=tostring(m.version or "")
+    local resolved=false
+    local function choose(action)
+        if resolved then return false end
+        resolved=true
+        if action=="skip" then self.updater:skip_update(version)
+        elseif action~="install" then self.updater:snooze_update(version) end
+        active_update_dialog=nil
+        return true
+    end
+    local viewer
+    viewer=TextViewer:new{
+        title=string.format("发现新版本\n撷思 v%s → v%s",tostring(self.version),version),
+        title_multilines=true,
+        text=self:_update_log_text(m),text_type="general",auto_para_direction=true,
+        close_callback=function() choose("later") end,
+        buttons_table={
+            {{text="本次忽略(24小时后提醒)",callback=function()
+                if choose("later") then UIManager:close(viewer) end
+            end},
+            {text="跳过此版本",callback=function()
+                if choose("skip") then UIManager:close(viewer) end
+            end}},
+            {{text="立即更新",background=require("ffi/blitbuffer").COLOR_BLACK,callback=function()
+                if not choose("install") then return end
+                UIManager:close(viewer)
+                UIManager:scheduleIn(0.1,function() self:_do_update(m,false) end)
+            end}},
+        },
+    }
+    active_update_dialog=viewer
+    UIManager:show(viewer)
+    return viewer
+end
+
 function Plugin:show_update_log()
     local cached=self.updater:cached_info()
     if not self:is_online() then
@@ -677,16 +721,8 @@ function Plugin:check_update()
         Trapper:clear()
         if not m then self:_update_fail("检查更新失败：\n"..tostring(e or "未知错误")); return end
         if m.current then self:info("当前已是最新版本\n\n当前版本："..tostring(self.version)); return end
-        local text="发现新版本："..tostring(m.version)
-        if m.name and tostring(m.name)~="" then text=text.."\n"..Updater.normalize_notes(m.name) end
-        local notes=Updater.normalize_notes(m.notes)
-        if notes~="" then text=text.."\n\n更新说明：\n"..notes end
-        text=text.."\n\n是否下载并安装？"
-        -- 推迟到协程外,避免菜单重绘把确认框顶掉。
-        UIManager:nextTick(function()
-            UIManager:show(ConfirmBox:new{text=text,ok_text="下载并安装",
-                ok_callback=function() self:_do_update(m,false) end})
-        end)
+        -- A2: 手动检查无视 skip/snooze,直接弹三选。
+        UIManager:nextTick(function() self:_show_update_prompt(m) end)
     end)
 end
 
@@ -1014,10 +1050,11 @@ function Plugin:chapter_map_editor(path)
         UIManager:show(InfoMessage:new{text = "无法读取原书结构"})
         return
     end
+    -- B2: 状态标签右对齐(mandatory),行面只留章节名,与绑定搜索列表视觉统一。
     local function status_label(row)
-        if row.status == "manual" then return "[手动] " .. row.title end
-        if row.status == "miss" then return "[未匹配] " .. row.title end
-        return "[自动] " .. row.title
+        if row.status == "manual" then return "手动" end
+        if row.status == "miss" then return "未匹配" end
+        return "自动"
     end
     local function open_chapter(row)
         local sub_items = {}
@@ -1037,15 +1074,18 @@ function Plugin:chapter_map_editor(path)
             title = "指认「" .. row.title .. "」到本地文件",
             item_table = sub_items,
             items_per_page = 12,
+            is_borderless = true,
+            title_bar_fm_style = true,
         })
     end
     local items = {}
     local function add_section(label, section)
         if #section == 0 then return end
-        items[#items + 1] = {text = label, enabled = false}
+        items[#items + 1] = {text = label, enabled = false, separator = true}
         for _, row in ipairs(section) do
             local entry = {
-                text = status_label(row),
+                text = row.title,
+                mandatory = status_label(row),
                 callback = function() open_chapter(row) end,
             }
             if row.status == "manual" then
@@ -1058,13 +1098,15 @@ function Plugin:chapter_map_editor(path)
             items[#items + 1] = entry
         end
     end
-    add_section("── 手动指认(长按清除) ──", rows.manual)
-    add_section("── 未匹配(点击指认) ──", rows.miss)
-    add_section("── 自动匹配(点击可改指) ──", rows.auto)
+    add_section("手动指认(长按清除)", rows.manual)
+    add_section("未匹配(点击指认)", rows.miss)
+    add_section("自动匹配(点击可改指)", rows.auto)
     UIManager:show(Menu:new{
         title = "章节映射",
         item_table = items,
         items_per_page = 12,
+        is_borderless = true,
+        title_bar_fm_style = true,
     })
 end
 
