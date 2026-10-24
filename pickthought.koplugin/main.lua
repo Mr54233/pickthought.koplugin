@@ -652,14 +652,18 @@ function Plugin:maybe_auto_check_update(force)
         if ok and m and not m.current then
             fresh.last_success_at=os.time()
             self.store:set("update_check",fresh)
-            if current_settings.notify_update==true then
+            -- CodeRabbit PR#35(2026-10-24):auto_update 与 notify_update
+            -- 双开时,三选弹窗与静默 _do_update 同时排队,弹窗还没点完
+            -- 后台已装完弹重启提示(真机 M5 实测)。双开时静默自动更新
+            -- 优先:跳过弹窗,由 auto_update 路径独占安装;notify_update
+            -- 仅在未开 auto_update 时负责弹窗提醒。
+            if current_settings.auto_update==true then
+                UIManager:nextTick(function() self:_do_update(m,true) end)
+            elseif current_settings.notify_update==true then
                 -- A2: 提醒升级为三选弹窗,skip/snooze 状态经 should_notify 节流。
                 if self.updater:should_notify(m.version) then
                     UIManager:nextTick(function() self:_show_update_prompt(m) end)
                 end
-            end
-            if current_settings.auto_update==true then
-                UIManager:nextTick(function() self:_do_update(m,true) end)
             end
         elseif ok and m then
             fresh.last_success_at=os.time()
@@ -2657,11 +2661,13 @@ function Plugin:_setup_thought_tap()
     self._thought_tap_setup=true
 end
 
--- CodeRabbit PR#34(2026-10-24):我们的 zone return false 后手势会继续落到
--- KOReader 原生 tap_link(ReaderLink),后者会对 pickthought- 锚点走"打开链接"
--- 路径。对齐上游 _installLinkFilter:隐藏态/边缘点击时把自家锚点从
--- getLinkFromGes 结果中滤掉,并包 onTap 拦截 larger-area 路径,让事件
--- 继续传播到翻页 zone。
+-- CodeRabbit PR#34(2026-10-24) + 二轮遗留(2026-10-24):仅包装
+-- getLinkFromGes/onTap 不够——开启 larger_tap_area_to_follow_links 时,
+-- 精确命中被滤成 nil 后 ReaderLink:onTap 会走 onGoToPageLink(30px 大
+-- 热区找最近链接),该路径直接 getPageLinks 选最近锚点经 onGotoLink
+-- 跳转,绕过 getLinkFromGes 过滤器——隐藏态/边缘带的撷思锚点仍可能
+-- 被"附近点击"打开。修法:onTap 忽略分支记一次性旗标,再包装
+-- onGotoLink:旗标有效且目标是我们锚点时丢弃跳转,放行翻页。
 function Plugin:_install_link_filter()
     if not self.ui or not self.ui.link or self._orig_getLinkFromGes then return end
     local plugin=self
@@ -2677,8 +2683,9 @@ function Plugin:_install_link_filter()
         end
         return link
     end
-    -- 2) 包 onTap(larger-area/onGoToPageLink 路径):应忽略且确实命中
-    -- 自家锚点时 return false,事件放行给翻页。
+    -- 2) 包 onTap:应忽略且精确命中自家锚点时 return false 放行翻页;
+    --    精确命中非自家锚点时置旗标,让 3) 拦截 larger-area 捞到的
+    --    附近撷思锚点。
     if self._orig_onTap then return end
     self._orig_onTap=self.ui.link.onTap
     self.ui.link.onTap=function(link_self,arg,ges)
@@ -2688,8 +2695,26 @@ function Plugin:_install_link_filter()
                 local href=extract_thought_href(link,{},0)
                 if href then return false end
             end
+            -- 精确命中不是自家锚点:larger-area 仍可能选中附近的
+            -- 撷思锚点,置旗标交给 onGotoLink 拦截。
+            plugin._suppress_goto_thought=true
+            local ok,handled=pcall(plugin._orig_onTap,link_self,arg,ges)
+            plugin._suppress_goto_thought=nil
+            if ok then return handled end
+            return false
         end
         return plugin._orig_onTap(link_self,arg,ges)
+    end
+    -- 3) 包 onGotoLink:onGoToPageLink/普通链接路径最终经此跳转。
+    --    旗标有效且目标是自家锚点时丢弃跳转(返回 true 吞掉)。
+    if self._orig_onGotoLink then return end
+    self._orig_onGotoLink=self.ui.link.onGotoLink
+    self.ui.link.onGotoLink=function(link_self,link,pos)
+        if plugin._suppress_goto_thought then
+            local href=extract_thought_href(link,{},0)
+            if href then return true end
+        end
+        return plugin._orig_onGotoLink(link_self,link,pos)
     end
 end
 
@@ -2702,6 +2727,10 @@ function Plugin:_remove_link_filter()
         if self._orig_onTap then
             self.ui.link.onTap=self._orig_onTap
             self._orig_onTap=nil
+        end
+        if self._orig_onGotoLink then
+            self.ui.link.onGotoLink=self._orig_onGotoLink
+            self._orig_onGotoLink=nil
         end
     end
 end
