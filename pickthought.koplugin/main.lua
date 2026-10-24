@@ -84,12 +84,13 @@ function Plugin:init()
 end
 
 function Plugin:onDispatcherRegisterActions()
-    Dispatcher:registerAction("pickthought_show",{category="none",event="Show撷思",title=Config.NAME,filemanager=true,reader=true})
+    Dispatcher:registerAction("pickthought_show",{category="none",event="Show撷思",title="撷思：打开想法列表",filemanager=true,reader=true})
     -- A4/A1 批次(需求 2026-10-24):四个可绑手势/快捷键动作,对齐 weread #194 套路。
-    Dispatcher:registerAction("pickthought_toggle_annotations",{category="none",event="ShowPickThoughtToggleAnnotations",title="切换划线与想法显示",filemanager=true,reader=true})
-    Dispatcher:registerAction("pickthought_sync_now",{category="none",event="ShowPickThoughtSyncNow",title="同步当前书",filemanager=true,reader=true})
-    Dispatcher:registerAction("pickthought_pull_more",{category="none",event="ShowPickThoughtPullMore",title="继续拉取",filemanager=true,reader=true})
-    Dispatcher:registerAction("pickthought_open_menu",{category="none",event="ShowPickThoughtMenu",title="打开撷思菜单",filemanager=true,reader=true})
+    -- 统一"撷思："前缀,在手势/快捷键动作列表里可辨识归属(m01640)。
+    Dispatcher:registerAction("pickthought_toggle_annotations",{category="none",event="ShowPickThoughtToggleAnnotations",title="撷思：切换划线与想法显示",filemanager=true,reader=true})
+    Dispatcher:registerAction("pickthought_sync_now",{category="none",event="ShowPickThoughtSyncNow",title="撷思：同步当前书",filemanager=true,reader=true})
+    Dispatcher:registerAction("pickthought_pull_more",{category="none",event="ShowPickThoughtPullMore",title="撷思：继续拉取",filemanager=true,reader=true})
+    Dispatcher:registerAction("pickthought_open_menu",{category="none",event="ShowPickThoughtMenu",title="撷思：打开菜单",filemanager=true,reader=true})
 end
 function Plugin:addToMainMenu(items) items.pickthought={text=Config.NAME,sorting_hint="tools",sub_item_table_func=function() return self.ui.document and self:reader_menu() or self:home_menu() end} end
 
