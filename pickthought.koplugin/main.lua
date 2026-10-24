@@ -677,13 +677,18 @@ function Plugin:_show_update_prompt(m)
             {text="跳过此版本",callback=function()
                 if choose("skip") then UIManager:close(viewer) end
             end}},
-            {{text="立即更新",background=require("ffi/blitbuffer").COLOR_BLACK,callback=function()
+            {{text="立即更新",id="install",background=require("ffi/blitbuffer").COLOR_BLACK,callback=function()
                 if not choose("install") then return end
                 UIManager:close(viewer)
                 UIManager:scheduleIn(0.1,function() self:_do_update(m,false) end)
             end}},
         },
     }
+    -- Button 文字色默认黑色且不看背景,黑底键需手动刷白(上游 3480695 同法)
+    local install_btn=viewer.button_table and viewer.button_table:getButtonById("install")
+    if install_btn and install_btn.label_widget then
+        install_btn.label_widget.fgcolor=require("ffi/blitbuffer").COLOR_WHITE
+    end
     active_update_dialog=viewer
     UIManager:show(viewer)
     return viewer
