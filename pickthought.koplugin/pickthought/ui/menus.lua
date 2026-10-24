@@ -23,11 +23,12 @@ local _ = Text.tr
 local M = {}
 
 -- 划线样式运行时文案(阅读器菜单/文件管理器菜单共用)。
+-- hidden 已移出线条样式选项(需求 2026-10-24,A4):隐藏改为独立开关
+-- annotations_visible,见 M.annotation_style_menu 开关行与 main.toggle_annotation_visibility。
 M.ANNOTATION_STYLE_LABELS = {
     default = "默认样式",
     thin_solid = "细实线",
     thin_dashed = "细虚线",
-    hidden = "隐藏划线",
 }
 
 local function popup_percent(value, fallback)
@@ -224,16 +225,35 @@ end
 --- 划线样式运行时切换(单选)。文案与样式键对应 M.ANNOTATION_STYLE_LABELS。
 --- Issue #23:文字样式(跟随正文/加粗/淡化)为第二组单选,与线条样式正交。
 function M.annotation_style_menu(plugin)
+    local rows = {}
+    -- 划线显示开关(A4,2026-10-24):比线条样式组更高优先级;关闭时线条组置灰,
+    -- 文字样式组不受影响。行为由 plugin:toggle_annotation_visibility 统一处理。
+    rows[#rows + 1] = {
+        text = function()
+            return plugin.store:preferences().annotations_visible == false
+                and "划线与想法：隐藏（点按不再弹窗）" or "划线与想法：显示"
+        end,
+        checked_func = function()
+            return plugin.store:preferences().annotations_visible ~= false
+        end,
+        enabled_func = nil,
+        callback = plugin:safe("toggle_annotations", function()
+            plugin:toggle_annotation_visibility()
+        end),
+    }
+    local line_visible = function()
+        return plugin.store:preferences().annotations_visible ~= false
+    end
     local choices = {
         {"default", M.ANNOTATION_STYLE_LABELS.default},
         {"thin_solid", M.ANNOTATION_STYLE_LABELS.thin_solid},
         {"thin_dashed", M.ANNOTATION_STYLE_LABELS.thin_dashed},
-        {"hidden", M.ANNOTATION_STYLE_LABELS.hidden},
     }
-    local rows = {}
     for _, choice in ipairs(choices) do
         local key, label = choice[1], choice[2]
-        rows[#rows + 1] = {text = label, radio = true, checked_func = function()
+        rows[#rows + 1] = {text = label, radio = true,
+            enabled_func = line_visible,
+            checked_func = function()
             return AnnotationStyle.normalize_runtime_style(
                 plugin.store:preferences().annotation_style) == key
         end, callback = function()

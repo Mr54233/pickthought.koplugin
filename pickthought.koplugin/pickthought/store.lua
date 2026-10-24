@@ -26,7 +26,7 @@ local CURRENT_SYNC_MAX_THOUGHT_ENTRIES=150000
 local defaults={
  schema=Config.SCHEMA,
  auth={api_key="",cookies={},account={name="",vid="",logged_at=0}},
- preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=true,download_complete_notice=true,show_annotations=true,annotation_style="default",annotation_text_style="normal",annotation_mode="all",low_resource=false,download_dir="",shelf_sort="read",shelf_scope="all",shelf_view="compact",shelf_filters={},shelf_section="account",account_shelf_kind="books",account_shelf_sort="read",account_shelf_scope="all",generated_shelf_sort="opened",generated_shelf_scope="all",thoughts=THOUGHT_POPUP_DEFAULTS,update={manifest=Config.UPDATE_MANIFEST,auto_update=false,notify_update=false},sync={time_enabled=false,time_notice_enabled=true,progress_enabled=true,progress_notice_mode="first",manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300},auto_batch_sync_opt_in=BatchSync.DEFAULT_AUTO,sync_keep_awake=true,sync_batch_limit=200,sync_max_cache_bytes=25165824,sync_max_underlines=12000,sync_max_thought_entries=30000,sync_min_available_kb=72*1024,debug_mode=false},
+ preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=true,download_complete_notice=true,show_annotations=true,annotations_visible=true,annotation_style="default",annotation_text_style="normal",annotation_mode="all",low_resource=false,download_dir="",shelf_sort="read",shelf_scope="all",shelf_view="compact",shelf_filters={},shelf_section="account",account_shelf_kind="books",account_shelf_sort="read",account_shelf_scope="all",generated_shelf_sort="opened",generated_shelf_scope="all",thoughts=THOUGHT_POPUP_DEFAULTS,update={manifest=Config.UPDATE_MANIFEST,auto_update=false,notify_update=false},sync={time_enabled=false,time_notice_enabled=true,progress_enabled=true,progress_notice_mode="first",manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300},auto_batch_sync_opt_in=BatchSync.DEFAULT_AUTO,sync_keep_awake=true,sync_batch_limit=200,sync_max_cache_bytes=25165824,sync_max_underlines=12000,sync_max_thought_entries=30000,sync_min_available_kb=72*1024,debug_mode=false},
  library={},sessions={},shelf_cache={books={},mp={},updated_at=0},cover_index={},cover_guard={active=false,started_at=0,stage="",version=""},update_state={},update_info={},download_queue={},
  pending_installs={},last_cleanup_result={},read_report_consumed={},
 }
@@ -382,6 +382,13 @@ function Store:preferences()
     if tonumber(preferences.sync_max_thought_entries)==LEGACY_SYNC_MAX_THOUGHT_ENTRIES then
         preferences.sync_max_thought_entries=CURRENT_SYNC_MAX_THOUGHT_ENTRIES
     end
+    -- 划线显示独立开关(需求 2026-10-24,A4):历史 hidden 样式语义升级。
+    -- hidden 原为"线条空白但可点弹窗",迁移为 开关关=线条不可见且不弹窗;
+    -- 线条样式回退 default,文字样式选择保留。
+    if preferences.annotation_style=="hidden" then
+        preferences.annotation_style="default"
+        preferences.annotations_visible=false
+    end
     return preferences
 end
 function Store:save_preferences(v)
@@ -399,6 +406,10 @@ function Store:save_preferences(v)
     end
     if tonumber(preferences.sync_max_thought_entries)==LEGACY_SYNC_MAX_THOUGHT_ENTRIES then
         preferences.sync_max_thought_entries=CURRENT_SYNC_MAX_THOUGHT_ENTRIES
+    end
+    if preferences.annotation_style=="hidden" then
+        preferences.annotation_style="default"
+        preferences.annotations_visible=false
     end
     self:set("preferences",preferences)
 end
