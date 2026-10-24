@@ -23,11 +23,12 @@ local _ = Text.tr
 local M = {}
 
 -- 划线样式运行时文案(阅读器菜单/文件管理器菜单共用)。
+-- hidden 已移出线条样式选项(需求 2026-10-24,A4):隐藏改为独立开关
+-- annotations_visible,见 M.annotation_style_menu 开关行与 main.toggle_annotation_visibility。
 M.ANNOTATION_STYLE_LABELS = {
     default = "默认样式",
     thin_solid = "细实线",
     thin_dashed = "细虚线",
-    hidden = "隐藏划线",
 }
 
 local function popup_percent(value, fallback)
@@ -49,6 +50,23 @@ function M.sync_status_item(plugin)
     return {text = "同步进行中…(点按查看进度)", callback = plugin:safe("sync_status", function()
         plugin:_show_active_sync_dialog()
     end)}
+end
+
+function M.annotation_visibility_item(plugin)
+    -- m00863:开关从「划线样式及文字样式」子菜单提出来,主菜单直达;
+    -- 行为同子菜单开关行(toggle_annotation_visibility),文案/勾选逻辑保持一致。
+    return {
+        text_func = function()
+            return plugin.store:preferences().annotations_visible == false
+                and "划线与想法：隐藏（点按不再弹窗）" or "划线与想法：显示"
+        end,
+        checked_func = function()
+            return plugin.store:preferences().annotations_visible ~= false
+        end,
+        callback = plugin:safe("toggle_annotations", function()
+            plugin:toggle_annotation_visibility()
+        end),
+    }
 end
 
 function M.annotation_style_item(plugin)
@@ -146,6 +164,7 @@ function M.home_menu(plugin)
     items[#items + 1] = {text = "更多操作(重注/续拉/还原)", callback = plugin:safe("fm_actions", function()
         plugin:pick_book("选择 EPUB(长按文件名选中)", function(path) plugin:book_actions(path) end)
     end)}
+    items[#items + 1] = M.annotation_visibility_item(plugin)
     items[#items + 1] = M.annotation_style_item(plugin)
     items[#items + 1] = {text = "设置", sub_item_table_func = function() return M.settings_menu(plugin) end}
     return items
@@ -173,6 +192,7 @@ function M.reader_menu(plugin)
         items[#items + 1] = {text = plugin:_continue_sync_label(agg),
             callback = plugin:safe("continue_sync", function() plugin:sync_entry(doc_path, "sync") end)}
     end
+    items[#items + 1] = M.annotation_visibility_item(plugin)
     items[#items + 1] = M.annotation_style_item(plugin)
     items[#items + 1] = {text = "想法弹窗设置", sub_item_table_func = function()
         return M.thought_popup_menu(plugin)
@@ -224,16 +244,37 @@ end
 --- 划线样式运行时切换(单选)。文案与样式键对应 M.ANNOTATION_STYLE_LABELS。
 --- Issue #23:文字样式(跟随正文/加粗/淡化)为第二组单选,与线条样式正交。
 function M.annotation_style_menu(plugin)
+    local rows = {}
+    -- 划线显示开关(m00863):已提出到主菜单直达(annotation_visibility_item),
+    -- 子菜单内保留镜像行,方便在调样式时顺手切换。
+    local line_visible = function()
+        return plugin.store:preferences().annotations_visible ~= false
+    end
+    rows[#rows + 1] = {
+        -- CodeRabbit PR#34(2026-10-24):KOReader Menu.getMenuText 只在
+        -- text_func 存在时调用,函数必须挂 text_func 而非 text。
+        text_func = function()
+            return plugin.store:preferences().annotations_visible == false
+                and "划线与想法：隐藏（点按不再弹窗）" or "划线与想法：显示"
+        end,
+        checked_func = function()
+            return plugin.store:preferences().annotations_visible ~= false
+        end,
+        enabled_func = nil,
+        callback = plugin:safe("toggle_annotations", function()
+            plugin:toggle_annotation_visibility()
+        end),
+    }
     local choices = {
         {"default", M.ANNOTATION_STYLE_LABELS.default},
         {"thin_solid", M.ANNOTATION_STYLE_LABELS.thin_solid},
         {"thin_dashed", M.ANNOTATION_STYLE_LABELS.thin_dashed},
-        {"hidden", M.ANNOTATION_STYLE_LABELS.hidden},
     }
-    local rows = {}
     for _, choice in ipairs(choices) do
         local key, label = choice[1], choice[2]
-        rows[#rows + 1] = {text = label, radio = true, checked_func = function()
+        rows[#rows + 1] = {text = label, radio = true,
+            enabled_func = line_visible,
+            checked_func = function()
             return AnnotationStyle.normalize_runtime_style(
                 plugin.store:preferences().annotation_style) == key
         end, callback = function()
@@ -258,7 +299,9 @@ function M.annotation_style_menu(plugin)
     }
     for _, choice in ipairs(text_choices) do
         local key, label = choice[1], choice[2]
-        rows[#rows + 1] = {text = label, radio = true, checked_func = function()
+        rows[#rows + 1] = {text = label, radio = true,
+            enabled_func = line_visible,
+            checked_func = function()
             return AnnotationStyle.normalize_text_style(
                 plugin.store:preferences().annotation_text_style) == key
         end, callback = function()

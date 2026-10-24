@@ -36,7 +36,6 @@ M.RUNTIME_STYLE_CHOICES = {
     "default",
     "thin_solid",
     "thin_dashed",
-    "hidden",
 }
 
 -- P5/Issue #23:划线文字样式(与线条样式正交)。默认"跟随正文"用 !important
@@ -152,6 +151,11 @@ local RUNTIME_CSS = {
 /* PICKTHOUGHT_RUNTIME_ANNOTATION_STYLE_END */
 ]],
 }
+
+-- 隐藏态独立开关(需求 2026-10-24,A4):"隐藏划线"不再是线条样式选项,
+-- 改为 annotations_visible 偏好控制;关闭时 _annotation_stylesheet 强制
+-- 使用本 CSS 块,行为语义=线条不可见且点按不弹窗(见 main._on_thought_tap)。
+M.HIDDEN_RUNTIME_CSS = RUNTIME_CSS.hidden
 
 function M.normalize_runtime_style(value)
     value = tostring(value or M.DEFAULT_RUNTIME_STYLE)

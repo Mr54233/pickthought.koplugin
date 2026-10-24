@@ -32,6 +32,15 @@ T.case("运行时划线样式键规范化", function()
     T.eq(AnnotationStyle.normalize_runtime_style(nil), "default", "空值使用默认样式")
     T.eq(AnnotationStyle.normalize_runtime_style("thin_solid"), "thin_solid", "合法样式保留")
     T.eq(AnnotationStyle.normalize_runtime_style("unknown"), "default", "未知样式回退默认")
+    -- A4(需求 2026-10-24):hidden 移出样式选项,旧值归一化拒收。
+    T.eq(AnnotationStyle.normalize_runtime_style("hidden"), "default",
+        "hidden 不再是线条样式,归一化回退 default")
+end)
+
+T.case("运行时样式选项不含 hidden(A4)", function()
+    for _, key in ipairs(AnnotationStyle.RUNTIME_STYLE_CHOICES) do
+        T.ok(key ~= "hidden", "选项表不应包含 hidden: " .. tostring(key))
+    end
 end)
 
 T.case("运行时样式只覆盖统一注入 class", function()
@@ -44,11 +53,25 @@ T.case("运行时样式只覆盖统一注入 class", function()
     T.ok(solid:find("white-space", 1, true) == nil, "不修改 white-space")
 end)
 
-T.case("隐藏样式不删除想法链接", function()
-    local hidden = AnnotationStyle.runtime_css("hidden")
+T.case("隐藏样式块供显示开关复用(A4)", function()
+    local hidden = AnnotationStyle.HIDDEN_RUNTIME_CSS
+    T.ok(hidden ~= nil, "HIDDEN_RUNTIME_CSS 导出存在")
     T.ok(hidden:find("text-decoration: none", 1, true) ~= nil, "隐藏视觉下划线")
     T.ok(hidden:find("border-bottom: 0", 1, true) ~= nil, "清除边框")
-    T.ok(hidden:find("pointer-events", 1, true) == nil, "保留想法链接点击")
+    -- 语义变更(需求 2026-10-24):隐藏态"可弹窗"废止,点击拦截改由
+    -- main.lua _on_thought_tap 入口 return false 实现,CSS 层不再涉及。
+end)
+
+T.case("隐藏态文字样式重置为跟随正文(m00905)", function()
+    -- 隐藏态下加粗/淡化/斜体不能继续泄漏:main._annotation_stylesheet 改拼
+    -- text_runtime_css("normal")。此用例锚定该语义的 CSS 前提:normal 块
+    -- 同时重置 color 与 font-weight,且不含任何加粗/淡化/斜体声明。
+    local css = AnnotationStyle.text_runtime_css("normal")
+    T.ok(css:find("font-weight: inherit !important", 1, true) ~= nil,
+        "normal 块重置字重(隐藏态用其压掉加粗)")
+    T.ok(css:find("font-weight: bold", 1, true) == nil, "normal 块自身无加粗声明")
+    T.ok(css:find("font-style: italic", 1, true) == nil, "normal 块自身无斜体声明")
+    T.ok(css:find("#888888", 1, true) == nil, "normal 块自身无淡化色")
 end)
 
 T.case("细虚线运行时样式使用统一 class", function()
@@ -76,8 +99,8 @@ T.case("默认样式 runtime 块:关内嵌样式也不丢默认虚线(F1 真机�
     -- 非默认档不受影响:仍只输出各自块
     T.ok(AnnotationStyle.runtime_css("thin_dashed"):find("1px dashed", 1, true) ~= nil,
         "细虚线档输出不变")
-    T.ok(AnnotationStyle.runtime_css("hidden"):find("border-bottom: 0", 1, true) ~= nil,
-        "隐藏档输出不变")
+    -- hidden 档随 A4 移出选项,runtime_css 不再承载隐藏语义;
+    -- 隐藏 CSS 由 HIDDEN_RUNTIME_CSS 单独导出供显示开关复用。
 end)
 
 T.case("文字样式归一化:非法值回落跟随正文", function()

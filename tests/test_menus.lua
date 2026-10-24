@@ -89,6 +89,12 @@ local function make_env()
     function plugin:show_thought_popup_font_size_picker() end
     function plugin:show_thought_popup_contrast_picker() end
     function plugin:show_comment_cache_picker() end
+    -- A4:开关行回调链路 toggle_annotation_visibility(真身在 main.lua,
+    -- 此处桩记录调用并直接改偏好,验证菜单语义即可)。
+    function plugin:toggle_annotation_visibility()
+        env.prefs.annotations_visible = not (env.prefs.annotations_visible ~= false)
+        env.toggles = (env.toggles or 0) + 1
+    end
     env.plugin = plugin
     return env
 end
@@ -153,20 +159,21 @@ T.case("登录行:未登录显示扫码登录,点按触发扫码", function()
     T.eq(captured_dialog, nil, "未登录不弹动作面板")
 end)
 
-T.case("文件管理器菜单:上游式收纳,顶级 6 项", function()
+T.case("文件管理器菜单:上游式收纳,顶级 7 项(m00863 开关提级)", function()
     local env = make_env()
     local items = Menus.home_menu(env.plugin)
     local names = texts(items)
-    T.eq(#names, 6, "顶级收纳为 6 项")
+    T.eq(#names, 7, "顶级收纳为 7 项")
     T.eq(names[1]:find("微信读书 · 小明", 1, true), 1, "首行是登录行")
     T.eq(names[2], "同步划线与想法(选书)", "同步入口")
     T.eq(names[3], "绑定微信读书(选书)", "绑定入口")
     T.eq(names[4], "更多操作(重注/续拉/还原)", "更多操作入口")
-    T.eq(names[5], "划线样式及文字样式", "划线样式入口(F2 真机反馈:菜单名带文字样式,不带当前值)")
-    T.eq(names[6], "设置", "末项是设置抽屉")
+    T.eq(names[5], "划线与想法：显示", "隐藏开关直达(m00863)")
+    T.eq(names[6], "划线样式及文字样式", "划线样式入口(F2 真机反馈:菜单名带文字样式,不带当前值)")
+    T.eq(names[7], "设置", "末项是设置抽屉")
 end)
 
-T.case("阅读器菜单(已绑定书):6 项收纳,想法弹窗设置在划线样式下", function()
+T.case("阅读器菜单(已绑定书):7 项收纳,想法弹窗设置在划线样式下(m00863)", function()
     local env = make_env()
     local plugin = env.plugin
     function plugin:current_doc_path() return "/mnt/book.epub" end
@@ -179,13 +186,14 @@ T.case("阅读器菜单(已绑定书):6 项收纳,想法弹窗设置在划线样
     local items = Menus.reader_menu(plugin)
     Binding.get = orig_get
     local names = texts(items)
-    T.eq(#names, 6, "已绑定阅读菜单 6 项")
+    T.eq(#names, 7, "已绑定阅读菜单 7 项")
     T.eq(names[1]:find("微信读书 · 小明", 1, true), 1, "首行是登录行")
     T.eq(names[2], "同步划线与想法", "同步直达")
-    T.eq(names[3], "划线样式及文字样式", "划线样式直达")
-    T.eq(names[4], "想法弹窗设置", "想法弹窗设置在划线样式之下")
-    T.eq(names[5], "书籍管理", "书籍管理抽屉")
-    T.eq(names[6], "设置", "末段是设置抽屉")
+    T.eq(names[3], "划线与想法：显示", "隐藏开关直达(m00863)")
+    T.eq(names[4], "划线样式及文字样式", "划线样式直达")
+    T.eq(names[5], "想法弹窗设置", "想法弹窗设置在划线样式之下")
+    T.eq(names[6], "书籍管理", "书籍管理抽屉")
+    T.eq(names[7], "设置", "末段是设置抽屉")
 end)
 
 T.case("阅读器菜单(未绑定书):仅登录行/绑定/设置", function()
@@ -232,20 +240,31 @@ T.case("想法弹窗设置:九项构成、三分区开关联动", function()
     T.eq(env.prefs.thoughts.comment_tap_open, true, "中间区域开评论可开启")
 end)
 
-T.case("划线样式菜单:线条四项+文字四项,两组单选互不干扰", function()
+T.case("划线样式菜单:开关+线条三项+文字四项(A4)", function()
     local env = make_env()
     local rows = Menus.annotation_style_menu(env.plugin)
-    T.eq(#rows, 8, "划线样式菜单共 8 项(4 线条 + 4 文字)")
-    T.eq(rows[1].text, "默认样式", "第一项为默认样式")
+    T.eq(#rows, 8, "划线样式菜单共 8 项(1 开关 + 3 线条 + 4 文字)")
+    -- CodeRabbit PR#34:动态文案必须挂 text_func(Menu.getMenuText 只调它)。
+    T.eq(rows[1].text, nil, "开关行动态文案不挂在 text 上")
+    T.eq(type(rows[1].text_func) == "function" and rows[1].text_func(),
+        "划线与想法：显示", "首行为显示开关,默认显示态文案")
+    T.ok(rows[1].checked_func(), "默认勾选显示")
+    T.eq(rows[2].text, "默认样式", "线条组第一项为默认样式")
+    T.ok(rows[2].checked_func(), "无历史偏好时线条默认样式勾选")
+    for i = 2, 4 do
+        T.eq(rows[i].enabled_func(), true, "显示态线条项可点: " .. rows[i].text)
+    end
     T.eq(rows[5].text, "文字：跟随正文", "文字组第一项为跟随正文(Issue #23)")
     T.eq(rows[6].text, "文字：加粗", "文字组第二项为加粗")
     T.eq(rows[7].text, "文字：淡化", "文字组第三项为淡化")
     T.eq(rows[8].text, "文字：斜体", "文字组第四项为斜体")
-    T.ok(rows[1].checked_func(), "无历史偏好时线条默认样式勾选")
     T.ok(rows[5].checked_func(), "无历史偏好时文字跟随正文勾选")
+    for i = 5, 8 do
+        T.eq(rows[i].enabled_func(), true, "显示态文字项可点: " .. rows[i].text)
+    end
     rows[3].callback()
-    T.eq(env.prefs.annotation_style, "thin_dashed", "选择细虚线后写入偏好")
-    T.eq(env.toasts[#env.toasts], "划线样式已切换为：细虚线", "切换有提示")
+    T.eq(env.prefs.annotation_style, "thin_solid", "选择细实线后写入偏好")
+    T.eq(env.toasts[#env.toasts], "划线样式已切换为：细实线", "切换有提示")
     rows[7].callback()
     T.eq(env.prefs.annotation_text_style, "gray", "选择淡化后写入文字偏好")
     T.eq(env.toasts[#env.toasts], "划线文字已切换为：淡化", "文字切换有提示")
@@ -256,6 +275,36 @@ T.case("划线样式菜单:线条四项+文字四项,两组单选互不干扰", 
     T.eq(env.toasts[#env.toasts],
         "划线文字已切换为：斜体（需字体支持，无斜体字形时显示不变）",
         "斜体切换提示字体支持")
+end)
+
+T.case("划线样式菜单:隐藏态锁线条组与文字组(A4,m00808)", function()
+    local env = make_env()
+    local rows = Menus.annotation_style_menu(env.plugin)
+    -- 切到隐藏
+    rows[1].callback()
+    T.eq(env.prefs.annotations_visible, false, "开关回调写入隐藏偏好")
+    T.eq(type(rows[1].text_func) == "function" and rows[1].text_func(),
+        "划线与想法：隐藏（点按不再弹窗）", "隐藏态文案")
+    T.ok(not rows[1].checked_func(), "隐藏态不勾选")
+    for i = 2, 4 do
+        T.eq(rows[i].enabled_func(), false, "隐藏态线条项置灰: " .. rows[i].text)
+    end
+    for i = 5, 8 do
+        T.eq(rows[i].enabled_func(), false, "隐藏态文字项置灰: " .. rows[i].text)
+    end
+    rows[7].callback()
+    T.eq(env.prefs.annotation_text_style, "gray", "隐藏态文字样式偏好仍可写(仅 UI 锁)")
+    -- 切回显示
+    rows[1].callback()
+    T.eq(env.prefs.annotations_visible, true, "开关回调写回显示偏好")
+    T.eq(type(rows[1].text_func) == "function" and rows[1].text_func(),
+        "划线与想法：显示", "恢复显示态文案")
+    for i = 2, 4 do
+        T.eq(rows[i].enabled_func(), true, "恢复显示后线条组解锁")
+    end
+    for i = 5, 8 do
+        T.eq(rows[i].enabled_func(), true, "恢复显示后文字组解锁")
+    end
 end)
 
 T.case("更新菜单:四项构成与自动更新开关", function()

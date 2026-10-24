@@ -83,7 +83,15 @@ function Plugin:init()
     if state=="updated" then UIManager:scheduleIn(1,function() self:toast(_("Update installed"),3) end) end
 end
 
-function Plugin:onDispatcherRegisterActions() Dispatcher:registerAction("pickthought_show",{category="none",event="Show撷思",title=Config.NAME,filemanager=true,reader=true}) end
+function Plugin:onDispatcherRegisterActions()
+    Dispatcher:registerAction("pickthought_show",{category="none",event="Show撷思",title="撷思：打开想法列表",filemanager=true,reader=true})
+    -- A4/A1 批次(需求 2026-10-24):四个可绑手势/快捷键动作,对齐 weread #194 套路。
+    -- 统一"撷思："前缀,在手势/快捷键动作列表里可辨识归属(m01640)。
+    Dispatcher:registerAction("pickthought_toggle_annotations",{category="none",event="ShowPickThoughtToggleAnnotations",title="撷思：切换划线与想法显示",filemanager=true,reader=true})
+    Dispatcher:registerAction("pickthought_sync_now",{category="none",event="ShowPickThoughtSyncNow",title="撷思：同步当前书",filemanager=true,reader=true})
+    Dispatcher:registerAction("pickthought_pull_more",{category="none",event="ShowPickThoughtPullMore",title="撷思：继续拉取",filemanager=true,reader=true})
+    Dispatcher:registerAction("pickthought_open_menu",{category="none",event="ShowPickThoughtMenu",title="撷思：打开菜单",filemanager=true,reader=true})
+end
 function Plugin:addToMainMenu(items) items.pickthought={text=Config.NAME,sorting_hint="tools",sub_item_table_func=function() return self.ui.document and self:reader_menu() or self:home_menu() end} end
 
 function Plugin:info(t) UIManager:show(InfoMessage:new{text=tostring(t or "")}) end
@@ -396,6 +404,13 @@ function Plugin:annotation_style_menu()
     return Menus.annotation_style_menu(self)
 end
 
+-- 划线显示独立开关(A4,2026-10-24):false=线条不可见且点按不弹窗;
+-- 文字样式不受影响。nil 视为 true(默认显示)。
+function Plugin:annotations_visible(prefs)
+    prefs=prefs or self.store:preferences()
+    return prefs.annotations_visible~=false
+end
+
 function Plugin:_annotation_stylesheet()
     local typeset=self.ui and self.ui.typeset
     if not typeset or type(typeset.css)~="string" or typeset.css=="" then
@@ -406,14 +421,45 @@ function Plugin:_annotation_stylesheet()
     if styletweak and type(styletweak.getCssText)=="function" then
         tweaks=styletweak:getCssText() or ""
     end
-    local style=AnnotationStyle.normalize_runtime_style(
-        self.store:preferences().annotation_style)
+    local prefs=self.store:preferences()
+    local style=AnnotationStyle.normalize_runtime_style(prefs.annotation_style)
     -- Issue #23:划线文字样式(跟随正文/加粗/淡化)与线条样式同通道应用,
     -- 走 runtime setStyleSheet 才不受内嵌样式开关影响。
-    local text_style=AnnotationStyle.normalize_text_style(
-        self.store:preferences().annotation_text_style)
-    return typeset.css,tweaks.."\n"..AnnotationStyle.runtime_css(style)
-        .."\n"..AnnotationStyle.text_runtime_css(text_style),style
+    local text_style=AnnotationStyle.normalize_text_style(prefs.annotation_text_style)
+    -- A4:开关关闭时强制隐藏线条(hidden CSS),线条样式选择被锁定;
+    -- m00905:文字样式段也不能照常拼接——隐藏态下加粗/淡化/斜体会继续
+    -- 泄漏在正文里。改拼 normal(继承正文)重置块,而不是整段删掉:锚点是
+    -- <a>,完全移除会露出注入 CSS 的默认链接蓝色,继承块才是"未加样式"。
+    local line_css, text_css
+    if self:annotations_visible(prefs) then
+        line_css=AnnotationStyle.runtime_css(style)
+        text_css=AnnotationStyle.text_runtime_css(text_style)
+    else
+        line_css=AnnotationStyle.HIDDEN_RUNTIME_CSS
+        text_css=AnnotationStyle.text_runtime_css("normal")
+    end
+    return typeset.css,tweaks.."\n"..line_css
+        .."\n"..text_css,style
+end
+
+-- A4:切换划线与想法显示。持久化→隐藏时关掉已开弹窗→应用→toast。
+function Plugin:toggle_annotation_visibility()
+    local prefs=self.store:preferences()
+    prefs.annotations_visible=not (prefs.annotations_visible~=false)
+    self.store:save_preferences(prefs)
+    if not prefs.annotations_visible then
+        require("pickthought.thought_popup").closeVisible()
+    end
+    local ok,err=self:apply_annotation_style()
+    local msg=prefs.annotations_visible
+        and "划线与想法已显示" or "划线与想法已隐藏（点按不再弹窗）"
+    if ok then
+        self:toast(msg)
+    elseif self.ui and self.ui.document then
+        self:info(msg.."\n但当前页面未刷新：\n"..tostring(err or "未知错误"))
+    else
+        self:toast(msg.."(下次打开书籍时生效)")
+    end
 end
 
 -- Reapply a saved style to the currently open bound EPUB. This follows the
@@ -792,6 +838,21 @@ function Plugin:onShow撷思()
     local items=self.ui.document and self:reader_menu() or self:home_menu()
     self:list(Config.NAME,items)
 end
+
+-- ===== Dispatcher 手势动作(需求 2026-10-24,A4+A1 批次) =====
+-- 四个动作均可在 KOReader 手势/快捷键设置里绑定划动或按键;边界反馈
+-- 复用对应菜单入口的内建提示,不在 handler 里重复判断。
+function Plugin:onShowPickThoughtToggleAnnotations() self:toggle_annotation_visibility() end
+
+function Plugin:onShowPickThoughtSyncNow() self:sync_thoughts() end
+
+function Plugin:onShowPickThoughtPullMore()
+    local path=self:current_doc_path()
+    if not path then self:info("请先打开一本本地书") return end
+    self:sync_entry(path)
+end
+
+function Plugin:onShowPickThoughtMenu() self:onShow撷思() end
 
 -- ===== 同步划线与想法 =====
 -- 阅读器入口:后台任务同步,不影响继续阅读。
@@ -1986,6 +2047,7 @@ end
 
 function Plugin:_teardown_thought_tap()
     if self._thought_tap_setup and self.ui and self.ui.unRegisterTouchZones then pcall(function() self.ui:unRegisterTouchZones({{id="pickthought_thought_popup",overrides={"tap_link"}}}) end) end
+    self:_remove_link_filter()
     self._thought_tap_setup=nil
 end
 
@@ -2501,7 +2563,21 @@ function Plugin:_show_thought_comments(item,book_id,popup)
     return nil
 end
 
+-- A1(需求 2026-10-24):屏幕左右边缘 20% 内的点击让给翻页——对齐上游
+-- isPageTurnEdgeTap 的默认参数(edge_tap_ratio=0.20)。不做设置项,后续
+-- 有真实误触反馈再加。取不到屏宽时跳过判定,保持旧行为。
+local EDGE_TAP_RATIO=0.20
+function Plugin:_is_edge_tap(ges)
+    local dimen=self.ui and self.ui.dimen
+    local w=dimen and tonumber(dimen.w) or 0
+    if not (w and w>0) or not (ges and ges.pos) then return false end
+    local x=tonumber(ges.pos.x) or 0
+    return x < w*EDGE_TAP_RATIO or x > w*(1-EDGE_TAP_RATIO)
+end
+
 function Plugin:_on_thought_tap(ges)
+    -- A4:隐藏态不响应锚点点击(线条已不可见,弹窗一并禁用)。
+    if not self:annotations_visible() then return false end
     if not self.ui or not self.ui.link or not self.ui.link.getLinkFromGes then return false end
     PopupDiagnostic.set_enabled(self.store:preferences().debug_mode==true)
     PopupDiagnostic.begin()
@@ -2514,6 +2590,8 @@ function Plugin:_on_thought_tap(ges)
     local href=extract_thought_href(link,{},0)
     PopupDiagnostic.log("link_parse", {elapsed_ms=PopupDiagnostic.elapsed(parse_started), found=href~=nil})
     if not href then PopupDiagnostic.finish(); return false end
+    -- A1:确实命中了撷思锚点、且点击落在边缘带内时,让事件给翻页。
+    if self:_is_edge_tap(ges) then PopupDiagnostic.finish(); return false end
     local result=self:_show_thought_href(href)
     PopupDiagnostic.finish()
     return result
@@ -2523,7 +2601,57 @@ function Plugin:_setup_thought_tap()
     if self._thought_tap_setup or not self.ui or not self.ui.registerTouchZones then return end
     local ok,Device=pcall(require,"device"); if ok and Device.isTouchDevice and not Device:isTouchDevice() then return end
     self.ui:registerTouchZones({{id="pickthought_thought_popup",ges="tap",screen_zone={ratio_x=0,ratio_y=0,ratio_w=1,ratio_h=1},overrides={"tap_link"},handler=function(ges) return self:_on_thought_tap(ges) end}})
+    self:_install_link_filter()
     self._thought_tap_setup=true
+end
+
+-- CodeRabbit PR#34(2026-10-24):我们的 zone return false 后手势会继续落到
+-- KOReader 原生 tap_link(ReaderLink),后者会对 pickthought- 锚点走"打开链接"
+-- 路径。对齐上游 _installLinkFilter:隐藏态/边缘点击时把自家锚点从
+-- getLinkFromGes 结果中滤掉,并包 onTap 拦截 larger-area 路径,让事件
+-- 继续传播到翻页 zone。
+function Plugin:_install_link_filter()
+    if not self.ui or not self.ui.link or self._orig_getLinkFromGes then return end
+    local plugin=self
+    -- 1) 滤 getLinkFromGes(普通命中路径):命中自家锚点且应忽略时返回 nil。
+    self._orig_getLinkFromGes=self.ui.link.getLinkFromGes
+    self.ui.link.getLinkFromGes=function(link_self,ges)
+        local link=plugin._orig_getLinkFromGes(link_self,ges)
+        if not link then return nil end
+        local href=extract_thought_href(link,{},0)
+        if not href then return link end
+        if not plugin:annotations_visible() or plugin:_is_edge_tap(ges) then
+            return nil
+        end
+        return link
+    end
+    -- 2) 包 onTap(larger-area/onGoToPageLink 路径):应忽略且确实命中
+    -- 自家锚点时 return false,事件放行给翻页。
+    if self._orig_onTap then return end
+    self._orig_onTap=self.ui.link.onTap
+    self.ui.link.onTap=function(link_self,arg,ges)
+        if not plugin:annotations_visible() or plugin:_is_edge_tap(ges) then
+            local link=plugin._orig_getLinkFromGes(link_self,ges)
+            if link then
+                local href=extract_thought_href(link,{},0)
+                if href then return false end
+            end
+        end
+        return plugin._orig_onTap(link_self,arg,ges)
+    end
+end
+
+function Plugin:_remove_link_filter()
+    if self.ui and self.ui.link then
+        if self._orig_getLinkFromGes then
+            self.ui.link.getLinkFromGes=self._orig_getLinkFromGes
+            self._orig_getLinkFromGes=nil
+        end
+        if self._orig_onTap then
+            self.ui.link.onTap=self._orig_onTap
+            self._orig_onTap=nil
+        end
+    end
 end
 
 -- ===== 事件 =====
@@ -2559,6 +2687,7 @@ function Plugin:onCloseDocument()
     end
     pcall(function() require("pickthought.thought_popup").cleanup() end)
     self:_teardown_thought_tap()
+    self:_remove_link_filter()
 end
 
 function Plugin:onFlushSettings() self.store:flush() end
