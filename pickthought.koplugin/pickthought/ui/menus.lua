@@ -226,8 +226,12 @@ end
 --- Issue #23:文字样式(跟随正文/加粗/淡化)为第二组单选,与线条样式正交。
 function M.annotation_style_menu(plugin)
     local rows = {}
-    -- 划线显示开关(A4,2026-10-24):比线条样式组更高优先级;关闭时线条组置灰,
-    -- 文字样式组不受影响。行为由 plugin:toggle_annotation_visibility 统一处理。
+    -- 划线显示开关(A4,2026-10-24):比线条样式组更高优先级;关闭时线条组与
+    -- 文字样式组一并置灰(用户 m00808:划线都藏了,改划线字体没有意义)。
+    -- 行为由 plugin:toggle_annotation_visibility 统一处理。
+    local line_visible = function()
+        return plugin.store:preferences().annotations_visible ~= false
+    end
     rows[#rows + 1] = {
         -- CodeRabbit PR#34(2026-10-24):KOReader Menu.getMenuText 只在
         -- text_func 存在时调用,函数必须挂 text_func 而非 text。
@@ -243,9 +247,6 @@ function M.annotation_style_menu(plugin)
             plugin:toggle_annotation_visibility()
         end),
     }
-    local line_visible = function()
-        return plugin.store:preferences().annotations_visible ~= false
-    end
     local choices = {
         {"default", M.ANNOTATION_STYLE_LABELS.default},
         {"thin_solid", M.ANNOTATION_STYLE_LABELS.thin_solid},
@@ -280,7 +281,9 @@ function M.annotation_style_menu(plugin)
     }
     for _, choice in ipairs(text_choices) do
         local key, label = choice[1], choice[2]
-        rows[#rows + 1] = {text = label, radio = true, checked_func = function()
+        rows[#rows + 1] = {text = label, radio = true,
+            enabled_func = line_visible,
+            checked_func = function()
             return AnnotationStyle.normalize_text_style(
                 plugin.store:preferences().annotation_text_style) == key
         end, callback = function()

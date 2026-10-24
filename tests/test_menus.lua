@@ -257,7 +257,9 @@ T.case("划线样式菜单:开关+线条三项+文字四项(A4)", function()
     T.eq(rows[7].text, "文字：淡化", "文字组第三项为淡化")
     T.eq(rows[8].text, "文字：斜体", "文字组第四项为斜体")
     T.ok(rows[5].checked_func(), "无历史偏好时文字跟随正文勾选")
-    T.ok(rows[5].enabled_func == nil, "文字组不受显示开关影响(无置灰)")
+    for i = 5, 8 do
+        T.eq(rows[i].enabled_func(), true, "显示态文字项可点: " .. rows[i].text)
+    end
     rows[3].callback()
     T.eq(env.prefs.annotation_style, "thin_solid", "选择细实线后写入偏好")
     T.eq(env.toasts[#env.toasts], "划线样式已切换为：细实线", "切换有提示")
@@ -273,7 +275,7 @@ T.case("划线样式菜单:开关+线条三项+文字四项(A4)", function()
         "斜体切换提示字体支持")
 end)
 
-T.case("划线样式菜单:开关切换隐藏态锁线条组,文字组不动(A4)", function()
+T.case("划线样式菜单:隐藏态锁线条组与文字组(A4,m00808)", function()
     local env = make_env()
     local rows = Menus.annotation_style_menu(env.plugin)
     -- 切到隐藏
@@ -285,9 +287,11 @@ T.case("划线样式菜单:开关切换隐藏态锁线条组,文字组不动(A4)
     for i = 2, 4 do
         T.eq(rows[i].enabled_func(), false, "隐藏态线条项置灰: " .. rows[i].text)
     end
-    T.eq(rows[5].enabled_func == nil, true, "隐藏态文字组仍可调")
+    for i = 5, 8 do
+        T.eq(rows[i].enabled_func(), false, "隐藏态文字项置灰: " .. rows[i].text)
+    end
     rows[7].callback()
-    T.eq(env.prefs.annotation_text_style, "gray", "隐藏态文字样式仍可切换")
+    T.eq(env.prefs.annotation_text_style, "gray", "隐藏态文字样式偏好仍可写(仅 UI 锁)")
     -- 切回显示
     rows[1].callback()
     T.eq(env.prefs.annotations_visible, true, "开关回调写回显示偏好")
@@ -295,6 +299,9 @@ T.case("划线样式菜单:开关切换隐藏态锁线条组,文字组不动(A4)
         "划线与想法：显示", "恢复显示态文案")
     for i = 2, 4 do
         T.eq(rows[i].enabled_func(), true, "恢复显示后线条组解锁")
+    end
+    for i = 5, 8 do
+        T.eq(rows[i].enabled_func(), true, "恢复显示后文字组解锁")
     end
 end)
 
