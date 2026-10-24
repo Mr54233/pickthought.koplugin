@@ -426,12 +426,19 @@ function Plugin:_annotation_stylesheet()
     -- 走 runtime setStyleSheet 才不受内嵌样式开关影响。
     local text_style=AnnotationStyle.normalize_text_style(prefs.annotation_text_style)
     -- A4:开关关闭时强制隐藏线条(hidden CSS),线条样式选择被锁定;
-    -- 文字样式段照常拼接,保持"只关线条+弹窗,不动文字"的需求语义。
-    local line_css=self:annotations_visible(prefs)
-        and AnnotationStyle.runtime_css(style)
-        or AnnotationStyle.HIDDEN_RUNTIME_CSS
+    -- m00905:文字样式段也不能照常拼接——隐藏态下加粗/淡化/斜体会继续
+    -- 泄漏在正文里。改拼 normal(继承正文)重置块,而不是整段删掉:锚点是
+    -- <a>,完全移除会露出注入 CSS 的默认链接蓝色,继承块才是"未加样式"。
+    local line_css, text_css
+    if self:annotations_visible(prefs) then
+        line_css=AnnotationStyle.runtime_css(style)
+        text_css=AnnotationStyle.text_runtime_css(text_style)
+    else
+        line_css=AnnotationStyle.HIDDEN_RUNTIME_CSS
+        text_css=AnnotationStyle.text_runtime_css("normal")
+    end
     return typeset.css,tweaks.."\n"..line_css
-        .."\n"..AnnotationStyle.text_runtime_css(text_style),style
+        .."\n"..text_css,style
 end
 
 -- A4:切换划线与想法显示。持久化→隐藏时关掉已开弹窗→应用→toast。

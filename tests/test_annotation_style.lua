@@ -62,6 +62,18 @@ T.case("隐藏样式块供显示开关复用(A4)", function()
     -- main.lua _on_thought_tap 入口 return false 实现,CSS 层不再涉及。
 end)
 
+T.case("隐藏态文字样式重置为跟随正文(m00905)", function()
+    -- 隐藏态下加粗/淡化/斜体不能继续泄漏:main._annotation_stylesheet 改拼
+    -- text_runtime_css("normal")。此用例锚定该语义的 CSS 前提:normal 块
+    -- 同时重置 color 与 font-weight,且不含任何加粗/淡化/斜体声明。
+    local css = AnnotationStyle.text_runtime_css("normal")
+    T.ok(css:find("font-weight: inherit !important", 1, true) ~= nil,
+        "normal 块重置字重(隐藏态用其压掉加粗)")
+    T.ok(css:find("font-weight: bold", 1, true) == nil, "normal 块自身无加粗声明")
+    T.ok(css:find("font-style: italic", 1, true) == nil, "normal 块自身无斜体声明")
+    T.ok(css:find("#888888", 1, true) == nil, "normal 块自身无淡化色")
+end)
+
 T.case("细虚线运行时样式使用统一 class", function()
     local dashed = AnnotationStyle.runtime_css("thin_dashed")
     T.ok(dashed:find("border-bottom: 1px dashed", 1, true) ~= nil, "虚线为 1px")
