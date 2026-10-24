@@ -12,9 +12,11 @@ local function manifest(version,payload)
 end
 
 local function make_updater(payload,mode)
-    local store={updates_dir="tests",_update_info={}}
+    local store={updates_dir="tests",_update_info={},_prefs={update={}}}
     function store:save_update_info(value) self._update_info=value end
     function store:update_info() return self._update_info end
+    function store:preferences() return self._prefs end
+    function store:save_preferences(p) self._prefs=p end
     local http={}
     local updater=Updater:new(http,store,"0.3.1","tests")
     function updater:download_to(_,path,_,on_progress)
@@ -227,4 +229,39 @@ T.case("Updater: 官方地址失败后继续镜像地址",function()
     T.ok(calls>=2,"失败后尝试第二地址")
     T.eq(U.read_file(path,true),payload,"镜像包内容")
     cleanup(version)
+end)
+
+-- ===== A2 更新提醒 skip/snooze =====
+T.case("Updater: should_notify 新版本默认可提醒",function()
+    local updater=make_updater("a2-payload")
+    T.ok(updater:should_notify("0.4.0"),"新版本无跳过状态时提醒")
+end)
+
+T.case("Updater: 跳过此版本后不再提醒该版本",function()
+    local updater,store=make_updater("a2-payload")
+    updater:skip_update("0.4.0")
+    T.eq(store._prefs.update.skipped_version,"0.4.0","跳过状态已写入")
+    T.ok(not updater:should_notify("0.4.0"),"同版本不再提醒")
+    T.ok(updater:should_notify("0.5.0"),"更新版本仍提醒")
+end)
+
+T.case("Updater: 本次忽略 24 小时内不提醒到期恢复",function()
+    local updater,store=make_updater("a2-payload")
+    updater:snooze_update("0.4.0")
+    T.eq(store._prefs.update.snoozed_version,"0.4.0","忽略版本已写入")
+    T.ok(store._prefs.update.snooze_until>=os.time()+24*3600-5,"再提醒时间≈24小时后")
+    T.ok(not updater:should_notify("0.4.0"),"忽略期内不提醒")
+    store._prefs.update.snooze_until=os.time()-1
+    T.ok(updater:should_notify("0.4.0"),"到期后恢复提醒")
+end)
+
+T.case("Updater: 当前或更旧版本不提醒",function()
+    local updater=make_updater("a2-payload")
+    T.ok(not updater:should_notify("0.3.1"),"相同版本不提醒")
+    T.ok(not updater:should_notify("0.3.0"),"更旧版本不提醒")
+end)
+
+T.case("Updater: 无偏好存储时 should_notify 不炸",function()
+    local updater=Updater:new({},nil,"0.3.1","tests")
+    T.ok(updater:should_notify("0.4.0"),"无 store 走保守提醒路径")
 end)

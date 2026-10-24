@@ -4,6 +4,8 @@ local U=require("pickthought.util")
 local logger=require("logger")
 local Updater={}; Updater.__index=Updater
 local MAX_PACKAGE_BYTES=10*1024*1024
+-- 「本次忽略」后的再提醒间隔(对齐上游 codex/update-notification-dialog)。
+Updater.REMINDER_INTERVAL=24*60*60
 
 function Updater:new(http,store,version,plugin_root)
     return setmetatable({http=http,store=store,version=version,plugin_root=plugin_root},self)
@@ -151,6 +153,36 @@ function Updater:cached_info()
     local info=self.store:update_info()
     if type(info)~="table" or tostring(info.version or "")=="" then return nil end
     return info
+end
+
+-- ===== 更新提醒 skip/snooze(A2,上游 codex/update-notification-dialog 语义) =====
+-- 状态存 preferences.update:{skipped_version,snoozed_version,snooze_until}。
+local function update_pref(self,patch)
+    if not self.store or type(self.store.preferences)~="function" then return {} end
+    local p=self.store:preferences()
+    local update=type(p.update)=="table" and p.update or {}
+    if patch then
+        for k,v in pairs(patch) do update[k]=v end
+        p.update=update
+        if type(self.store.save_preferences)=="function" then self.store:save_preferences(p) end
+    end
+    return update
+end
+
+function Updater:should_notify(version)
+    if not U.semver_newer(version,self.version) then return false end
+    local state=update_pref(self)
+    if tostring(state.skipped_version or "")==tostring(version) then return false end
+    return tostring(state.snoozed_version or "")~=tostring(version)
+        or os.time()>=(tonumber(state.snooze_until) or 0)
+end
+
+function Updater:snooze_update(version)
+    update_pref(self,{snoozed_version=version,snooze_until=os.time()+Updater.REMINDER_INTERVAL})
+end
+
+function Updater:skip_update(version)
+    update_pref(self,{skipped_version=version})
 end
 
 local function curl_download(url,path)

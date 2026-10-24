@@ -36,7 +36,10 @@ class UpdateContractTests(unittest.TestCase):
         self.assertNotIn('text = "当前版本', update_menu)
         self.assertNotIn('text = "重置全部书籍"', update_menu)
         self.assertNotIn("更新与关于", main)
-        self.assertIn("撷思发现新版本 %s，请前往「更新」查看", main)
+        # A2: 自动检查提醒升级为三选弹窗,跳过/忽略状态经 should_notify 节流。
+        self.assertIn("function Plugin:_show_update_prompt", main)
+        self.assertIn("should_notify", main)
+        self.assertNotIn("撷思发现新版本 %s，请前往「更新」查看", main)
         self.assertEqual(
             menus.count('{text = "更新", sub_item_table_func = function() return M.update_about_menu(plugin) end}'),
             1,
