@@ -2706,15 +2706,16 @@ function Plugin:_install_link_filter()
         return plugin._orig_onTap(link_self,arg,ges)
     end
     -- 3) 包 onGotoLink:onGoToPageLink/普通链接路径最终经此跳转。
-    --    旗标有效且目标是自家锚点时丢弃跳转(返回 true 吞掉)。
+    --    旗标有效且目标是自家锚点时返回 false 放行事件(翻页),
+    --    ... 变参转发保住 KOReader 的 footnote 等第三参(CodeRabbit)。
     if self._orig_onGotoLink then return end
     self._orig_onGotoLink=self.ui.link.onGotoLink
-    self.ui.link.onGotoLink=function(link_self,link,pos)
+    self.ui.link.onGotoLink=function(link_self,link,...)
         if plugin._suppress_goto_thought then
             local href=extract_thought_href(link,{},0)
-            if href then return true end
+            if href then return false end
         end
-        return plugin._orig_onGotoLink(link_self,link,pos)
+        return plugin._orig_onGotoLink(link_self,link,...)
     end
 end
 
