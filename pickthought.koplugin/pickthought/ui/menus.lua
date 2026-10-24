@@ -52,6 +52,23 @@ function M.sync_status_item(plugin)
     end)}
 end
 
+function M.annotation_visibility_item(plugin)
+    -- m00863:开关从「划线样式及文字样式」子菜单提出来,主菜单直达;
+    -- 行为同子菜单开关行(toggle_annotation_visibility),文案/勾选逻辑保持一致。
+    return {
+        text_func = function()
+            return plugin.store:preferences().annotations_visible == false
+                and "划线与想法：隐藏（点按不再弹窗）" or "划线与想法：显示"
+        end,
+        checked_func = function()
+            return plugin.store:preferences().annotations_visible ~= false
+        end,
+        callback = plugin:safe("toggle_annotations", function()
+            plugin:toggle_annotation_visibility()
+        end),
+    }
+end
+
 function M.annotation_style_item(plugin)
     -- 真机反馈 2026-09-13(F2):菜单名带上"文字样式";当前样式不再拼在标题里,
     -- 用户点进子菜单直接看勾选态。
@@ -147,6 +164,7 @@ function M.home_menu(plugin)
     items[#items + 1] = {text = "更多操作(重注/续拉/还原)", callback = plugin:safe("fm_actions", function()
         plugin:pick_book("选择 EPUB(长按文件名选中)", function(path) plugin:book_actions(path) end)
     end)}
+    items[#items + 1] = M.annotation_visibility_item(plugin)
     items[#items + 1] = M.annotation_style_item(plugin)
     items[#items + 1] = {text = "设置", sub_item_table_func = function() return M.settings_menu(plugin) end}
     return items
@@ -174,6 +192,7 @@ function M.reader_menu(plugin)
         items[#items + 1] = {text = plugin:_continue_sync_label(agg),
             callback = plugin:safe("continue_sync", function() plugin:sync_entry(doc_path, "sync") end)}
     end
+    items[#items + 1] = M.annotation_visibility_item(plugin)
     items[#items + 1] = M.annotation_style_item(plugin)
     items[#items + 1] = {text = "想法弹窗设置", sub_item_table_func = function()
         return M.thought_popup_menu(plugin)
@@ -226,9 +245,8 @@ end
 --- Issue #23:文字样式(跟随正文/加粗/淡化)为第二组单选,与线条样式正交。
 function M.annotation_style_menu(plugin)
     local rows = {}
-    -- 划线显示开关(A4,2026-10-24):比线条样式组更高优先级;关闭时线条组与
-    -- 文字样式组一并置灰(用户 m00808:划线都藏了,改划线字体没有意义)。
-    -- 行为由 plugin:toggle_annotation_visibility 统一处理。
+    -- 划线显示开关(m00863):已提出到主菜单直达(annotation_visibility_item),
+    -- 子菜单内保留镜像行,方便在调样式时顺手切换。
     local line_visible = function()
         return plugin.store:preferences().annotations_visible ~= false
     end
