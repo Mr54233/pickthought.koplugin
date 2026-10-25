@@ -160,6 +160,10 @@ def generate_release_notes(
             if kind in ("chore", "ci", "test", "docs"):
                 continue
 
+        # 直接提交(非 merge)同样跳过维护类,理由同上。
+        if kind in ("chore", "ci", "test", "docs"):
+            continue
+
         if not re.search(r"[\u3400-\u9fff]", description):
             raise ReleaseNotesError(
                 f"发现未翻译的发布提交，请先改为中文：{raw_subject}"
