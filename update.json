@@ -1,15 +1,15 @@
 {
-  "version": "0.5.5",
-  "name": "撷思 PickThought 0.5.5",
+  "version": "0.6.0",
+  "name": "撷思 PickThought 0.6.0",
   "package_type": "full",
-  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.5/pickthought.koplugin.zip",
+  "package_url": "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.6.0/pickthought.koplugin.zip",
   "package_urls": [
-    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.5/pickthought.koplugin.zip",
-    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.5/pickthought.koplugin.zip",
-    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.5/pickthought.koplugin.zip",
-    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.5.5/pickthought.koplugin.zip"
+    "https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.6.0/pickthought.koplugin.zip",
+    "https://ghfast.top/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.6.0/pickthought.koplugin.zip",
+    "https://gh-proxy.com/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.6.0/pickthought.koplugin.zip",
+    "https://ghproxy.net/https://github.com/Mr54233/pickthought.koplugin/releases/download/v0.6.0/pickthought.koplugin.zip"
   ],
-  "size": 863449,
-  "sha256": "6d339fa5c9b7610936e86d4925d554344a569e7e55ab755843f4949af3055ffc",
-  "notes": "新功能：\n想法弹窗排版对齐上游 #193;评论获取子进程后台化（PR #31）"
+  "size": 869222,
+  "sha256": "00a0bd9b613913e9513dc99e6795b947d7177368c626cfd1427a4c1aba831c53",
+  "notes": "新功能：\n边缘点按忽略开关与宽度选择器（PR #34/#37）\n更新提醒三选弹窗与章节列表视觉统一（PR #35）\n划线显示独立开关与边缘点按忽略（PR #34）\n\n问题修复：\n拦截 larger-area 撷思锚点跳转与更新双开互踩（PR #34/#35/#36）"
 }
