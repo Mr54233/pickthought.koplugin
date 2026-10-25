@@ -94,6 +94,15 @@ def parse_subject(subject: str) -> Tuple[str | None, str | None]:
     if match:
         kind = match.group(1).lower()
         description = NORMALIZED_TRANSLATIONS.get(subject, clean(match.group(2)))
+        # 面向用户的发布摘要剥掉开发侧标记(A1/A4/m01234/CodeRabbit/PR #N 等),
+        # 这些只该活在提交/PR 里,不该出现在用户升级弹窗中;真正的
+        # PR/Issue 引用由 _refs/_format_reference 统一从 merge 记录取。
+        description = re.sub(
+            r"\s*[\(（]\s*(?:[A-Z]\d+(?:[+/][A-Z]\d+)*[^)（）]*"
+            r"|[Mm]\d+[^)（）]*|CodeRabbit[^)（）]*|PR\s*#\d+[^)（）]*)\s*[\)）]\s*",
+            "",
+            description,
+        ).strip()
         return kind, description
     if re.match(r"^合并:", subject):
         description = NORMALIZED_TRANSLATIONS.get(subject, clean(subject.split(":", 1)[1]))
