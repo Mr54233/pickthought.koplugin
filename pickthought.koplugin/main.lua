@@ -2619,16 +2619,22 @@ function Plugin:_show_thought_comments(item,book_id,popup)
     return nil
 end
 
--- A1(需求 2026-10-24):屏幕左右边缘 20% 内的点击让给翻页——对齐上游
--- isPageTurnEdgeTap 的默认参数(edge_tap_ratio=0.20)。不做设置项,后续
--- 有真实误触反馈再加。取不到屏宽时跳过判定,保持旧行为。
-local EDGE_TAP_RATIO=0.20
+-- A1(需求 2026-10-24):屏幕左右边缘带内的点击让给翻页——对齐上游
+-- isPageTurnEdgeTap(annotations_controller.lua:122)。2026-10-25 用户真机
+-- 反馈:固定 20%(约 4-5 个字)吞掉贴边成语划线的点击,对齐上游把
+-- ignore_edge_thought_taps 开关与 edge_tap_ratio 比例抄全,存
+-- preferences.edge_tap_ignore / edge_tap_ratio(store 侧护栏
+-- 0.05-0.45,越界回退 0.20)。取不到屏宽时跳过判定,保持旧行为。
 function Plugin:_is_edge_tap(ges)
+    local prefs=self.store:preferences()
+    if prefs.edge_tap_ignore==false then return false end
     local dimen=self.ui and self.ui.dimen
     local w=dimen and tonumber(dimen.w) or 0
     if not (w and w>0) or not (ges and ges.pos) then return false end
+    local ratio=tonumber(prefs.edge_tap_ratio) or 0.20
+    if ratio<0.05 then ratio=0.05 elseif ratio>0.45 then ratio=0.45 end
     local x=tonumber(ges.pos.x) or 0
-    return x < w*EDGE_TAP_RATIO or x > w*(1-EDGE_TAP_RATIO)
+    return x < w*ratio or x > w*(1-ratio)
 end
 
 function Plugin:_on_thought_tap(ges)

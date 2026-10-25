@@ -26,7 +26,7 @@ local CURRENT_SYNC_MAX_THOUGHT_ENTRIES=150000
 local defaults={
  schema=Config.SCHEMA,
  auth={api_key="",cookies={},account={name="",vid="",logged_at=0}},
- preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=true,download_complete_notice=true,show_annotations=true,annotations_visible=true,annotation_style="default",annotation_text_style="normal",annotation_mode="all",low_resource=false,download_dir="",shelf_sort="read",shelf_scope="all",shelf_view="compact",shelf_filters={},shelf_section="account",account_shelf_kind="books",account_shelf_sort="read",account_shelf_scope="all",generated_shelf_sort="opened",generated_shelf_scope="all",thoughts=THOUGHT_POPUP_DEFAULTS,update={manifest=Config.UPDATE_MANIFEST,auto_update=false,notify_update=false},sync={time_enabled=false,time_notice_enabled=true,progress_enabled=true,progress_notice_mode="first",manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300},auto_batch_sync_opt_in=BatchSync.DEFAULT_AUTO,sync_keep_awake=true,sync_batch_limit=200,sync_max_cache_bytes=25165824,sync_max_underlines=12000,sync_max_thought_entries=30000,sync_min_available_kb=72*1024,debug_mode=false},
+ preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=true,download_complete_notice=true,show_annotations=true,annotations_visible=true,annotation_style="default",annotation_text_style="normal",edge_tap_ignore=true,edge_tap_ratio=0.20,annotation_mode="all",low_resource=false,download_dir="",shelf_sort="read",shelf_scope="all",shelf_view="compact",shelf_filters={},shelf_section="account",account_shelf_kind="books",account_shelf_sort="read",account_shelf_scope="all",generated_shelf_sort="opened",generated_shelf_scope="all",thoughts=THOUGHT_POPUP_DEFAULTS,update={manifest=Config.UPDATE_MANIFEST,auto_update=false,notify_update=false},sync={time_enabled=false,time_notice_enabled=true,progress_enabled=true,progress_notice_mode="first",manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300},auto_batch_sync_opt_in=BatchSync.DEFAULT_AUTO,sync_keep_awake=true,sync_batch_limit=200,sync_max_cache_bytes=25165824,sync_max_underlines=12000,sync_max_thought_entries=30000,sync_min_available_kb=72*1024,debug_mode=false},
  library={},sessions={},shelf_cache={books={},mp={},updated_at=0},cover_index={},cover_guard={active=false,started_at=0,stage="",version=""},update_state={},update_info={},download_queue={},
  pending_installs={},last_cleanup_result={},read_report_consumed={},
 }
@@ -389,6 +389,11 @@ function Store:preferences()
         preferences.annotation_style="default"
         preferences.annotations_visible=false
     end
+    -- 边缘点按设置(2026-10-25,对齐上游 ignore_edge_thought_taps/edge_tap_ratio):
+    -- 缺省补默认;比例越界钳回 0.20(上游同款护栏 0.05-0.45 内取档)。
+    if preferences.edge_tap_ignore==nil then preferences.edge_tap_ignore=true end
+    local ratio=tonumber(preferences.edge_tap_ratio)
+    if ratio==nil or ratio<0.05 or ratio>0.45 then preferences.edge_tap_ratio=0.20 end
     return preferences
 end
 function Store:save_preferences(v)
@@ -411,6 +416,10 @@ function Store:save_preferences(v)
         preferences.annotation_style="default"
         preferences.annotations_visible=false
     end
+    -- 与 preferences() 同款护栏:保持读写两侧归一一致。
+    if preferences.edge_tap_ignore==nil then preferences.edge_tap_ignore=true end
+    local ratio=tonumber(preferences.edge_tap_ratio)
+    if ratio==nil or ratio<0.05 or ratio>0.45 then preferences.edge_tap_ratio=0.20 end
     self:set("preferences",preferences)
 end
 function Store:books_root() local p=self:preferences().download_dir; if p=="" then p=self.default_books_dir end; U.mkdir(p); return p end

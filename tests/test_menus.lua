@@ -240,41 +240,60 @@ T.case("想法弹窗设置:九项构成、三分区开关联动", function()
     T.eq(env.prefs.thoughts.comment_tap_open, true, "中间区域开评论可开启")
 end)
 
-T.case("划线样式菜单:开关+线条三项+文字四项(A4)", function()
+T.case("划线样式菜单:开关+边缘两项+线条三项+文字四项(A4+边缘设置)", function()
     local env = make_env()
     local rows = Menus.annotation_style_menu(env.plugin)
-    T.eq(#rows, 8, "划线样式菜单共 8 项(1 开关 + 3 线条 + 4 文字)")
+    T.eq(#rows, 10, "划线样式菜单共 10 项(1 开关 + 2 边缘 + 3 线条 + 4 文字)")
     -- CodeRabbit PR#34:动态文案必须挂 text_func(Menu.getMenuText 只调它)。
     T.eq(rows[1].text, nil, "开关行动态文案不挂在 text 上")
     T.eq(type(rows[1].text_func) == "function" and rows[1].text_func(),
         "划线与想法：显示", "首行为显示开关,默认显示态文案")
     T.ok(rows[1].checked_func(), "默认勾选显示")
-    T.eq(rows[2].text, "默认样式", "线条组第一项为默认样式")
-    T.ok(rows[2].checked_func(), "无历史偏好时线条默认样式勾选")
-    for i = 2, 4 do
+    -- 边缘点按设置(2026-10-25,对齐上游):开关行+比例行。
+    T.eq(rows[2].text, "忽略边缘点按（防翻页误触）", "边缘点按开关行文案")
+    T.ok(rows[2].checked_func(), "边缘点按默认开启(保持 A1 行为)")
+    T.eq(type(rows[3].text_func) == "function" and rows[3].text_func(),
+        "边缘忽略带宽度：20%（每侧）", "比例行默认显示 20%")
+    T.ok(rows[3].enabled_func(), "边缘开关开启时比例行可点")
+    T.eq(rows[4].text, "默认样式", "线条组第一项为默认样式")
+    T.ok(rows[4].checked_func(), "无历史偏好时线条默认样式勾选")
+    for i = 4, 6 do
         T.eq(rows[i].enabled_func(), true, "显示态线条项可点: " .. rows[i].text)
     end
-    T.eq(rows[5].text, "文字：跟随正文", "文字组第一项为跟随正文(Issue #23)")
-    T.eq(rows[6].text, "文字：加粗", "文字组第二项为加粗")
-    T.eq(rows[7].text, "文字：淡化", "文字组第三项为淡化")
-    T.eq(rows[8].text, "文字：斜体", "文字组第四项为斜体")
-    T.ok(rows[5].checked_func(), "无历史偏好时文字跟随正文勾选")
-    for i = 5, 8 do
+    T.eq(rows[7].text, "文字：跟随正文", "文字组第一项为跟随正文(Issue #23)")
+    T.eq(rows[8].text, "文字：加粗", "文字组第二项为加粗")
+    T.eq(rows[9].text, "文字：淡化", "文字组第三项为淡化")
+    T.eq(rows[10].text, "文字：斜体", "文字组第四项为斜体")
+    T.ok(rows[7].checked_func(), "无历史偏好时文字跟随正文勾选")
+    for i = 7, 10 do
         T.eq(rows[i].enabled_func(), true, "显示态文字项可点: " .. rows[i].text)
     end
-    rows[3].callback()
+    rows[5].callback()
     T.eq(env.prefs.annotation_style, "thin_solid", "选择细实线后写入偏好")
     T.eq(env.toasts[#env.toasts], "划线样式已切换为：细实线", "切换有提示")
-    rows[7].callback()
+    rows[9].callback()
     T.eq(env.prefs.annotation_text_style, "gray", "选择淡化后写入文字偏好")
     T.eq(env.toasts[#env.toasts], "划线文字已切换为：淡化", "文字切换有提示")
-    rows[8].callback()
+    rows[10].callback()
     T.eq(env.prefs.annotation_text_style, "italic", "选择斜体后写入偏好")
-    T.eq(rows[8].checked_func(), true, "文字勾选状态跟随偏好")
+    T.eq(rows[10].checked_func(), true, "文字勾选状态跟随偏好")
     -- F2 二轮(真机反馈 2026-09-13):斜体选择提示需字体支持(crengine 无伪斜体)。
     T.eq(env.toasts[#env.toasts],
         "划线文字已切换为：斜体（需字体支持，无斜体字形时显示不变）",
         "斜体切换提示字体支持")
+end)
+
+T.case("边缘点按设置:开关与比例存取(2026-10-25)", function()
+    local env = make_env()
+    local rows = Menus.annotation_style_menu(env.plugin)
+    rows[2].callback()
+    T.eq(env.prefs.edge_tap_ignore, false, "边缘开关关闭写入偏好")
+    T.ok(not rows[2].checked_func(), "关闭后不勾选")
+    T.eq(rows[3].enabled_func(), false, "关闭后比例行置灰")
+    rows[2].callback()
+    T.eq(env.prefs.edge_tap_ignore, true, "边缘开关重开写入偏好")
+    T.ok(rows[3].enabled_func(), "重开后比例行可点")
+    T.ok(rows[3].text_func():match("20%%"), "默认比例 20%")
 end)
 
 T.case("划线样式菜单:隐藏态锁线条组与文字组(A4,m00808)", function()
@@ -286,23 +305,23 @@ T.case("划线样式菜单:隐藏态锁线条组与文字组(A4,m00808)", functi
     T.eq(type(rows[1].text_func) == "function" and rows[1].text_func(),
         "划线与想法：隐藏（点按不再弹窗）", "隐藏态文案")
     T.ok(not rows[1].checked_func(), "隐藏态不勾选")
-    for i = 2, 4 do
+    for i = 4, 6 do
         T.eq(rows[i].enabled_func(), false, "隐藏态线条项置灰: " .. rows[i].text)
     end
-    for i = 5, 8 do
+    for i = 7, 10 do
         T.eq(rows[i].enabled_func(), false, "隐藏态文字项置灰: " .. rows[i].text)
     end
-    rows[7].callback()
+    rows[9].callback()
     T.eq(env.prefs.annotation_text_style, "gray", "隐藏态文字样式偏好仍可写(仅 UI 锁)")
     -- 切回显示
     rows[1].callback()
     T.eq(env.prefs.annotations_visible, true, "开关回调写回显示偏好")
     T.eq(type(rows[1].text_func) == "function" and rows[1].text_func(),
         "划线与想法：显示", "恢复显示态文案")
-    for i = 2, 4 do
+    for i = 4, 6 do
         T.eq(rows[i].enabled_func(), true, "恢复显示后线条组解锁")
     end
-    for i = 5, 8 do
+    for i = 7, 10 do
         T.eq(rows[i].enabled_func(), true, "恢复显示后文字组解锁")
     end
 end)
