@@ -426,6 +426,7 @@ end
 --- 边缘忽略带宽度选择(上游 menu.lua:1043 showEdgeTapRatioPicker 同款):
 --- 六档即选即存,当前档 ✓;档位沿用上游 0.10-0.40,护栏钳制在 store 侧。
 function M.show_edge_tap_ratio_picker(plugin, touchmenu_instance)
+    local picker_dialog
     local choices = {0.10, 0.15, 0.20, 0.25, 0.30, 0.40}
     local current = tonumber(plugin.store:preferences().edge_tap_ratio) or 0.20
     local buttons = {}
@@ -449,7 +450,6 @@ function M.show_edge_tap_ratio_picker(plugin, touchmenu_instance)
         text = "取消",
         callback = function() UIManager:close(picker_dialog) end,
     }})
-    local picker_dialog
     picker_dialog = ButtonDialog:new{
         title = "边缘忽略带宽度（每侧，屏宽百分比）",
         buttons = buttons,
