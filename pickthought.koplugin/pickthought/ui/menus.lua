@@ -265,6 +265,34 @@ function M.annotation_style_menu(plugin)
             plugin:toggle_annotation_visibility()
         end),
     }
+    -- 边缘点按设置(2026-10-25,对齐上游 menu.lua:530-570):真机反馈固定
+    -- 20% 忽略带吞掉贴边成语划线的点击,抄上游开关+比例选择器。
+    rows[#rows + 1] = {
+        text = "忽略边缘点按（防翻页误触）",
+        checked_func = function()
+            return plugin.store:preferences().edge_tap_ignore ~= false
+        end,
+        keep_menu_open = true,
+        callback = plugin:safe("toggle_edge_tap_ignore", function(touchmenu_instance)
+            local p = plugin.store:preferences()
+            p.edge_tap_ignore = p.edge_tap_ignore == false
+            plugin.store:save_preferences(p)
+            if touchmenu_instance then touchmenu_instance:updateItems() end
+        end),
+    }
+    rows[#rows + 1] = {
+        text_func = function()
+            local ratio = tonumber(plugin.store:preferences().edge_tap_ratio) or 0.20
+            return string.format("边缘忽略带宽度：%d%%（每侧）", math.floor(ratio * 100 + 0.5))
+        end,
+        enabled_func = function()
+            return plugin.store:preferences().edge_tap_ignore ~= false
+        end,
+        keep_menu_open = true,
+        callback = plugin:safe("pick_edge_tap_ratio", function(touchmenu_instance)
+            M.show_edge_tap_ratio_picker(plugin, touchmenu_instance)
+        end),
+    }
     local choices = {
         {"default", M.ANNOTATION_STYLE_LABELS.default},
         {"thin_solid", M.ANNOTATION_STYLE_LABELS.thin_solid},
@@ -393,6 +421,40 @@ function M.update_about_menu(plugin)
                 end
         end},
     }
+end
+
+--- 边缘忽略带宽度选择(上游 menu.lua:1043 showEdgeTapRatioPicker 同款):
+--- 六档即选即存,当前档 ✓;档位沿用上游 0.10-0.40,护栏钳制在 store 侧。
+function M.show_edge_tap_ratio_picker(plugin, touchmenu_instance)
+    local choices = {0.10, 0.15, 0.20, 0.25, 0.30, 0.40}
+    local current = tonumber(plugin.store:preferences().edge_tap_ratio) or 0.20
+    local buttons = {}
+    for _, ratio in ipairs(choices) do
+        local pct = math.floor(ratio * 100 + 0.5)
+        local label = string.format("%d%%", pct)
+        if math.abs(ratio - current) < 0.001 then label = label .. "  ✓" end
+        table.insert(buttons, {{
+            text = label,
+            callback = function()
+                UIManager:close(picker_dialog)
+                local p = plugin.store:preferences()
+                p.edge_tap_ratio = ratio
+                plugin.store:save_preferences(p)
+                plugin:toast(string.format("边缘忽略带宽度已设为 %d%%", pct))
+                if touchmenu_instance then touchmenu_instance:updateItems() end
+            end,
+        }})
+    end
+    table.insert(buttons, {{
+        text = "取消",
+        callback = function() UIManager:close(picker_dialog) end,
+    }})
+    local picker_dialog
+    picker_dialog = ButtonDialog:new{
+        title = "边缘忽略带宽度（每侧，屏宽百分比）",
+        buttons = buttons,
+    }
+    UIManager:show(picker_dialog)
 end
 
 return M
