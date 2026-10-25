@@ -86,7 +86,11 @@ def dedupe_key(text: str) -> str:
 
 def parse_subject(subject: str) -> Tuple[str | None, str | None]:
     subject = clean(subject)
-    match = re.match(r"^(perf|feat|fix|refactor|style)(?:\([^)]*\))?:\s*(.*)$", subject, re.I)
+    match = re.match(
+        r"^(perf|feat|fix|refactor|style|chore|ci|test|docs)(?:\([^)]*\))?:\s*(.*)$",
+        subject,
+        re.I,
+    )
     if match:
         kind = match.group(1).lower()
         description = NORMALIZED_TRANSLATIONS.get(subject, clean(match.group(2)))
@@ -151,6 +155,10 @@ def generate_release_notes(
                 kind, description = "feat", title
             if not description:
                 continue
+            # chore/ci/test/docs 类维护提交不进发布摘要(dependabot
+            # 机器人 PR 标题是英文 chore 前缀,会触发中文校验)。
+            if kind in ("chore", "ci", "test", "docs"):
+                continue
 
         if not re.search(r"[\u3400-\u9fff]", description):
             raise ReleaseNotesError(
@@ -163,8 +171,15 @@ def generate_release_notes(
         seen.add(key)
 
         prs, issues = _refs(subject, description)
-        manual_prs = set(prs)
+        # merge 提交的描述取自 PR 标题,标题里手写的 "(PR #N)" 已经
+        # 被算进 manual_prs;下面 discovered_prs 又会把同一个 PR 加回来,
+        # 导致尾部引用重复("...(PR #35)（PR #35）")。这里以标题手写
+        # 引用为准,发现到的 PR 只用于贡献者统计。
         discovered_prs = [pr_from_merge] if pr_from_merge else list(pull_fetcher(sha))
+        manual_prs = set(prs)
+        if pr_from_merge and manual_prs:
+            discovered_prs = [p for p in discovered_prs
+                              if int(p["number"]) not in manual_prs] or [pr_from_merge]
         if not pr_from_merge:
             commit_data = commit_fetcher(sha)
             commit_author = (commit_data.get("author") or {}).get("login")
