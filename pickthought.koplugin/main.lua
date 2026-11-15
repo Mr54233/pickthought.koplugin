@@ -2349,8 +2349,11 @@ function Plugin:_prefetch_visible_comment_counts(popup,book_id)
     local batch={}
     for _,it in ipairs(pending) do batch[#batch+1]=it.review_id end
     local child=function()
-        -- 子进程兜底同查看评论:异常穿透 runInSubProcess 会带着 fork 状态
-        -- 继续执行父进程代码(双 UI 循环),全 body pcall+无条件 _exit。
+        -- 子进程退出由 koreader-base 的 runInSubProcess 兜底:它把回调包在
+        -- 自带 xpcall 里、结束即调 ffi.C._exit(0),无需(也不能)在此手动
+        -- _exit——require("ffi") 返回的模块无 _exit 字段,旧写法每轮必抛
+        -- "attempt to call a nil value"噪音进 crash.log(2026-11-15 定位)。
+        -- 与 async.lua/sync_task.lua/power_inhibit.lua 的子进程用法对齐。
         local ok_child,results=pcall(function()
             local out={}
             for _,rid in ipairs(batch) do
@@ -2372,8 +2375,6 @@ function Plugin:_prefetch_visible_comment_counts(popup,book_id)
         if ok_json then
             U.atomic_write(result_path,encoded,true)
         end
-        local C=require("ffi")
-        C._exit(0)
     end
     local ok_pid,pid=pcall(FFIUtil.runInSubProcess,child,false,false)
     if not ok_pid or not pid then
@@ -2529,10 +2530,10 @@ function Plugin:_show_thought_comments(item,book_id,popup)
         local result_path=self.store.temp_dir.."/review-comments-"
             ..tostring(os.time()).."-"..tostring(math.random(100000,999999))..".json"
         local child=function()
-            -- 子进程兜底:cache_get 的 loader 自带 pcall,但 normalize/
-            -- sqlite 回写仍可能抛错——异常一旦穿透 runInSubProcess,子进程
-            -- 会继续执行父进程代码(双 UI 循环)。全 body pcall,无论成败
-            -- 都写结果文件并 _exit。
+            -- 子进程退出同预取路径:koreader-base runInSubProcess 自带
+            -- xpcall+ffi.C._exit(0) 兜底,旧写法 require("ffi")._exit(0)
+            -- 每次必抛 nil 调用错误(字段在 ffi.C,不在 ffi 模块),
+            -- 仅产生 crash.log 噪音,功能无损(2026-11-15 定位后移除)。
             local ok_child,result=pcall(function()
                 return ReviewComments.cache_get(cache,review_id,
                     function() return self:_request_review_comments(review_id) end,
@@ -2547,8 +2548,6 @@ function Plugin:_show_thought_comments(item,book_id,popup)
             if ok_json then
                 U.atomic_write(result_path,encoded,true)
             end
-            local C=require("ffi")
-            C._exit(0)
         end
         local ok_pid,pid=pcall(FFIUtil.runInSubProcess,child,false,false)
         if not ok_pid or not pid then
